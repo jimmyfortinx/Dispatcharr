@@ -34,6 +34,15 @@ class StalkerConnectionResult:
     used_authentication: bool
 
 
+@dataclass
+class StalkerGenreDiscoveryResult:
+    normalized_portal_url: str
+    profile_name: str
+    genres: list
+    token: str
+    used_authentication: bool
+
+
 class StalkerClient:
     def __init__(
         self,
@@ -128,10 +137,20 @@ class StalkerClient:
         return candidates
 
     def test_connection(self):
+        result = self.discover_live_genres()
+        return StalkerConnectionResult(
+            normalized_portal_url=result.normalized_portal_url,
+            profile_name=result.profile_name,
+            genre_count=len(result.genres),
+            token=result.token,
+            used_authentication=result.used_authentication,
+        )
+
+    def discover_live_genres(self):
         errors = []
         for candidate in self.normalize_portal_candidates(self.server_url):
             try:
-                return self._test_candidate(candidate)
+                return self._discover_candidate(candidate)
             except StalkerError as exc:
                 errors.append(f"{candidate}: {exc}")
                 logger.info("Stalker connection attempt failed for %s: %s", candidate, exc)
@@ -139,7 +158,7 @@ class StalkerClient:
         detail = errors[-1] if errors else "No portal endpoints could be tested."
         raise StalkerError(detail)
 
-    def _test_candidate(self, portal_url):
+    def _discover_candidate(self, portal_url):
         self.handshake(portal_url)
         used_authentication = False
         if self.username or self.password:
@@ -158,10 +177,10 @@ class StalkerClient:
         if not isinstance(genres, list):
             raise StalkerError("Portal returned an invalid genres response.")
 
-        return StalkerConnectionResult(
+        return StalkerGenreDiscoveryResult(
             normalized_portal_url=portal_url,
             profile_name=str(profile_name).strip() or self.mac,
-            genre_count=len(genres),
+            genres=genres,
             token=self.token,
             used_authentication=used_authentication,
         )

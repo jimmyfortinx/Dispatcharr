@@ -32,6 +32,7 @@ from asgiref.sync import async_to_sync
 from core.xtream_codes import Client as XCClient
 from core.utils import send_websocket_update
 from .utils import normalize_stream_url
+from .stalker import StalkerClient, StalkerError
 
 logger = logging.getLogger(__name__)
 
@@ -601,6 +602,7 @@ def process_groups(account, groups, scan_start_time=None):
 
     relations_to_create = []
     relations_to_update = []
+    provider_metadata_keys = ("xc_id", "stalker_genre_id")
 
     for group in all_group_objs:
         custom_props = groups.get(group.name, {})
@@ -612,31 +614,37 @@ def process_groups(account, groups, scan_start_time=None):
             # Get existing custom properties (now JSONB, no need to parse)
             existing_custom_props = existing_rel.custom_properties or {}
 
-            # Get the new xc_id from groups data
-            new_xc_id = custom_props.get("xc_id")
-            existing_xc_id = existing_custom_props.get("xc_id")
+            updated_custom_props = existing_custom_props.copy()
+            metadata_changed = False
+            for key in provider_metadata_keys:
+                new_value = custom_props.get(key)
+                existing_value = existing_custom_props.get(key)
+                if new_value != existing_value:
+                    metadata_changed = True
+                    if new_value is not None:
+                        updated_custom_props[key] = new_value
+                    elif key in updated_custom_props:
+                        del updated_custom_props[key]
 
-            # Only update if xc_id has changed
-            if new_xc_id != existing_xc_id:
-                # Merge new xc_id with existing custom properties to preserve user settings
-                updated_custom_props = existing_custom_props.copy()
-                if new_xc_id is not None:
-                    updated_custom_props["xc_id"] = new_xc_id
-                elif "xc_id" in updated_custom_props:
-                    # Remove xc_id if it's no longer provided (e.g., converting from XC to standard)
-                    del updated_custom_props["xc_id"]
-
+            if metadata_changed:
                 existing_rel.custom_properties = updated_custom_props
                 existing_rel.last_seen = scan_start_time
                 existing_rel.is_stale = False
                 relations_to_update.append(existing_rel)
-                logger.debug(f"Updated xc_id for group '{group.name}' from '{existing_xc_id}' to '{new_xc_id}' - account {account.id}")
+                logger.debug(
+                    "Updated provider metadata for group '%s' - account %s",
+                    group.name,
+                    account.id,
+                )
             else:
-                # Update last_seen even if xc_id hasn't changed
                 existing_rel.last_seen = scan_start_time
                 existing_rel.is_stale = False
                 relations_to_update.append(existing_rel)
-                logger.debug(f"xc_id unchanged for group '{group.name}' - account {account.id}")
+                logger.debug(
+                    "Provider metadata unchanged for group '%s' - account %s",
+                    group.name,
+                    account.id,
+                )
         else:
             # Create new relationship - this group is new to this M3U account
             # Use the auto_enable setting to determine if it should start enabled
@@ -1471,6 +1479,97 @@ def refresh_m3u_groups(account_id, use_cache=False, full_refresh=False, scan_sta
                 return error_msg, None
         except Exception as e:
             error_msg = f"Unexpected error occurred in XC Client: {str(e)}"
+            logger.error(error_msg)
+            account.status = M3UAccount.Status.ERROR
+            account.last_message = error_msg
+            account.save(update_fields=["status", "last_message"])
+            send_m3u_update(
+                account_id, "processing_groups", 100, status="error", error=error_msg
+            )
+            lock_renewer.stop()
+            release_task_lock("refresh_m3u_account_groups", account_id)
+            return error_msg, None
+    elif account.account_type == M3UAccount.Types.STALKER:
+        custom_props = account.custom_properties or {}
+        mac = custom_props.get("mac", "")
+        user_agent = None
+        if account.user_agent_id:
+            user_agent = account.user_agent.user_agent
+
+        if not account.server_url:
+            error_msg = "Missing portal URL for Stalker account"
+            logger.error(error_msg)
+            account.status = M3UAccount.Status.ERROR
+            account.last_message = error_msg
+            account.save(update_fields=["status", "last_message"])
+            send_m3u_update(
+                account_id, "processing_groups", 100, status="error", error=error_msg
+            )
+            lock_renewer.stop()
+            release_task_lock("refresh_m3u_account_groups", account_id)
+            return error_msg, None
+
+        if not mac:
+            error_msg = "Missing MAC address for Stalker account"
+            logger.error(error_msg)
+            account.status = M3UAccount.Status.ERROR
+            account.last_message = error_msg
+            account.save(update_fields=["status", "last_message"])
+            send_m3u_update(
+                account_id, "processing_groups", 100, status="error", error=error_msg
+            )
+            lock_renewer.stop()
+            release_task_lock("refresh_m3u_account_groups", account_id)
+            return error_msg, None
+
+        try:
+            client = StalkerClient(
+                server_url=account.server_url,
+                mac=mac,
+                username=account.username or "",
+                password=account.password or "",
+                user_agent=user_agent,
+                custom_properties=custom_props,
+            )
+            discovery = client.discover_live_genres()
+        except StalkerError as exc:
+            error_msg = f"Failed to get live groups from Stalker portal: {str(exc)}"
+            logger.error(error_msg)
+            account.status = M3UAccount.Status.ERROR
+            account.last_message = error_msg
+            account.save(update_fields=["status", "last_message"])
+            send_m3u_update(
+                account_id, "processing_groups", 100, status="error", error=error_msg
+            )
+            lock_renewer.stop()
+            release_task_lock("refresh_m3u_account_groups", account_id)
+            return error_msg, None
+
+        updated_props = dict(custom_props)
+        updated_props["token"] = discovery.token
+        account.custom_properties = updated_props
+        account.save(update_fields=["custom_properties"])
+
+        groups = {}
+        for genre in discovery.genres:
+            genre_id = genre.get("id")
+            genre_title = (
+                genre.get("title")
+                or genre.get("name")
+                or genre.get("alias")
+                or ""
+            )
+            genre_name = str(genre_title).strip()
+            if not genre_name:
+                fallback_id = str(genre_id).strip() if genre_id is not None else "unknown"
+                genre_name = f"Genre {fallback_id}"
+
+            groups[genre_name] = {
+                "stalker_genre_id": str(genre_id) if genre_id is not None else None,
+            }
+
+        if not groups:
+            error_msg = "Stalker portal returned no live TV groups."
             logger.error(error_msg)
             account.status = M3UAccount.Status.ERROR
             account.last_message = error_msg
@@ -2769,11 +2868,13 @@ def _refresh_single_m3u_account_impl(account_id):
             try:
                 account = M3UAccount.objects.get(id=account_id)
                 is_xc_account = account.account_type == M3UAccount.Types.XC
+                is_stalker_account = account.account_type == M3UAccount.Types.STALKER
             except M3UAccount.DoesNotExist:
                 is_xc_account = False
+                is_stalker_account = False
 
             # For XC accounts, empty extinf_data is normal at this stage
-            if not extinf_data and not is_xc_account:
+            if not extinf_data and not is_xc_account and not is_stalker_account:
                 logger.error(f"No streams found for non-XC account {account_id}")
                 account.status = M3UAccount.Status.ERROR
                 account.last_message = "No streams found in M3U source"
@@ -2799,11 +2900,13 @@ def _refresh_single_m3u_account_impl(account_id):
     # Get account type to handle XC accounts differently
     try:
         is_xc_account = account.account_type == M3UAccount.Types.XC
+        is_stalker_account = account.account_type == M3UAccount.Types.STALKER
     except Exception:
         is_xc_account = False
+        is_stalker_account = False
 
     # Modified validation logic for different account types
-    if (not groups) or (not is_xc_account and not extinf_data):
+    if (not groups) or (not is_xc_account and not is_stalker_account and not extinf_data):
         logger.error(f"No data to process for account {account_id}")
         account.status = M3UAccount.Status.ERROR
         account.last_message = "No data available for processing"
@@ -2816,6 +2919,24 @@ def _refresh_single_m3u_account_impl(account_id):
             error="No data available for processing",
         )
         return "Failed to update m3u account, no data available"
+
+    if is_stalker_account:
+        account.status = M3UAccount.Status.PENDING_SETUP
+        account.last_message = (
+            f"Discovered {len(groups)} Stalker live groups. "
+            "Open Groups to review categories before stream import is enabled."
+        )
+        account.updated_at = timezone.now()
+        account.save(update_fields=["status", "last_message", "updated_at"])
+        send_m3u_update(
+            account_id,
+            "processing_groups",
+            100,
+            status="pending_setup",
+            groups_processed=len(groups),
+            message=account.last_message,
+        )
+        return "Stalker group discovery complete."
 
     hash_keys = CoreSettings.get_m3u_hash_key().split(",")
 

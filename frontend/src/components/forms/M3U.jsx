@@ -679,31 +679,29 @@ const M3U = ({
             {playlist && (
               <>
                 {!isStalker && (
-                  <>
-                    <Button
-                      variant="filled"
-                      size="sm"
-                      onClick={() => setFilterModalOpen(true)}
-                    >
-                      Filters
-                    </Button>
-                    <Button
-                      variant="filled"
-                      size="sm"
-                      onClick={() => {
-                        if (
-                          m3uAccount?.account_type === 'XC' &&
-                          m3uAccount?.enable_vod
-                        ) {
-                          fetchCategories();
-                        }
-                        setGroupFilterModalOpen(true);
-                      }}
-                    >
-                      Groups
-                    </Button>
-                  </>
+                  <Button
+                    variant="filled"
+                    size="sm"
+                    onClick={() => setFilterModalOpen(true)}
+                  >
+                    Filters
+                  </Button>
                 )}
+                <Button
+                  variant="filled"
+                  size="sm"
+                  onClick={() => {
+                    if (
+                      m3uAccount?.account_type === 'XC' &&
+                      m3uAccount?.enable_vod
+                    ) {
+                      fetchCategories();
+                    }
+                    setGroupFilterModalOpen(true);
+                  }}
+                >
+                  Groups
+                </Button>
                 <Button
                   variant="filled"
                   size="sm"

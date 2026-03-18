@@ -119,9 +119,7 @@ const RowActions = ({
         size={iconSize}
         color="blue.5"
         onClick={() => refreshPlaylist(row.original.id)}
-        disabled={
-          !row.original.is_active || row.original.account_type === 'STALKER'
-        }
+        disabled={!row.original.is_active}
       >
         <RefreshCcw size={tableSize === 'compact' ? 16 : 18} />
       </ActionIcon>
