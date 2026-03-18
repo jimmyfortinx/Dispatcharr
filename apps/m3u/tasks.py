@@ -820,9 +820,6 @@ def collect_stalker_streams(account_id, enabled_groups):
     account = M3UAccount.objects.get(id=account_id)
     custom_props = account.custom_properties or {}
     mac = custom_props.get("mac", "")
-    user_agent = None
-    if account.user_agent_id:
-        user_agent = account.user_agent.user_agent
 
     enabled_genre_ids = {}
     for group_name, props in enabled_groups.items():
@@ -836,7 +833,6 @@ def collect_stalker_streams(account_id, enabled_groups):
         mac=mac,
         username=account.username or "",
         password=account.password or "",
-        user_agent=user_agent,
         custom_properties=custom_props,
     )
     discovery = client.discover_live_channels()
@@ -1687,10 +1683,6 @@ def refresh_m3u_groups(account_id, use_cache=False, full_refresh=False, scan_sta
     elif account.account_type == M3UAccount.Types.STALKER:
         custom_props = account.custom_properties or {}
         mac = custom_props.get("mac", "")
-        user_agent = None
-        if account.user_agent_id:
-            user_agent = account.user_agent.user_agent
-
         if not account.server_url:
             error_msg = "Missing portal URL for Stalker account"
             logger.error(error_msg)
@@ -1723,7 +1715,6 @@ def refresh_m3u_groups(account_id, use_cache=False, full_refresh=False, scan_sta
                 mac=mac,
                 username=account.username or "",
                 password=account.password or "",
-                user_agent=user_agent,
                 custom_properties=custom_props,
             )
             discovery = client.discover_live_genres()

@@ -3,7 +3,7 @@ import logging
 from dataclasses import dataclass
 from secrets import token_hex
 from posixpath import dirname, join
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import quote, quote_plus, urlparse, urlunparse
 
 import requests
 
@@ -258,16 +258,33 @@ class StalkerClient:
         )
 
     def handshake(self, portal_url):
-        payload = self._request(
-            "GET",
-            portal_url,
-            query={
-                "type": "stb",
-                "action": "handshake",
-                "token": self.token,
-                "JsHttpRequest": "1-xml",
-            },
-        )
+        headers = self._handshake_headers(portal_url)
+        try:
+            response = self.session.request(
+                "GET",
+                portal_url,
+                headers=headers,
+                params={
+                    "type": "stb",
+                    "action": "handshake",
+                    "token": self.token,
+                    "JsHttpRequest": "1-xml",
+                },
+                timeout=self.timeout,
+            )
+            response.raise_for_status()
+        except requests.RequestException as exc:
+            raise StalkerError(f"Request failed: {exc}") from exc
+
+        try:
+            payload = response.json()
+        except (json.JSONDecodeError, ValueError) as exc:
+            body = response.text.strip()[:200]
+            raise StalkerError(f"Invalid portal response: {body or 'empty body'}") from exc
+
+        if not isinstance(payload, dict):
+            raise StalkerError("Portal returned an unexpected response shape.")
+
         js = payload.get("js")
         if isinstance(js, dict) and js.get("token"):
             self.token = str(js["token"])
@@ -292,6 +309,34 @@ class StalkerClient:
         if payload.get("js") is not True:
             text = payload.get("text") or "Portal rejected the provided credentials."
             raise StalkerError(str(text))
+
+    def authenticate_with_device_ids(self, portal_url):
+        payload = self._request(
+            "GET",
+            portal_url,
+            query={
+                "type": "stb",
+                "action": "get_profile",
+                "hd": "1",
+                "sn": self.serial_number,
+                "stb_type": self.model,
+                "device_id": self.device_id,
+                "device_id2": self.device_id2,
+                "auth_second_step": "1",
+                "JsHttpRequest": "1-xml",
+            },
+            with_auth=True,
+        )
+        js = payload.get("js")
+        if not isinstance(js, dict):
+            raise StalkerError("Portal device authentication response was not recognized.")
+
+        profile_id = js.get("id")
+        if profile_id in (None, "", 0, "0"):
+            text = payload.get("text") or "Portal rejected the provided device identity."
+            raise StalkerError(str(text))
+
+        return js
 
     def get_profile(self, portal_url):
         payload = self._request(
@@ -332,6 +377,22 @@ class StalkerClient:
             raise StalkerError("Portal did not return any live TV genres.")
         return genres
 
+    def watchdog_update(self, portal_url):
+        payload = self._request(
+            "GET",
+            portal_url,
+            query={
+                "action": "get_events",
+                "event_active_id": "0",
+                "init": "0",
+                "type": "watchdog",
+                "cur_play_type": "1",
+                "JsHttpRequest": "1-xml",
+            },
+            with_auth=True,
+        )
+        return payload
+
     def get_all_channels(self, portal_url):
         payload = self._request(
             "GET",
@@ -356,6 +417,90 @@ class StalkerClient:
         if not isinstance(channels, list):
             raise StalkerError("Portal returned an invalid live channels response.")
         return channels
+
+    def prepare_playback_session(self, portal_url):
+        self.handshake(portal_url)
+        if self.username or self.password:
+            self.authenticate(portal_url)
+        else:
+            self.authenticate_with_device_ids(portal_url)
+        self.watchdog_update(portal_url)
+
+    def get_fresh_channel_cmd(self, portal_url, channel_metadata):
+        target_channel_id = str(
+            channel_metadata.get("stalker_channel_id")
+            or channel_metadata.get("id")
+            or ""
+        ).strip()
+        target_cmd_id = str(channel_metadata.get("cmd_id") or "").strip()
+        target_cmd_ch_id = str(channel_metadata.get("cmd_ch_id") or "").strip()
+
+        channels = self.get_all_channels(portal_url)
+        for channel in channels:
+            if not isinstance(channel, dict):
+                continue
+
+            channel_id = str(channel.get("id") or "").strip()
+            if target_channel_id and channel_id == target_channel_id:
+                fresh_cmd = str(channel.get("cmd") or "").strip()
+                if fresh_cmd:
+                    return fresh_cmd
+
+            cmds = channel.get("cmds")
+            if not isinstance(cmds, list):
+                continue
+
+            for cmd_entry in cmds:
+                if not isinstance(cmd_entry, dict):
+                    continue
+                cmd_id = str(cmd_entry.get("id") or "").strip()
+                cmd_ch_id = str(cmd_entry.get("ch_id") or "").strip()
+                if (
+                    target_cmd_id
+                    and target_cmd_ch_id
+                    and cmd_id == target_cmd_id
+                    and cmd_ch_id == target_cmd_ch_id
+                ):
+                    fresh_cmd = str(channel.get("cmd") or "").strip()
+                    if fresh_cmd:
+                        return fresh_cmd
+
+        return str(channel_metadata.get("cmd") or "").strip()
+
+    def create_link(self, portal_url, cmd):
+        normalized_cmd = str(cmd or "").strip()
+        if not normalized_cmd:
+            raise StalkerError("Stalker stream is missing the source command.")
+
+        # Match stalkerhek's use of Go's url.PathEscape for the cmd payload.
+        # That keeps reserved path-segment characters like ':' and '&' intact
+        # while still escaping spaces, '/', and '?'.
+        encoded_cmd = quote(
+            normalized_cmd,
+            safe="!$&'()*+,;=:@-._~",
+        )
+        request_url = (
+            f"{portal_url}?action=create_link&type=itv"
+            f"&cmd={encoded_cmd}"
+            f"&JsHttpRequest=1-xml"
+        )
+        payload = self._request("GET", request_url, with_auth=True)
+        resolved_url = self._extract_create_link_url(payload)
+        if "stream=&" in resolved_url or resolved_url.endswith("stream="):
+            logger.warning(
+                "Stalker create_link returned an unusable playback URL for portal %s: %s; payload=%s",
+                portal_url,
+                resolved_url,
+                payload,
+            )
+        return resolved_url
+
+    def resolve_playback_url(self, portal_url, channel_metadata):
+        self.prepare_playback_session(portal_url)
+        fresh_cmd = self.get_fresh_channel_cmd(portal_url, channel_metadata)
+        if not fresh_cmd:
+            raise StalkerError("Stalker stream is missing a usable live command.")
+        return self.create_link(portal_url, fresh_cmd)
 
     def _normalize_channel(self, channel, portal_url, genre_map):
         if not isinstance(channel, dict):
@@ -409,6 +554,21 @@ class StalkerClient:
             )
         )
 
+    def _extract_create_link_url(self, payload):
+        js = payload.get("js")
+        if not isinstance(js, dict):
+            raise StalkerError("Portal create_link response was not recognized.")
+
+        resolved_cmd = str(js.get("cmd") or "").strip()
+        if not resolved_cmd:
+            raise StalkerError("Portal returned an empty playback link.")
+
+        parts = resolved_cmd.split()
+        if not parts:
+            raise StalkerError("Portal returned an invalid playback link.")
+
+        return parts[-1]
+
     def _request(self, method, portal_url, query=None, data=None, with_auth=False):
         headers = self._headers(portal_url, with_auth=with_auth)
         request_kwargs = {
@@ -439,13 +599,6 @@ class StalkerClient:
     def _headers(self, portal_url, with_auth=False):
         parsed = urlparse(portal_url)
         origin = f"{parsed.scheme}://{parsed.netloc}"
-        cookie_parts = [
-            "PHPSESSID=null",
-            f"sn={self.serial_number}",
-            f"mac={self.mac}",
-            "stb_lang=en",
-            f"timezone={self.timezone}",
-        ]
         headers = {
             "User-Agent": self.user_agent,
             "X-User-Agent": f"Model: {self.model}; Link: Ethernet",
@@ -455,8 +608,36 @@ class StalkerClient:
             "Pragma": "no-cache",
             "Referer": f"{origin}/",
             "Origin": origin,
-            "Cookie": "; ".join(cookie_parts),
+            # Match stalkerhek's authenticated request cookie formatting.
+            "Cookie": (
+                "PHPSESSID=null; "
+                f"sn={quote_plus(self.serial_number)}; "
+                f"mac={quote_plus(self.mac)}; "
+                "stb_lang=en; "
+                f"timezone={quote_plus(self.timezone)};"
+            ),
         }
         if with_auth and self.token:
             headers["Authorization"] = f"Bearer {self.token}"
         return headers
+
+    def _handshake_headers(self, portal_url):
+        parsed = urlparse(portal_url)
+        origin = f"{parsed.scheme}://{parsed.netloc}"
+        return {
+            "User-Agent": self.user_agent,
+            "X-User-Agent": f"Model: {self.model}; Link: Ethernet",
+            "Accept": "*/*",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Cache-Control": "no-cache",
+            "Pragma": "no-cache",
+            "Referer": f"{origin}/",
+            "Origin": origin,
+            # Match stalkerhek's special-case handshake cookie formatting.
+            "Cookie": (
+                f"sn={self.serial_number}; "
+                f"mac={self.mac}; "
+                "stb_lang=en; "
+                f"timezone={self.timezone}"
+            ),
+        }

@@ -236,16 +236,12 @@ class M3UAccountViewSet(viewsets.ModelViewSet):
 
         custom_props = account.custom_properties or {}
         mac = custom_props.get("mac", "")
-        user_agent = None
-        if account.user_agent_id:
-            user_agent = account.user_agent.user_agent
 
         client = StalkerClient(
             server_url=account.server_url,
             mac=mac,
             username=account.username or "",
             password=account.password or "",
-            user_agent=user_agent,
             custom_properties=custom_props,
         )
 

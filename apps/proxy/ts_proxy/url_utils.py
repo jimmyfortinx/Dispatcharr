@@ -8,12 +8,53 @@ from typing import Optional, Tuple, List
 from django.shortcuts import get_object_or_404
 from apps.channels.models import Channel, Stream
 from apps.m3u.models import M3UAccount, M3UAccountProfile
+from apps.m3u.stalker import StalkerClient, StalkerError
 from core.models import UserAgent, CoreSettings, StreamProfile
 from .utils import get_logger
 from uuid import UUID
 import requests
 
 logger = get_logger()
+
+
+def resolve_live_stream_url(stream: Stream) -> str:
+    """
+    Resolve a playable upstream URL for a stream, taking provider-specific
+    behavior into account.
+    """
+    m3u_account = stream.m3u_account
+    if not m3u_account:
+        return stream.url
+
+    if m3u_account.account_type != M3UAccount.Types.STALKER:
+        return stream.url
+
+    custom_properties = stream.custom_properties or {}
+    account_properties = dict(m3u_account.custom_properties or {})
+    portal_url = (
+        custom_properties.get("portal_url")
+        or stream.url
+        or m3u_account.server_url
+    )
+    cmd = custom_properties.get("cmd")
+    if not portal_url or not cmd:
+        raise StalkerError("Stalker stream is missing portal metadata required for playback.")
+
+    client = StalkerClient(
+        server_url=m3u_account.server_url,
+        mac=account_properties.get("mac", ""),
+        username=m3u_account.username or "",
+        password=m3u_account.password or "",
+        custom_properties=account_properties,
+    )
+    resolved_url = client.resolve_playback_url(portal_url, custom_properties)
+
+    if client.token and account_properties.get("token") != client.token:
+        account_properties["token"] = client.token
+        m3u_account.custom_properties = account_properties
+        m3u_account.save(update_fields=["custom_properties"])
+
+    return resolved_url
 
 def get_stream_object(id: str):
     try:
@@ -63,7 +104,12 @@ def generate_stream_url(channel_id: str) -> Tuple[str, str, bool, Optional[int]]
                     stream_user_agent = UserAgent.objects.get(id=CoreSettings.get_default_user_agent_id())
                     logger.debug(f"No user agent found for account, using default: {stream_user_agent}")
 
-                stream_url = transform_url(stream.url, profile.search_pattern, profile.replace_pattern)
+                resolved_url = resolve_live_stream_url(stream)
+                stream_url = transform_url(
+                    resolved_url,
+                    profile.search_pattern,
+                    profile.replace_pattern,
+                )
 
                 stream_profile = stream.get_stream_profile()
                 logger.debug(f"Using stream profile: {stream_profile.name}")

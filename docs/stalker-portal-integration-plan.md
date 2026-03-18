@@ -116,7 +116,7 @@ Use `M3UAccount` with a new `account_type` of `STALKER`.
 - [x] Phase 2 implemented
 - [x] Phase 3 implemented
 - [x] Phase 4 implemented
-- [ ] Phase 5 implemented
+- [x] Phase 5 implemented
 - [ ] Phase 6 implemented
 - [ ] Phase 7 implemented
 - [ ] Phase 8 implemented
