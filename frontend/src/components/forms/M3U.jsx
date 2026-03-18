@@ -7,6 +7,7 @@ import {
   LoadingOverlay,
   TextInput,
   Button,
+  Alert,
   Checkbox,
   Modal,
   Flex,
@@ -20,6 +21,7 @@ import {
   Box,
   PasswordInput,
   Collapse,
+  Text,
 } from '@mantine/core';
 import M3UGroupFilter from './M3UGroupFilter';
 import useChannelsStore from '../../store/channels';
@@ -52,6 +54,7 @@ const M3U = ({
   const [showCredentialFields, setShowCredentialFields] = useState(false);
   const [scheduleType, setScheduleType] = useState('interval');
   const [showAdvancedDeviceFields, setShowAdvancedDeviceFields] = useState(false);
+  const [testingConnection, setTestingConnection] = useState(false);
 
   const form = useForm({
     mode: 'uncontrolled',
@@ -215,11 +218,14 @@ const M3U = ({
 
     let newPlaylist;
     if (playlist?.id) {
-      await API.updatePlaylist({
+      newPlaylist = await API.updatePlaylist({
         id: playlist.id,
         ...values,
         file,
       });
+      if (newPlaylist) {
+        setPlaylist(newPlaylist);
+      }
     } else {
       newPlaylist = await API.addPlaylist({
         ...values,
@@ -252,7 +258,9 @@ const M3U = ({
       }
 
       if (values.account_type === 'STALKER') {
-        close();
+        if (newPlaylist) {
+          setPlaylist(newPlaylist);
+        }
         return;
       }
 
@@ -279,6 +287,32 @@ const M3U = ({
     form.reset();
     setFile(null);
     onClose(newPlaylist);
+  };
+
+  const handleTestConnection = async () => {
+    if (!playlist?.id) {
+      notifications.show({
+        title: 'Save Required',
+        message: 'Save the Stalker account before testing the connection.',
+        color: 'yellow',
+      });
+      return;
+    }
+
+    setTestingConnection(true);
+    try {
+      const response = await API.testStalkerConnection(playlist.id);
+      if (response?.account) {
+        setPlaylist(response.account);
+      }
+      notifications.show({
+        title: 'Connection Successful',
+        message: response?.message || 'The Stalker portal connection succeeded.',
+        color: 'green',
+      });
+    } finally {
+      setTestingConnection(false);
+    }
   };
 
   const close = () => {
@@ -529,6 +563,15 @@ const M3U = ({
                       />
                     </Stack>
                   </Collapse>
+
+                  {playlist?.last_message && (
+                    <Alert
+                      color={playlist.status === 'error' ? 'red' : 'green'}
+                      variant="light"
+                    >
+                      <Text size="sm">{playlist.last_message}</Text>
+                    </Alert>
+                  )}
                 </Stack>
               )}
 
@@ -668,6 +711,17 @@ const M3U = ({
                 >
                   Profiles
                 </Button>
+                {isStalker && (
+                  <Button
+                    type="button"
+                    variant="light"
+                    size="sm"
+                    onClick={handleTestConnection}
+                    loading={testingConnection}
+                  >
+                    Test Connection
+                  </Button>
+                )}
               </>
             )}
 

@@ -1312,6 +1312,31 @@ export default class API {
     }
   }
 
+  static async testStalkerConnection(accountId) {
+    try {
+      const response = await request(
+        `${host}/api/m3u/accounts/${accountId}/test-connection/`,
+        {
+          method: 'POST',
+        }
+      );
+
+      if (response.account) {
+        usePlaylistsStore.getState().updatePlaylist(response.account);
+      }
+
+      return response;
+    } catch (e) {
+      if (accountId) {
+        const playlist = await API.getPlaylist(accountId);
+        if (playlist) {
+          usePlaylistsStore.getState().updatePlaylist(playlist);
+        }
+      }
+      errorNotification('Failed to test Stalker connection', e);
+    }
+  }
+
   static async getEPGs() {
     try {
       const response = await request(`${host}/api/epg/sources/`);
