@@ -814,6 +814,97 @@ def collect_xc_streams(account_id, enabled_groups):
     logger.info(f"Filtered {filtered_count} streams from {len(enabled_category_ids)} enabled categories")
     return all_streams
 
+
+def collect_stalker_streams(account_id, enabled_groups):
+    """Collect all Stalker live streams and filter them by enabled genres."""
+    account = M3UAccount.objects.get(id=account_id)
+    custom_props = account.custom_properties or {}
+    mac = custom_props.get("mac", "")
+    user_agent = None
+    if account.user_agent_id:
+        user_agent = account.user_agent.user_agent
+
+    enabled_genre_ids = {}
+    for group_name, props in enabled_groups.items():
+        genre_id = props.get("stalker_genre_id")
+        if genre_id is None:
+            continue
+        enabled_genre_ids[str(genre_id)] = group_name
+
+    client = StalkerClient(
+        server_url=account.server_url,
+        mac=mac,
+        username=account.username or "",
+        password=account.password or "",
+        user_agent=user_agent,
+        custom_properties=custom_props,
+    )
+    discovery = client.discover_live_channels()
+
+    updated_props = dict(custom_props)
+    updated_props["token"] = discovery.token
+    account.custom_properties = updated_props
+    account.save(update_fields=["custom_properties"])
+
+    all_streams = []
+    filtered_count = 0
+
+    for channel in discovery.channels:
+        genre_id = str(channel.get("genre_id") or "").strip()
+        if genre_id not in enabled_genre_ids:
+            continue
+
+        group_name = enabled_genre_ids[genre_id]
+        name = (
+            channel.get("name")
+            or channel.get("title")
+            or f"{account.name} - {channel.get('cmd_id') or channel.get('cmd') or 'Unknown'}"
+        )
+
+        attributes = {
+            "group-title": group_name,
+            "tvg-id": str(
+                channel.get("xmltv_id")
+                or channel.get("tvg_id")
+                or channel.get("epg_id")
+                or channel.get("id")
+                or ""
+            ),
+            "tvg-logo": str(channel.get("logo_url") or ""),
+            "stalker_channel_id": str(channel.get("id") or ""),
+            "cmd": str(channel.get("cmd") or ""),
+            "cmd_id": str(channel.get("cmd_id") or ""),
+            "cmd_ch_id": str(channel.get("cmd_ch_id") or ""),
+            "genre_id": genre_id,
+            "genre_name": str(channel.get("genre_name") or ""),
+            "portal_url": discovery.normalized_portal_url,
+            "provider_type": "stalker",
+        }
+
+        for key, value in channel.items():
+            if value is None:
+                continue
+            if isinstance(value, (dict, list)):
+                attributes[key] = value
+            else:
+                attributes[key] = str(value)
+
+        all_streams.append(
+            {
+                "name": str(name).strip() or f"Channel {filtered_count + 1}",
+                "url": discovery.normalized_portal_url,
+                "attributes": attributes,
+            }
+        )
+        filtered_count += 1
+
+    logger.info(
+        "Filtered %s Stalker streams from %s enabled genres",
+        filtered_count,
+        len(enabled_genre_ids),
+    )
+    return all_streams
+
 def process_xc_category_direct(account_id, batch, groups, hash_keys):
     from django.db import connections
 
@@ -1032,6 +1123,21 @@ def process_m3u_batch_direct(account_id, batch, groups, hash_keys):
     streams_to_update = []
     stream_hashes = {}
 
+    def build_stalker_identity(attributes):
+        stalker_channel_id = str(attributes.get("stalker_channel_id") or attributes.get("id") or "").strip()
+        if stalker_channel_id:
+            return stalker_channel_id
+
+        raw_cmd_id = attributes.get("cmd_id")
+        raw_cmd_ch_id = attributes.get("cmd_ch_id")
+        raw_cmd = attributes.get("cmd")
+        identity_parts = [
+            str(raw_cmd_id).strip() if raw_cmd_id not in (None, "") else "",
+            str(raw_cmd_ch_id).strip() if raw_cmd_ch_id not in (None, "") else "",
+            str(raw_cmd).strip() if raw_cmd not in (None, "") else "",
+        ]
+        return "|".join(part for part in identity_parts if part)
+
     logger.debug(f"Processing batch of {len(batch)} for M3U account {account_id}")
     if compiled_filters:
         logger.debug(f"Using compiled filters: {[f[1].regex_pattern for f in compiled_filters]}")
@@ -1082,6 +1188,7 @@ def process_m3u_batch_direct(account_id, batch, groups, hash_keys):
             provider_stream_id = None
             channel_num = None
             account_type_for_hash = None
+            provider_identity = None
 
             if account.account_type == M3UAccount.Types.XC:
                 account_type_for_hash = 'XC'
@@ -1091,12 +1198,31 @@ def process_m3u_batch_direct(account_id, batch, groups, hash_keys):
                         provider_stream_id = int(raw_stream_id)
                     except (ValueError, TypeError):
                         pass
+                    provider_identity = str(raw_stream_id)
                 raw_num = stream_info["attributes"].get("num")
                 if raw_num is not None:
                     try:
                         channel_num = float(raw_num)
                     except (ValueError, TypeError):
                         pass
+            elif account.account_type == M3UAccount.Types.STALKER:
+                account_type_for_hash = 'STALKER'
+                provider_identity = build_stalker_identity(stream_info["attributes"])
+
+                raw_stalker_channel_id = (
+                    stream_info["attributes"].get("stalker_channel_id")
+                    or stream_info["attributes"].get("id")
+                )
+                raw_cmd_id = stream_info["attributes"].get("cmd_id")
+                raw_cmd_ch_id = stream_info["attributes"].get("cmd_ch_id")
+                for raw_candidate in (raw_stalker_channel_id, raw_cmd_id, raw_cmd_ch_id):
+                    if raw_candidate in (None, ""):
+                        continue
+                    try:
+                        provider_stream_id = int(raw_candidate)
+                        break
+                    except (ValueError, TypeError):
+                        continue
             else:
                 # For standard M3U accounts, check for tvg-chno or channel-number
                 tvg_chno = get_case_insensitive_attr(stream_info["attributes"], "tvg-chno", None)
@@ -1111,7 +1237,8 @@ def process_m3u_batch_direct(account_id, batch, groups, hash_keys):
             # Generate hash once with all parameters
             stream_hash = Stream.generate_hash_key(
                 name, url, tvg_id, hash_keys, m3u_id=account_id, group=group_title,
-                account_type=account_type_for_hash, stream_id=provider_stream_id
+                account_type=account_type_for_hash, stream_id=provider_stream_id,
+                provider_identity=provider_identity,
             )
 
             stream_props = {
@@ -1141,6 +1268,36 @@ def process_m3u_batch_direct(account_id, batch, groups, hash_keys):
             'id', 'stream_hash', 'name', 'url', 'logo_url', 'tvg_id', 'custom_properties', 'last_seen', 'updated_at', 'm3u_account', 'stream_id', 'stream_chno'
         )
     }
+
+    legacy_stalker_streams = {}
+    stale_stalker_duplicates_to_delete = set()
+    if account.account_type == M3UAccount.Types.STALKER:
+        candidate_group_ids = {int(group_id) for group_id in groups.values() if group_id}
+        if candidate_group_ids:
+            stalker_existing = list(
+                Stream.objects.filter(
+                    m3u_account=account,
+                    channel_group_id__in=candidate_group_ids,
+                ).only(
+                    'id', 'stream_hash', 'name', 'url', 'logo_url', 'tvg_id',
+                    'custom_properties', 'last_seen', 'updated_at', 'm3u_account',
+                    'stream_id', 'stream_chno', 'is_stale'
+                )
+            )
+
+            for stream in sorted(
+                stalker_existing,
+                key=lambda s: (s.is_stale, -(s.last_seen.timestamp() if s.last_seen else 0), -(s.id or 0)),
+            ):
+                custom_props = stream.custom_properties or {}
+                legacy_identity = build_stalker_identity(custom_props)
+                if not legacy_identity:
+                    continue
+
+                if legacy_identity not in legacy_stalker_streams:
+                    legacy_stalker_streams[legacy_identity] = stream
+                elif stream.is_stale:
+                    stale_stalker_duplicates_to_delete.add(stream.id)
 
     for stream_hash, stream_props in stream_hashes.items():
         if stream_hash in existing_streams:
@@ -1177,6 +1334,41 @@ def process_m3u_batch_direct(account_id, batch, groups, hash_keys):
 
             streams_to_update.append(obj)
         else:
+            obj = None
+            if account.account_type == M3UAccount.Types.STALKER:
+                legacy_identity = build_stalker_identity(stream_props["custom_properties"] or {})
+                obj = legacy_stalker_streams.get(legacy_identity)
+
+            if obj is not None:
+                changed = (
+                    obj.name != stream_props["name"] or
+                    obj.url != stream_props["url"] or
+                    obj.logo_url != stream_props["logo_url"] or
+                    obj.tvg_id != stream_props["tvg_id"] or
+                    obj.custom_properties != stream_props["custom_properties"] or
+                    obj.is_adult != stream_props["is_adult"] or
+                    obj.stream_id != stream_props["stream_id"] or
+                    obj.stream_chno != stream_props["stream_chno"] or
+                    obj.stream_hash != stream_props["stream_hash"]
+                )
+
+                obj.last_seen = timezone.now()
+                if changed:
+                    obj.name = stream_props["name"]
+                    obj.url = stream_props["url"]
+                    obj.logo_url = stream_props["logo_url"]
+                    obj.tvg_id = stream_props["tvg_id"]
+                    obj.custom_properties = stream_props["custom_properties"]
+                    obj.is_adult = stream_props["is_adult"]
+                    obj.stream_id = stream_props["stream_id"]
+                    obj.stream_chno = stream_props["stream_chno"]
+                    obj.stream_hash = stream_props["stream_hash"]
+                    obj.updated_at = timezone.now()
+
+                obj.is_stale = False
+                streams_to_update.append(obj)
+                continue
+
             # New stream
             stream_props["last_seen"] = timezone.now()
             stream_props["updated_at"] = timezone.now()
@@ -1192,9 +1384,12 @@ def process_m3u_batch_direct(account_id, batch, groups, hash_keys):
                 # Update all streams in a single bulk operation
                 Stream.objects.bulk_update(
                     streams_to_update,
-                    ['name', 'url', 'logo_url', 'tvg_id', 'custom_properties', 'is_adult', 'last_seen', 'updated_at', 'is_stale', 'stream_id', 'stream_chno'],
+                    ['name', 'url', 'logo_url', 'tvg_id', 'custom_properties', 'is_adult', 'last_seen', 'updated_at', 'is_stale', 'stream_id', 'stream_chno', 'stream_hash'],
                     batch_size=200
                 )
+
+            if stale_stalker_duplicates_to_delete:
+                Stream.objects.filter(id__in=stale_stalker_duplicates_to_delete, is_stale=True).delete()
     except Exception as e:
         logger.error(f"Bulk operation failed: {str(e)}")
 
@@ -2920,24 +3115,6 @@ def _refresh_single_m3u_account_impl(account_id):
         )
         return "Failed to update m3u account, no data available"
 
-    if is_stalker_account:
-        account.status = M3UAccount.Status.PENDING_SETUP
-        account.last_message = (
-            f"Discovered {len(groups)} Stalker live groups. "
-            "Open Groups to review categories before stream import is enabled."
-        )
-        account.updated_at = timezone.now()
-        account.save(update_fields=["status", "last_message", "updated_at"])
-        send_m3u_update(
-            account_id,
-            "processing_groups",
-            100,
-            status="pending_setup",
-            groups_processed=len(groups),
-            message=account.last_message,
-        )
-        return "Stalker group discovery complete."
-
     hash_keys = CoreSettings.get_m3u_hash_key().split(",")
 
     existing_groups = {
@@ -3033,7 +3210,7 @@ def _refresh_single_m3u_account_impl(account_id):
                         completed_batches += 1  # Still count it to avoid hanging
 
             logger.info(f"Thread-based processing completed for account {account_id}")
-        else:
+        elif account.account_type == M3UAccount.Types.XC:
             # For XC accounts, get the groups with their custom properties containing xc_id
             logger.debug(f"Processing XC account with groups: {existing_groups}")
 
@@ -3144,6 +3321,109 @@ def _refresh_single_m3u_account_impl(account_id):
                             completed_batches += 1  # Still count it to avoid hanging
 
                 logger.info(f"XC thread-based processing completed for account {account_id}")
+        else:
+            logger.debug(f"Processing Stalker account with groups: {existing_groups}")
+
+            channel_group_relationships = ChannelGroupM3UAccount.objects.filter(
+                m3u_account=account, enabled=True
+            ).select_related("channel_group")
+
+            filtered_groups = {}
+            for rel in channel_group_relationships:
+                group_name = rel.channel_group.name
+                custom_props = rel.custom_properties or {}
+                if "stalker_genre_id" in custom_props:
+                    filtered_groups[group_name] = {
+                        "stalker_genre_id": str(custom_props["stalker_genre_id"]),
+                        "channel_group_id": rel.channel_group.id,
+                    }
+                else:
+                    logger.warning(
+                        "No stalker_genre_id found in custom properties for group %s",
+                        group_name,
+                    )
+
+            logger.info(
+                "Filtered %s Stalker groups for processing: %s",
+                len(filtered_groups),
+                filtered_groups,
+            )
+
+            all_stalker_streams = collect_stalker_streams(account_id, filtered_groups)
+
+            if not all_stalker_streams:
+                logger.warning("No streams collected from Stalker groups")
+            else:
+                batches = [
+                    all_stalker_streams[i: i + BATCH_SIZE]
+                    for i in range(0, len(all_stalker_streams), BATCH_SIZE)
+                ]
+
+                logger.info(
+                    "Processing %s Stalker streams in %s batches",
+                    len(all_stalker_streams),
+                    len(batches),
+                )
+
+                del all_stalker_streams
+
+                max_workers = min(4, len(batches))
+                logger.debug("Using %s threads for Stalker stream processing", max_workers)
+
+                with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    future_to_batch = {
+                        executor.submit(
+                            process_m3u_batch_direct,
+                            account_id,
+                            batch,
+                            existing_groups,
+                            hash_keys,
+                        ): i
+                        for i, batch in enumerate(batches)
+                    }
+
+                    completed_batches = 0
+                    total_batches = len(batches)
+
+                    for future in as_completed(future_to_batch):
+                        batch_idx = future_to_batch[future]
+                        try:
+                            result = future.result()
+                            completed_batches += 1
+
+                            if isinstance(result, str):
+                                try:
+                                    created_match = re.search(r"(\d+) created", result)
+                                    updated_match = re.search(r"(\d+) updated", result)
+                                    if created_match and updated_match:
+                                        streams_created += int(created_match.group(1))
+                                        streams_updated += int(updated_match.group(1))
+                                except (AttributeError, ValueError):
+                                    pass
+
+                            progress = int((completed_batches / total_batches) * 100)
+                            current_elapsed = time.time() - start_time
+                            if progress > 0:
+                                estimated_total = (current_elapsed / progress) * 100
+                                time_remaining = max(0, estimated_total - current_elapsed)
+                            else:
+                                time_remaining = 0
+
+                            send_m3u_update(
+                                account_id,
+                                "parsing",
+                                progress,
+                                elapsed_time=current_elapsed,
+                                time_remaining=time_remaining,
+                                streams_processed=streams_created + streams_updated,
+                            )
+                        except Exception as e:
+                            logger.error(
+                                "Error in Stalker thread batch %s: %s",
+                                batch_idx,
+                                str(e),
+                            )
+                            completed_batches += 1
 
         # Ensure all database transactions are committed before cleanup
         logger.info(

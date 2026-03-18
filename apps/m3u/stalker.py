@@ -2,6 +2,7 @@ import json
 import logging
 from dataclasses import dataclass
 from secrets import token_hex
+from posixpath import dirname, join
 from urllib.parse import urlparse, urlunparse
 
 import requests
@@ -39,6 +40,16 @@ class StalkerGenreDiscoveryResult:
     normalized_portal_url: str
     profile_name: str
     genres: list
+    token: str
+    used_authentication: bool
+
+
+@dataclass
+class StalkerChannelDiscoveryResult:
+    normalized_portal_url: str
+    profile_name: str
+    genres: list
+    channels: list
     token: str
     used_authentication: bool
 
@@ -158,6 +169,22 @@ class StalkerClient:
         detail = errors[-1] if errors else "No portal endpoints could be tested."
         raise StalkerError(detail)
 
+    def discover_live_channels(self):
+        errors = []
+        for candidate in self.normalize_portal_candidates(self.server_url):
+            try:
+                return self._discover_channels_candidate(candidate)
+            except StalkerError as exc:
+                errors.append(f"{candidate}: {exc}")
+                logger.info(
+                    "Stalker channel discovery attempt failed for %s: %s",
+                    candidate,
+                    exc,
+                )
+
+        detail = errors[-1] if errors else "No portal endpoints could be tested."
+        raise StalkerError(detail)
+
     def _discover_candidate(self, portal_url):
         self.handshake(portal_url)
         used_authentication = False
@@ -181,6 +208,51 @@ class StalkerClient:
             normalized_portal_url=portal_url,
             profile_name=str(profile_name).strip() or self.mac,
             genres=genres,
+            token=self.token,
+            used_authentication=used_authentication,
+        )
+
+    def _discover_channels_candidate(self, portal_url):
+        self.handshake(portal_url)
+        used_authentication = False
+        if self.username or self.password:
+            self.authenticate(portal_url)
+            used_authentication = True
+
+        profile = self.get_profile(portal_url)
+        genres = self.get_genres(portal_url)
+        channels = self.get_all_channels(portal_url)
+
+        profile_name = (
+            profile.get("name")
+            or profile.get("fname")
+            or profile.get("login")
+            or self.username
+            or self.mac
+        )
+        if not isinstance(genres, list):
+            raise StalkerError("Portal returned an invalid genres response.")
+        if not isinstance(channels, list):
+            raise StalkerError("Portal returned an invalid channels response.")
+
+        genre_map = {}
+        for genre in genres:
+            genre_id = genre.get("id")
+            if genre_id is None:
+                continue
+            genre_title = genre.get("title") or genre.get("name") or genre.get("alias") or ""
+            genre_map[str(genre_id)] = str(genre_title).strip()
+
+        normalized_channels = [
+            self._normalize_channel(channel, portal_url, genre_map)
+            for channel in channels
+        ]
+
+        return StalkerChannelDiscoveryResult(
+            normalized_portal_url=portal_url,
+            profile_name=str(profile_name).strip() or self.mac,
+            genres=genres,
+            channels=normalized_channels,
             token=self.token,
             used_authentication=used_authentication,
         )
@@ -259,6 +331,83 @@ class StalkerClient:
         if genres is None:
             raise StalkerError("Portal did not return any live TV genres.")
         return genres
+
+    def get_all_channels(self, portal_url):
+        payload = self._request(
+            "GET",
+            portal_url,
+            query={
+                "type": "itv",
+                "action": "get_all_channels",
+                "JsHttpRequest": "1-xml",
+            },
+            with_auth=True,
+        )
+        js = payload.get("js")
+        if isinstance(js, dict):
+            channels = js.get("data")
+        elif isinstance(js, list):
+            channels = js
+        else:
+            raise StalkerError("Portal channels response was not recognized.")
+
+        if channels is None:
+            raise StalkerError("Portal did not return any live channels.")
+        if not isinstance(channels, list):
+            raise StalkerError("Portal returned an invalid live channels response.")
+        return channels
+
+    def _normalize_channel(self, channel, portal_url, genre_map):
+        if not isinstance(channel, dict):
+            raise StalkerError("Portal returned an invalid channel item.")
+
+        normalized = dict(channel)
+        raw_genre_id = (
+            channel.get("tv_genre_id")
+            or channel.get("genre_id")
+            or channel.get("category_id")
+        )
+        genre_id = str(raw_genre_id).strip() if raw_genre_id is not None else ""
+
+        cmds = channel.get("cmds")
+        if isinstance(cmds, list) and cmds:
+            primary_cmd = cmds[0] if isinstance(cmds[0], dict) else {}
+            normalized.setdefault("cmd_id", primary_cmd.get("id"))
+            normalized.setdefault("cmd_ch_id", primary_cmd.get("ch_id"))
+
+        normalized["genre_id"] = genre_id
+        normalized["genre_name"] = genre_map.get(genre_id, "")
+
+        logo = channel.get("logo") or channel.get("logo_link") or ""
+        if logo:
+            normalized["logo_url"] = self._logo_url(portal_url, str(logo).strip())
+
+        return normalized
+
+    def _logo_url(self, portal_url, logo_path):
+        if not logo_path:
+            return ""
+        parsed_logo = urlparse(logo_path)
+        if parsed_logo.scheme and parsed_logo.netloc:
+            return logo_path
+
+        parsed_portal = urlparse(portal_url)
+        portal_path = parsed_portal.path or "/"
+        if portal_path.endswith("/server/load.php"):
+            base_path = portal_path[: -len("/server/load.php")] or "/"
+        elif portal_path.endswith("/portal.php"):
+            base_path = portal_path[: -len("/portal.php")] or "/"
+        else:
+            base_path = dirname(portal_path)
+        normalized_path = join(base_path, "misc", "logos", "320", logo_path.lstrip("/"))
+        return urlunparse(
+            parsed_portal._replace(
+                path=normalized_path,
+                params="",
+                query="",
+                fragment="",
+            )
+        )
 
     def _request(self, method, portal_url, query=None, data=None, with_auth=False):
         headers = self._headers(portal_url, with_auth=with_auth)
