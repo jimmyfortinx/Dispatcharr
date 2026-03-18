@@ -111,9 +111,9 @@ Use `M3UAccount` with a new `account_type` of `STALKER`.
 ## Status
 
 - [x] Planning complete
-- [ ] Phase 0 implemented
-- [ ] Phase 1 implemented
-- [ ] Phase 2 implemented
+- [x] Phase 0 implemented
+- [x] Phase 1 implemented
+- [x] Phase 2 implemented
 - [ ] Phase 3 implemented
 - [ ] Phase 4 implemented
 - [ ] Phase 5 implemented
@@ -377,7 +377,7 @@ Make normal channel playback use the Stalker resolver, including manual stream s
   - `generate_stream_url()`
   - `get_stream_info_for_switch()`
   - TS proxy switching paths
-  use the provider-aware resolver for Stalker
+    use the provider-aware resolver for Stalker
 
 #### Frontend work
 

@@ -327,9 +327,43 @@ class M3UAccountViewSet(viewsets.ModelViewSet):
         account = self.get_object()
         group_settings = request.data.get("group_settings", [])
         category_settings = request.data.get("category_settings", [])
+        provider_metadata_keys = ("xc_id", "stalker_genre_id")
 
         try:
             with transaction.atomic():
+                group_ids = [
+                    setting["channel_group"]
+                    for setting in group_settings
+                    if setting.get("channel_group")
+                ]
+                existing_group_relations = {
+                    relation.channel_group_id: relation
+                    for relation in ChannelGroupM3UAccount.objects.filter(
+                        m3u_account=account,
+                        channel_group_id__in=group_ids,
+                    )
+                }
+
+                def merge_group_custom_properties(setting):
+                    incoming = setting.get("custom_properties")
+                    if incoming is None:
+                        incoming = {}
+
+                    existing_relation = existing_group_relations.get(
+                        setting["channel_group"]
+                    )
+                    if existing_relation is None:
+                        return incoming
+
+                    existing = existing_relation.custom_properties or {}
+                    merged = dict(incoming)
+
+                    for key in provider_metadata_keys:
+                        if key not in merged and key in existing:
+                            merged[key] = existing[key]
+
+                    return merged
+
                 group_objects = [
                     ChannelGroupM3UAccount(
                         channel_group_id=setting["channel_group"],
@@ -337,7 +371,7 @@ class M3UAccountViewSet(viewsets.ModelViewSet):
                         enabled=setting.get("enabled", True),
                         auto_channel_sync=setting.get("auto_channel_sync", False),
                         auto_sync_channel_start=setting.get("auto_sync_channel_start"),
-                        custom_properties=setting.get("custom_properties", {}),
+                        custom_properties=merge_group_custom_properties(setting),
                     )
                     for setting in group_settings
                     if setting.get("channel_group")
