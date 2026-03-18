@@ -149,6 +149,13 @@ class M3UAccountSerializer(serializers.ModelSerializer):
     auto_enable_new_groups_vod = serializers.BooleanField(required=False, write_only=True)
     auto_enable_new_groups_series = serializers.BooleanField(required=False, write_only=True)
     cron_expression = serializers.CharField(required=False, allow_blank=True, default="")
+    mac = serializers.CharField(required=False, allow_blank=True)
+    model = serializers.CharField(required=False, allow_blank=True)
+    serial_number = serializers.CharField(required=False, allow_blank=True)
+    device_id = serializers.CharField(required=False, allow_blank=True)
+    device_id2 = serializers.CharField(required=False, allow_blank=True)
+    signature = serializers.CharField(required=False, allow_blank=True)
+    timezone = serializers.CharField(required=False, allow_blank=True)
 
     class Meta:
         model = M3UAccount
@@ -184,6 +191,13 @@ class M3UAccountSerializer(serializers.ModelSerializer):
             "earliest_expiration",
             "all_expirations",
             "exp_date",
+            "mac",
+            "model",
+            "serial_number",
+            "device_id",
+            "device_id2",
+            "signature",
+            "timezone",
         ]
         extra_kwargs = {
             "password": {
@@ -224,7 +238,67 @@ class M3UAccountSerializer(serializers.ModelSerializer):
         else:
             data["exp_date"] = None
 
+        for key in (
+            "mac",
+            "model",
+            "serial_number",
+            "device_id",
+            "device_id2",
+            "signature",
+            "timezone",
+        ):
+            data[key] = custom_props.get(key, "") or ""
+
         return data
+
+    def validate(self, attrs):
+        account_type = attrs.get(
+            "account_type",
+            getattr(self.instance, "account_type", M3UAccount.Types.STADNARD),
+        )
+        server_url = attrs.get("server_url", getattr(self.instance, "server_url", None))
+        file_path = attrs.get("file_path", getattr(self.instance, "file_path", None))
+        username = attrs.get("username", getattr(self.instance, "username", None))
+        password = attrs.get("password", getattr(self.instance, "password", None))
+        existing_props = getattr(self.instance, "custom_properties", None) or {}
+        mac = attrs.get("mac")
+        if mac is None:
+            mac = existing_props.get("mac", "")
+
+        if account_type == M3UAccount.Types.STADNARD and not (server_url or file_path):
+            raise serializers.ValidationError(
+                {
+                    "server_url": [
+                        "Standard accounts require a playlist URL or uploaded file."
+                    ]
+                }
+            )
+
+        if account_type == M3UAccount.Types.XC:
+            errors = {}
+            if not server_url:
+                errors["server_url"] = ["Xtream Codes accounts require a server URL."]
+            if not username:
+                errors["username"] = ["Xtream Codes accounts require a username."]
+            if not password:
+                errors["password"] = ["Xtream Codes accounts require a password."]
+            if errors:
+                raise serializers.ValidationError(errors)
+
+        if account_type == M3UAccount.Types.STALKER:
+            errors = {}
+            if not server_url:
+                errors["server_url"] = ["Stalker accounts require a portal URL."]
+            if not mac:
+                errors["mac"] = ["Stalker accounts require a MAC address."]
+            if file_path:
+                errors["file_path"] = [
+                    "Stalker accounts do not support uploaded playlist files."
+                ]
+            if errors:
+                raise serializers.ValidationError(errors)
+
+        return attrs
 
     def update(self, instance, validated_data):
         # Pop exp_date — it's written to the default profile, not the account
@@ -246,6 +320,19 @@ class M3UAccountSerializer(serializers.ModelSerializer):
         auto_enable_new_groups_live = validated_data.pop("auto_enable_new_groups_live", None)
         auto_enable_new_groups_vod = validated_data.pop("auto_enable_new_groups_vod", None)
         auto_enable_new_groups_series = validated_data.pop("auto_enable_new_groups_series", None)
+        stalker_fields = {
+            key: validated_data.pop(key)
+            for key in (
+                "mac",
+                "model",
+                "serial_number",
+                "device_id",
+                "device_id2",
+                "signature",
+                "timezone",
+            )
+            if key in validated_data
+        }
 
         # Get existing custom_properties
         custom_props = instance.custom_properties or {}
@@ -259,6 +346,11 @@ class M3UAccountSerializer(serializers.ModelSerializer):
             custom_props["auto_enable_new_groups_vod"] = auto_enable_new_groups_vod
         if auto_enable_new_groups_series is not None:
             custom_props["auto_enable_new_groups_series"] = auto_enable_new_groups_series
+        for key, value in stalker_fields.items():
+            if value in (None, ""):
+                custom_props.pop(key, None)
+            else:
+                custom_props[key] = value
 
         validated_data["custom_properties"] = custom_props
 
@@ -319,6 +411,19 @@ class M3UAccountSerializer(serializers.ModelSerializer):
         auto_enable_new_groups_live = validated_data.pop("auto_enable_new_groups_live", True)
         auto_enable_new_groups_vod = validated_data.pop("auto_enable_new_groups_vod", True)
         auto_enable_new_groups_series = validated_data.pop("auto_enable_new_groups_series", True)
+        stalker_fields = {
+            key: validated_data.pop(key)
+            for key in (
+                "mac",
+                "model",
+                "serial_number",
+                "device_id",
+                "device_id2",
+                "signature",
+                "timezone",
+            )
+            if key in validated_data
+        }
 
         # Parse existing custom_properties or create new
         custom_props = validated_data.get("custom_properties", {})
@@ -328,6 +433,9 @@ class M3UAccountSerializer(serializers.ModelSerializer):
         custom_props["auto_enable_new_groups_live"] = auto_enable_new_groups_live
         custom_props["auto_enable_new_groups_vod"] = auto_enable_new_groups_vod
         custom_props["auto_enable_new_groups_series"] = auto_enable_new_groups_series
+        for key, value in stalker_fields.items():
+            if value not in (None, ""):
+                custom_props[key] = value
         validated_data["custom_properties"] = custom_props
 
         # Build instance manually so we can attach transient attr before save triggers signal

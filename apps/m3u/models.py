@@ -15,6 +15,7 @@ class M3UAccount(models.Model):
     class Types(models.TextChoices):
         STADNARD = "STD", "Standard"
         XC = "XC", "Xtream Codes"
+        STALKER = "STALKER", "Stalker"
 
     class Status(models.TextChoices):
         IDLE = "idle", "Idle"
@@ -84,7 +85,9 @@ class M3UAccount(models.Model):
         blank=True,
         related_name="m3u_accounts",
     )
-    account_type = models.CharField(choices=Types.choices, default=Types.STADNARD)
+    account_type = models.CharField(
+        max_length=20, choices=Types.choices, default=Types.STADNARD
+    )
     username = models.CharField(max_length=255, null=True, blank=True)
     password = models.CharField(max_length=255, null=True, blank=True)
     custom_properties = models.JSONField(default=dict, blank=True, null=True)

@@ -119,7 +119,9 @@ const RowActions = ({
         size={iconSize}
         color="blue.5"
         onClick={() => refreshPlaylist(row.original.id)}
-        disabled={!row.original.is_active}
+        disabled={
+          !row.original.is_active || row.original.account_type === 'STALKER'
+        }
       >
         <RefreshCcw size={tableSize === 'compact' ? 16 : 18} />
       </ActionIcon>
@@ -454,7 +456,9 @@ const M3UTable = () => {
         size: 100,
         cell: ({ cell }) => {
           const value = cell.getValue();
-          return value === 'XC' ? 'XC' : 'M3U';
+          if (value === 'XC') return 'XC';
+          if (value === 'STALKER') return 'Stalker';
+          return 'M3U';
         },
       },
       {
@@ -984,8 +988,8 @@ const M3UTable = () => {
               {`Are you sure you want to delete the following M3U account?
 
 Name: ${playlistToDelete.name}
-Type: ${playlistToDelete.account_type === 'XC' ? 'Xtream Codes' : 'Standard'}
-Server: ${playlistToDelete.server_url || 'Local file'}
+Type: ${playlistToDelete.account_type === 'XC' ? 'Xtream Codes' : playlistToDelete.account_type === 'STALKER' ? 'Stalker' : 'Standard'}
+Server: ${playlistToDelete.server_url || (playlistToDelete.account_type === 'STALKER' ? 'Portal URL not set' : 'Local file')}
 
 This will remove all related streams and may affect channels using these streams.
 This action cannot be undone.`}

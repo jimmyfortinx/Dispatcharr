@@ -12,7 +12,6 @@ import {
   Flex,
   Select,
   FileInput,
-  useMantineTheme,
   NumberInput,
   Divider,
   Stack,
@@ -20,6 +19,7 @@ import {
   Switch,
   Box,
   PasswordInput,
+  Collapse,
 } from '@mantine/core';
 import M3UGroupFilter from './M3UGroupFilter';
 import useChannelsStore from '../../store/channels';
@@ -37,8 +37,6 @@ const M3U = ({
   onClose,
   playlistCreated = false,
 }) => {
-  const theme = useMantineTheme();
-
   const userAgents = useUserAgentsStore((s) => s.userAgents);
   const fetchChannelGroups = useChannelsStore((s) => s.fetchChannelGroups);
   const fetchEPGs = useEPGsStore((s) => s.fetchEPGs);
@@ -50,9 +48,10 @@ const M3U = ({
   const [profileModalOpen, setProfileModalOpen] = useState(false);
   const [groupFilterModalOpen, setGroupFilterModalOpen] = useState(false);
   const [filterModalOpen, setFilterModalOpen] = useState(false);
-  const [loadingText, setLoadingText] = useState('');
+  const loadingText = '';
   const [showCredentialFields, setShowCredentialFields] = useState(false);
   const [scheduleType, setScheduleType] = useState('interval');
+  const [showAdvancedDeviceFields, setShowAdvancedDeviceFields] = useState(false);
 
   const form = useForm({
     mode: 'uncontrolled',
@@ -68,6 +67,13 @@ const M3U = ({
       create_epg: false,
       username: '',
       password: '',
+      mac: '',
+      model: '',
+      serial_number: '',
+      device_id: '',
+      device_id2: '',
+      signature: '',
+      timezone: '',
       stale_stream_days: 7,
       priority: 0,
       enable_vod: false,
@@ -93,6 +99,13 @@ const M3U = ({
         account_type: m3uAccount.account_type,
         username: m3uAccount.username ?? '',
         password: '',
+        mac: m3uAccount.mac ?? '',
+        model: m3uAccount.model ?? '',
+        serial_number: m3uAccount.serial_number ?? '',
+        device_id: m3uAccount.device_id ?? '',
+        device_id2: m3uAccount.device_id2 ?? '',
+        signature: m3uAccount.signature ?? '',
+        timezone: m3uAccount.timezone ?? '',
         stale_stream_days:
           m3uAccount.stale_stream_days !== undefined &&
           m3uAccount.stale_stream_days !== null
@@ -113,22 +126,40 @@ const M3U = ({
           : 'interval'
       );
 
-      if (m3uAccount.account_type == 'XC') {
-        setShowCredentialFields(true);
-      } else {
-        setShowCredentialFields(false);
-      }
+      setShowCredentialFields(
+        m3uAccount.account_type === 'XC' ||
+          m3uAccount.account_type === 'STALKER'
+      );
+      setShowAdvancedDeviceFields(
+        Boolean(
+          m3uAccount.model ||
+            m3uAccount.serial_number ||
+            m3uAccount.device_id ||
+            m3uAccount.device_id2 ||
+            m3uAccount.signature ||
+            m3uAccount.timezone
+        )
+      );
     } else {
       setPlaylist(null);
       form.reset();
       setScheduleType('interval');
       setExpDate(null);
+      setShowCredentialFields(false);
+      setShowAdvancedDeviceFields(false);
     }
   }, [m3uAccount]);
 
   useEffect(() => {
-    if (form.values.account_type == 'XC') {
-      setShowCredentialFields(true);
+    setShowCredentialFields(
+      form.values.account_type === 'XC' ||
+        form.values.account_type === 'STALKER'
+    );
+    if (form.values.account_type !== 'STD') {
+      setFile(null);
+    }
+    if (form.values.account_type !== 'STALKER') {
+      setShowAdvancedDeviceFields(false);
     }
   }, [form.values.account_type]);
 
@@ -139,6 +170,8 @@ const M3U = ({
     if (values.account_type === 'XC') {
       // XC accounts have exp_date auto-managed server-side; don't send it
       delete values.exp_date;
+    } else if (values.account_type === 'STALKER') {
+      values.exp_date = null;
     } else if (expDate instanceof Date) {
       values.exp_date = expDate.toISOString();
     } else {
@@ -162,6 +195,20 @@ const M3U = ({
       delete values.password;
     }
 
+    if (values.account_type !== 'XC') {
+      values.enable_vod = false;
+    }
+
+    if (values.account_type !== 'STALKER') {
+      delete values.mac;
+      delete values.model;
+      delete values.serial_number;
+      delete values.device_id;
+      delete values.device_id2;
+      delete values.signature;
+      delete values.timezone;
+    }
+
     if (values.user_agent == '0') {
       values.user_agent = null;
     }
@@ -179,7 +226,7 @@ const M3U = ({
         file,
       });
 
-      if (create_epg) {
+      if (create_epg && values.account_type === 'XC') {
         API.addEPG({
           name: values.name,
           source_type: 'xmltv',
@@ -190,7 +237,7 @@ const M3U = ({
         });
       }
 
-      if (values.account_type != 'XC') {
+      if (values.account_type === 'STD') {
         notifications.show({
           title: 'Fetching M3U Groups',
           message:
@@ -200,6 +247,11 @@ const M3U = ({
         // Don't prompt for group filters, but keeping this here
         // in case we want to revive it
         newPlaylist = null;
+        close();
+        return;
+      }
+
+      if (values.account_type === 'STALKER') {
         close();
         return;
       }
@@ -259,6 +311,11 @@ const M3U = ({
     return <></>;
   }
 
+  const accountType = form.getValues().account_type;
+  const isXC = accountType === 'XC';
+  const isStalker = accountType === 'STALKER';
+  const isStandard = accountType === 'STD';
+
   return (
     <>
       <Modal
@@ -294,8 +351,12 @@ const M3U = ({
                 style={{ width: '100%' }}
                 id="server_url"
                 name="server_url"
-                label="URL"
-                description="Direct URL to the M3U playlist or server"
+                label={isStalker ? 'Portal URL' : 'URL'}
+                description={
+                  isStalker
+                    ? 'Base Stalker portal URL'
+                    : 'Direct URL to the M3U playlist or server'
+                }
                 {...form.getInputProps('server_url')}
                 key={form.key('server_url')}
               />
@@ -307,7 +368,8 @@ const M3U = ({
                 description={
                   <>
                     Standard for direct M3U URLs, <br />
-                    Xtream Codes for panel-based services
+                    Xtream Codes for panel-based services, <br />
+                    Stalker for portal-based live TV services
                   </>
                 }
                 data={[
@@ -319,12 +381,16 @@ const M3U = ({
                     value: 'XC',
                     label: 'Xtream Codes',
                   },
+                  {
+                    value: 'STALKER',
+                    label: 'Stalker',
+                  },
                 ]}
                 key={form.key('account_type')}
                 {...form.getInputProps('account_type')}
               />
 
-              {form.getValues().account_type == 'XC' && (
+              {isXC && (
                 <Box>
                   {!m3uAccount && (
                     <Group justify="space-between">
@@ -372,7 +438,101 @@ const M3U = ({
                 </Box>
               )}
 
-              {form.getValues().account_type != 'XC' && (
+              {isStalker && (
+                <Stack gap="sm">
+                  <TextInput
+                    id="mac"
+                    name="mac"
+                    label="MAC Address"
+                    description="Portal device MAC address"
+                    placeholder="00:1A:79:00:00:00"
+                    {...form.getInputProps('mac')}
+                  />
+
+                  {showCredentialFields && (
+                    <>
+                      <TextInput
+                        id="username"
+                        name="username"
+                        label="Username"
+                        description="Optional portal username"
+                        {...form.getInputProps('username')}
+                      />
+
+                      <PasswordInput
+                        id="password"
+                        name="password"
+                        label="Password"
+                        description="Optional portal password"
+                        {...form.getInputProps('password')}
+                      />
+                    </>
+                  )}
+
+                  <Button
+                    type="button"
+                    variant="subtle"
+                    size="xs"
+                    style={{ alignSelf: 'flex-start' }}
+                    onClick={() =>
+                      setShowAdvancedDeviceFields((current) => !current)
+                    }
+                  >
+                    {showAdvancedDeviceFields
+                      ? 'Hide Advanced Device Fields'
+                      : 'Show Advanced Device Fields'}
+                  </Button>
+
+                  <Collapse in={showAdvancedDeviceFields}>
+                    <Stack gap="sm">
+                      <TextInput
+                        id="model"
+                        name="model"
+                        label="Model"
+                        description="Optional device model"
+                        {...form.getInputProps('model')}
+                      />
+                      <TextInput
+                        id="serial_number"
+                        name="serial_number"
+                        label="Serial Number"
+                        description="Optional device serial number"
+                        {...form.getInputProps('serial_number')}
+                      />
+                      <TextInput
+                        id="device_id"
+                        name="device_id"
+                        label="Device ID"
+                        description="Optional device identifier"
+                        {...form.getInputProps('device_id')}
+                      />
+                      <TextInput
+                        id="device_id2"
+                        name="device_id2"
+                        label="Device ID 2"
+                        description="Optional secondary device identifier"
+                        {...form.getInputProps('device_id2')}
+                      />
+                      <TextInput
+                        id="signature"
+                        name="signature"
+                        label="Signature"
+                        description="Optional device signature"
+                        {...form.getInputProps('signature')}
+                      />
+                      <TextInput
+                        id="timezone"
+                        name="timezone"
+                        label="Timezone"
+                        description="Optional portal timezone"
+                        {...form.getInputProps('timezone')}
+                      />
+                    </Stack>
+                  </Collapse>
+                </Stack>
+              )}
+
+              {isStandard && (
                 <>
                   <FileInput
                     id="file"
@@ -460,6 +620,7 @@ const M3U = ({
                 description="Priority for VOD provider selection (higher numbers = higher priority). Used when multiple providers offer the same content."
                 {...form.getInputProps('priority')}
                 key={form.key('priority')}
+                disabled={!isXC}
               />
 
               <Checkbox
@@ -474,33 +635,34 @@ const M3U = ({
           <Flex mih={50} gap="xs" justify="flex-end" align="flex-end">
             {playlist && (
               <>
+                {!isStalker && (
+                  <>
+                    <Button
+                      variant="filled"
+                      size="sm"
+                      onClick={() => setFilterModalOpen(true)}
+                    >
+                      Filters
+                    </Button>
+                    <Button
+                      variant="filled"
+                      size="sm"
+                      onClick={() => {
+                        if (
+                          m3uAccount?.account_type === 'XC' &&
+                          m3uAccount?.enable_vod
+                        ) {
+                          fetchCategories();
+                        }
+                        setGroupFilterModalOpen(true);
+                      }}
+                    >
+                      Groups
+                    </Button>
+                  </>
+                )}
                 <Button
                   variant="filled"
-                  size="sm"
-                  onClick={() => setFilterModalOpen(true)}
-                >
-                  Filters
-                </Button>
-                <Button
-                  variant="filled"
-                  // color={theme.custom.colors.buttonPrimary}
-                  size="sm"
-                  onClick={() => {
-                    // If this is an XC account with VOD enabled, fetch VOD categories
-                    if (
-                      m3uAccount?.account_type === 'XC' &&
-                      m3uAccount?.enable_vod
-                    ) {
-                      fetchCategories();
-                    }
-                    setGroupFilterModalOpen(true);
-                  }}
-                >
-                  Groups
-                </Button>
-                <Button
-                  variant="filled"
-                  // color={theme.custom.colors.buttonPrimary}
                   size="sm"
                   onClick={() => setProfileModalOpen(true)}
                 >
