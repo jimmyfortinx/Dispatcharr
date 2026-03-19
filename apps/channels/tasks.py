@@ -1669,6 +1669,18 @@ def build_dvr_candidates():
     return candidates
 
 
+def build_dvr_stream_url(base_url, channel_uuid):
+    """Route DVR through the TS proxy so provider URL refresh stays centralized."""
+    return f"{str(base_url).rstrip('/')}/proxy/ts/stream/{channel_uuid}"
+
+
+def build_dvr_request_headers(recording_id):
+    """Identify the recorder client without changing upstream provider headers."""
+    return {
+        "User-Agent": f"Dispatcharr-DVR/recording-{recording_id}",
+    }
+
+
 @shared_task
 def run_recording(recording_id, channel_id, start_time_str, end_time_str):
     """
@@ -1884,7 +1896,10 @@ def run_recording(recording_id, channel_id, start_time_str, end_time_str):
     _dvr_remux_retry_interval = 2  # seconds (base for exponential backoff)
 
     for base in candidates:
-        test_url = f"{base.rstrip('/')}/proxy/ts/stream/{channel.uuid}"
+        # Always capture from the TS proxy endpoint. That keeps provider-aware
+        # runtime URL resolution and Stalker session refresh in the same path
+        # used by normal live playback.
+        test_url = build_dvr_stream_url(base, channel.uuid)
         logger.info(f"DVR recording {recording_id}: trying TS base {base}")
 
         _reconnects = 0
@@ -1896,9 +1911,7 @@ def run_recording(recording_id, channel_id, start_time_str, end_time_str):
             try:
                 with requests.get(
                     test_url,
-                    headers={
-                        'User-Agent': f'Dispatcharr-DVR/recording-{recording_id}',
-                    },
+                    headers=build_dvr_request_headers(recording_id),
                     stream=True,
                     timeout=(10, 15),
                 ) as response:

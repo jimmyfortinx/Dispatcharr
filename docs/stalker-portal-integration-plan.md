@@ -9,8 +9,8 @@ Future sessions should use this file as the source of truth instead of rediscove
 ## Current Decision
 
 - Add Stalker as a new provider type inside the existing `M3UAccount` flow.
-- MVP scope is live TV only.
-- Do not build Stalker VOD support in the MVP.
+- Treat live TV support as the completed baseline and extend the same provider model into the existing VOD stack.
+- Build Stalker VOD support inside the current `apps/vod` ingestion, relation, and proxy flow instead of inventing a parallel subsystem.
 - Do not build a Stalker-compatible output proxy in the MVP.
 - Reuse ideas from `stalkerhek`, but keep Dispatcharr's own proxy/output stack.
 
@@ -20,7 +20,7 @@ Future sessions should use this file as the source of truth instead of rediscove
 
 - Source model:
   - `apps/m3u/models.py`
-  - `M3UAccount` currently supports `STD` and `XC`
+  - `M3UAccount` currently supports `STD`, `XC`, and `STALKER`
 - Group discovery:
   - `apps/m3u/tasks.py`
   - `refresh_m3u_groups()`
@@ -45,6 +45,34 @@ Future sessions should use this file as the source of truth instead of rediscove
 - M3U account UI:
   - `frontend/src/components/forms/M3U.jsx`
   - `frontend/src/components/tables/M3UsTable.jsx`
+- VOD category discovery and settings:
+  - `apps/vod/tasks.py`
+  - `apps/vod/api_views.py`
+  - `refresh_vod_content()`
+  - `refresh_categories()`
+  - `batch_create_categories()`
+  - `frontend/src/components/forms/M3UGroupFilter.jsx`
+  - `frontend/src/components/forms/VODCategoryFilter.jsx`
+- VOD content storage:
+  - `apps/vod/models.py`
+  - `VODCategory`
+  - `Movie`
+  - `Series`
+  - `Episode`
+  - `M3UVODCategoryRelation`
+  - `M3UMovieRelation`
+  - `M3USeriesRelation`
+  - `M3UEpisodeRelation`
+- VOD content refresh:
+  - `apps/vod/tasks.py`
+  - `refresh_movies()`
+  - `refresh_series()`
+  - `refresh_series_episodes()`
+- VOD playback URL generation and proxy:
+  - `apps/proxy/vod_proxy/views.py`
+  - `VODStreamView`
+  - `_get_stream_url_from_relation()`
+  - `_transform_url()`
 
 ### Stalker behaviors we need
 
@@ -54,6 +82,12 @@ Future sessions should use this file as the source of truth instead of rediscove
   - `/Users/jimmyfortin/workspaces/stalkerhek/stalker/channels.go`
 - Short-lived playback URL creation via `create_link`:
   - `/Users/jimmyfortin/workspaces/stalkerhek/stalker/channels.go`
+- VOD catalog/category discovery:
+  - endpoint and response-shape discovery still required against real Stalker portal payloads
+- Series detail and episode discovery:
+  - endpoint and response-shape discovery still required against real Stalker portal payloads
+- VOD playback URL creation:
+  - confirm whether Stalker VOD also requires `create_link` or returns a directly playable URL
 - Optional auth/device fields:
   - `/Users/jimmyfortin/workspaces/stalkerhek/stalker/fs.go`
   - `/Users/jimmyfortin/workspaces/stalkerhek/webui/profiles.go`
@@ -63,6 +97,15 @@ Future sessions should use this file as the source of truth instead of rediscove
 Stalker is not just another static playlist source.
 
 The main difference from `STD` and `XC` is that playback must resolve a fresh upstream URL from the portal at play time. The current code assumes `Stream.url` is already usable. That assumption must be isolated behind a provider-aware resolver before Stalker playback is reliable.
+
+That same problem exists in the VOD path:
+
+- `apps/vod/tasks.py` only refreshes VOD for `XC`
+- `frontend/src/components/forms/M3UGroupFilter.jsx` only loads VOD categories for `XC`
+- `apps/vod/models.py` only knows how to build XC movie and episode URLs
+- `apps/proxy/vod_proxy/views.py` assumes each relation can already produce a usable URL
+
+Stalker VOD support must remove those XC-only assumptions without regressing existing XC behavior.
 
 ## Storage Strategy
 
@@ -84,21 +127,40 @@ Use `M3UAccount` with a new `account_type` of `STALKER`.
   - `device_id2`
   - `signature`
   - `timezone`
+  - `enable_vod`
   - `token` if needed for refresh/playback lifecycle
 - Store group mapping in `ChannelGroupM3UAccount.custom_properties`:
   - `stalker_genre_id`
+- Store VOD category mapping in `M3UVODCategoryRelation.custom_properties`:
+  - `stalker_category_id`
+  - `stalker_category_type`
 - Store stream metadata in `Stream.custom_properties`:
   - `cmd`
   - `cmd_id`
   - `cmd_ch_id`
   - `genre_id`
   - any portal fields useful for diagnostics
+- Store movie relation metadata in `M3UMovieRelation.custom_properties`:
+  - stable Stalker movie identifier
+  - source command or playback token inputs if required
+  - raw portal fields needed for refresh diagnostics
+- Store series relation metadata in `M3USeriesRelation.custom_properties`:
+  - stable Stalker series identifier
+  - provider payload needed to refresh episodes later
+  - flags indicating whether detailed metadata and episodes were fetched
+- Store episode relation metadata in `M3UEpisodeRelation.custom_properties`:
+  - stable Stalker episode identifier
+  - source command or playback token inputs if required
+  - raw portal fields needed for playback retries
+
+For live and VOD alike, do not key identity off a `create_link` result. Persist the stable provider identifiers and resolve playback URLs at request time.
 
 ## Non-Goals For MVP
 
-- Stalker VOD ingestion
 - Stalker-compatible downstream proxy endpoints
 - Replacing Dispatcharr proxy/HLS code with `stalkerhek`
+- Building a second standalone Stalker VOD library outside the current `apps/vod` models/tasks
+- Metadata enrichment beyond the fields the current VOD stack already stores
 - Large refactors of unrelated `STD` / `XC` code paths
 
 ## Phase Rules
@@ -121,6 +183,12 @@ Use `M3UAccount` with a new `account_type` of `STALKER`.
 - [ ] Phase 7 implemented
 - [ ] Phase 8 implemented
 - [ ] Phase 9 implemented
+- [ ] Phase 10 implemented
+- [ ] Phase 11 implemented
+- [ ] Phase 12 implemented
+- [ ] Phase 13 implemented
+- [ ] Phase 14 implemented
+- [ ] Phase 15 implemented
 
 ## Phases
 
@@ -147,7 +215,7 @@ Add `STALKER` as a first-class account type and expose its fields in the UI.
   - optional advanced device fields
 - Hide:
   - file upload
-  - XC-only VOD toggles
+  - VOD toggles until the VOD track begins
   - XC-only helper text
 
 #### UI test
@@ -418,15 +486,204 @@ Allow recordings from Stalker-backed channels.
 
 - DVR works from the standard UI without Stalker-specific manual steps
 
+## VOD Track
+
+The VOD phases depend on live phases 0 through 5 being in place because they reuse the same account type, Stalker auth fields, and session-handling primitives.
+
+They do not need to wait for live phases 7 through 9. VOD can proceed in parallel with later live polish as long as shared auth/retry helpers stay centralized.
+
+### Phase 10: VOD Enablement And Protocol Discovery
+
+#### Goal
+
+Turn on the Stalker account/UI switches needed for VOD and confirm the real portal endpoints and payload shapes we will use for movies, series, episodes, and categories.
+
+#### Backend work
+
+- Allow `enable_vod` for `STALKER` accounts
+- Extend the Stalker client with a clearly separated VOD surface area, even if some methods initially raise `NotImplementedError` until endpoint validation is complete
+- Capture example portal payloads for:
+  - movie categories
+  - series categories
+  - movie list
+  - series list
+  - series detail / episodes
+  - VOD playback link creation
+- Document the normalized field mapping we will store in Dispatcharr
+
+#### Frontend work
+
+- Update `frontend/src/components/forms/M3U.jsx` so Stalker accounts can enable VOD scanning
+- Update `frontend/src/components/forms/M3UGroupFilter.jsx` so Stalker accounts can open the VOD tabs and request category data
+
+#### UI test
+
+- Edit a saved Stalker account
+- Enable VOD scanning
+- Save and reload
+- Confirm the flag persists and the VOD tabs are visible in the Groups modal
+
+#### Done when
+
+- The account model and UI can represent Stalker VOD support
+- We have enough confirmed portal samples to implement the remaining VOD phases without guessing at response shapes
+
+### Phase 11: VOD Category Discovery
+
+#### Goal
+
+Fetch Stalker movie and series categories and persist them into the existing VOD category relation model.
+
+#### Backend work
+
+- Extend `apps/vod/tasks.py` so `refresh_vod_content()` can run for `STALKER`
+- Add Stalker category fetch logic for both movie and series content types
+- Map provider category IDs into `VODCategory` and `M3UVODCategoryRelation`
+- Store `stalker_category_id` and `stalker_category_type` in relation `custom_properties`
+- Update `apps/vod/api_views.py` so helper logic that currently assumes XC also includes Stalker accounts with VOD enabled
+
+#### Frontend work
+
+- Reuse the existing VOD tabs in the Groups modal
+- Ensure helper text and errors do not imply Xtream-only behavior
+
+#### UI test
+
+- Refresh a Stalker account with VOD enabled
+- Open `Groups`
+- Confirm movie and series categories appear under the VOD tabs
+- Disable one category, save, reload, and confirm the setting persists
+
+#### Done when
+
+- Stalker movie and series categories flow through the existing VOD category UI end-to-end
+
+### Phase 12: Movie And Series Import
+
+#### Goal
+
+Import Stalker movies and top-level series rows into the existing VOD library.
+
+#### Backend work
+
+- Extend `refresh_movies()` and `refresh_series()` for Stalker provider payloads
+- Create or update:
+  - `Movie`
+  - `Series`
+  - `M3UMovieRelation`
+  - `M3USeriesRelation`
+- Use stable Stalker identifiers for relation uniqueness, not playback links
+- Persist enough metadata for logos, descriptions, year, rating, genre, category, and later episode refresh
+- Keep orphan cleanup compatible with mixed XC and Stalker providers
+
+#### Frontend work
+
+- Reuse the existing `VODs` and series pages
+
+#### UI test
+
+- Refresh a Stalker account with VOD enabled
+- Open `VODs`
+- Confirm movies and series from the portal appear with categories and provider info
+- Refresh again and confirm no duplicate explosion
+
+#### Done when
+
+- Movies and series import idempotently into the current VOD library
+
+### Phase 13: Series Detail And Episode Import
+
+#### Goal
+
+Populate Stalker-backed series with episode rows using the same lazy refresh path already used by the VOD API.
+
+#### Backend work
+
+- Extend `refresh_series_episodes()` to support Stalker relations
+- Fetch per-series detail and episode data from the Stalker client
+- Create or update:
+  - `Episode`
+  - `M3UEpisodeRelation`
+- Persist stable Stalker episode identifiers and any playback command metadata required later
+- Mark `episodes_fetched` / `detailed_fetched` consistently in `M3USeriesRelation.custom_properties`
+
+#### Frontend work
+
+- Reuse the existing series details modal / provider info path
+
+#### UI test
+
+- Open a Stalker-backed series
+- Trigger provider info / episode loading
+- Confirm seasons and episodes populate and remain stable across refreshes
+
+#### Done when
+
+- Stalker series details and episodes are available through the standard series UI
+
+### Phase 14: Movie Playback Resolver
+
+#### Goal
+
+Make Stalker-backed movies playable through the existing VOD proxy path.
+
+#### Backend work
+
+- Introduce a provider-aware VOD URL resolver instead of encoding provider logic directly in relation models
+- Make `apps/proxy/vod_proxy/views.py` use that resolver before profile transforms
+- Support XC and Stalker without changing the existing VOD route structure
+- If Stalker requires short-lived links for movies, resolve them at play time and avoid storing them as durable relation state
+
+#### Frontend work
+
+- Reuse existing movie playback controls
+
+#### UI test
+
+- Play a Stalker-backed movie from the VOD UI
+- Confirm playback starts through the normal `/vod/...` route
+
+#### Done when
+
+- A Stalker movie can be played from the UI without manual URL work
+
+### Phase 15: Episode Playback And VOD Hardening
+
+#### Goal
+
+Make Stalker-backed episode playback reliable and align Stalker VOD retries with the existing live-session recovery approach.
+
+#### Backend work
+
+- Extend the VOD resolver to episodes and any series-first playback paths
+- Reuse shared Stalker auth/session retry helpers instead of duplicating logic in `vod_proxy`
+- Retry once on expired session or stale playback link when the portal indicates re-auth is required
+- Verify seeking, range requests, and HEAD preflight still behave correctly when the source URL is freshly resolved
+
+#### Frontend work
+
+- Reuse existing episode playback controls
+
+#### UI test
+
+- Play a Stalker-backed episode
+- Seek within the episode
+- Retry after the original portal session has gone stale
+- Confirm playback recovers without changing the client-facing VOD URL pattern
+
+#### Done when
+
+- Movies and episodes from Stalker-backed VOD providers play reliably through the existing proxy flow
+
 ## Implementation Notes
 
 ### Recommended module addition
 
-Create a dedicated client module instead of embedding protocol logic in task functions.
+Continue using a dedicated client module instead of embedding protocol logic in task functions.
 
 Suggested location:
 
-- `core/stalker.py`
+- `apps/m3u/stalker.py`
 
 Suggested responsibilities:
 
@@ -435,6 +692,10 @@ Suggested responsibilities:
 - auth
 - get genres
 - get channels
+- get VOD categories
+- get movies
+- get series
+- get series details / episodes
 - create playback link
 - retry/re-auth helpers
 
@@ -456,12 +717,32 @@ Likely touchpoints:
 - `apps/proxy/ts_proxy/views.py`
 - `core/views.py`
 
+### Recommended VOD resolver seam
+
+Introduce a provider-aware VOD URL resolver instead of keeping provider logic inside `M3UMovieRelation.get_stream_url()` and `M3UEpisodeRelation.get_stream_url()`.
+
+Suggested responsibilities:
+
+- accept a movie or episode relation plus `M3UAccountProfile`
+- return a usable upstream URL
+- for `XC`: keep building the existing direct URL
+- for `STALKER`: resolve a fresh playback URL from stored provider metadata, then apply profile transforms only if still required
+
+Likely touchpoints:
+
+- `apps/vod/models.py`
+- `apps/vod/tasks.py`
+- `apps/proxy/vod_proxy/views.py`
+
 ## Risks To Watch
 
 - Hashing on ephemeral playback URLs will break identity and duplicate streams
+- Hashing on ephemeral VOD playback URLs will break relation identity and create duplicate movies or episodes
 - Profile regex transforms may accidentally mutate Stalker links in unsafe ways
 - Re-auth/retry loops can cause provider bans if not bounded
 - Existing XC-only assumptions may exist in status, profile, or refresh code paths
+- The current VOD cleanup logic may delete Stalker relations incorrectly if category or content identity mapping is not stable
+- Some portals may expose incomplete movie or series metadata, so fallback mapping rules must be explicit
 
 ## Session Resume Instructions
 
@@ -490,8 +771,9 @@ Examples:
 - `Implement Phase 0 from docs/stalker-portal-integration-plan.md. Only do that phase and stop.`
 - `Implement Phase 2 from docs/stalker-portal-integration-plan.md and include tests.`
 - `Implement Phase 5 from docs/stalker-portal-integration-plan.md. I will manually test playback afterwards.`
+- `Implement Phase 10 from docs/stalker-portal-integration-plan.md and include tests.`
 
-## If Live Testing Needs Portal Data
+## If Portal Testing Needs Portal Data
 
 If a phase requires real portal verification, the user may additionally provide:
 
