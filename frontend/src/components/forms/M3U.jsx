@@ -192,7 +192,10 @@ const M3U = ({
       values.cron_expression = '';
     }
 
-    if (values.account_type == 'XC' && values.password == '') {
+    if (
+      (values.account_type == 'XC' || values.account_type == 'STALKER') &&
+      values.password == ''
+    ) {
       // If account XC and no password input, assuming no password change
       // from previously stored value.
       delete values.password;

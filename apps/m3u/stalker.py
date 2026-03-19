@@ -26,6 +26,10 @@ class StalkerError(Exception):
     pass
 
 
+class StalkerRecoverableError(StalkerError):
+    pass
+
+
 @dataclass
 class StalkerConnectionResult:
     normalized_portal_url: str
@@ -74,12 +78,22 @@ class StalkerClient:
         self.token = self.custom_properties.get("token") or token_hex(16).upper()
         self.user_agent = user_agent or DEFAULT_USER_AGENT
         self.model = self.custom_properties.get("model") or DEFAULT_MODEL
-        self.serial_number = (
-            self.custom_properties.get("serial_number") or DEFAULT_SERIAL_NUMBER
+        self.serial_number = self._configured_identity_value(
+            "serial_number",
+            DEFAULT_SERIAL_NUMBER,
         )
-        self.device_id = self.custom_properties.get("device_id") or DEFAULT_DEVICE_ID
-        self.device_id2 = self.custom_properties.get("device_id2") or DEFAULT_DEVICE_ID2
-        self.signature = self.custom_properties.get("signature") or DEFAULT_SIGNATURE
+        self.device_id = self._configured_identity_value(
+            "device_id",
+            DEFAULT_DEVICE_ID,
+        )
+        self.device_id2 = self._configured_identity_value(
+            "device_id2",
+            DEFAULT_DEVICE_ID2,
+        )
+        self.signature = self._configured_identity_value(
+            "signature",
+            DEFAULT_SIGNATURE,
+        )
         self.timezone = self.custom_properties.get("timezone") or DEFAULT_TIMEZONE
 
         self.session = requests.Session()
@@ -292,18 +306,22 @@ class StalkerClient:
             raise StalkerError("Handshake response was not recognized.")
 
     def authenticate(self, portal_url):
+        data = {
+            "type": "stb",
+            "action": "do_auth",
+            "login": self.username,
+            "password": self.password,
+            "JsHttpRequest": "1-xml",
+        }
+        if self.device_id:
+            data["device_id"] = self.device_id
+        if self.device_id2:
+            data["device_id2"] = self.device_id2
+
         payload = self._request(
             "POST",
             portal_url,
-            data={
-                "type": "stb",
-                "action": "do_auth",
-                "login": self.username,
-                "password": self.password,
-                "device_id": self.device_id,
-                "device_id2": self.device_id2,
-                "JsHttpRequest": "1-xml",
-            },
+            data=data,
             with_auth=True,
         )
         if payload.get("js") is not True:
@@ -311,20 +329,25 @@ class StalkerClient:
             raise StalkerError(str(text))
 
     def authenticate_with_device_ids(self, portal_url):
+        query = {
+            "type": "stb",
+            "action": "get_profile",
+            "hd": "1",
+            "stb_type": self.model,
+            "auth_second_step": "1",
+            "JsHttpRequest": "1-xml",
+        }
+        if self.serial_number:
+            query["sn"] = self.serial_number
+        if self.device_id:
+            query["device_id"] = self.device_id
+        if self.device_id2:
+            query["device_id2"] = self.device_id2
+
         payload = self._request(
             "GET",
             portal_url,
-            query={
-                "type": "stb",
-                "action": "get_profile",
-                "hd": "1",
-                "sn": self.serial_number,
-                "stb_type": self.model,
-                "device_id": self.device_id,
-                "device_id2": self.device_id2,
-                "auth_second_step": "1",
-                "JsHttpRequest": "1-xml",
-            },
+            query=query,
             with_auth=True,
         )
         js = payload.get("js")
@@ -334,26 +357,48 @@ class StalkerClient:
         profile_id = js.get("id")
         if profile_id in (None, "", 0, "0"):
             text = payload.get("text") or "Portal rejected the provided device identity."
+            if (
+                text == "Portal rejected the provided device identity."
+                and not any(
+                    [
+                        self.serial_number,
+                        self.device_id,
+                        self.device_id2,
+                        self.signature,
+                    ]
+                )
+            ):
+                text = (
+                    "Portal rejected the provided device identity. "
+                    "This portal likely requires the real serial/device ID values "
+                    "for the MAC address, or username/password authentication."
+                )
             raise StalkerError(str(text))
 
         return js
 
     def get_profile(self, portal_url):
+        query = {
+            "type": "stb",
+            "action": "get_profile",
+            "hd": "1",
+            "stb_type": self.model,
+            "auth_second_step": "1",
+            "JsHttpRequest": "1-xml",
+        }
+        if self.serial_number:
+            query["sn"] = self.serial_number
+        if self.device_id:
+            query["device_id"] = self.device_id
+        if self.device_id2:
+            query["device_id2"] = self.device_id2
+        if self.signature:
+            query["signature"] = self.signature
+
         payload = self._request(
             "GET",
             portal_url,
-            query={
-                "type": "stb",
-                "action": "get_profile",
-                "hd": "1",
-                "sn": self.serial_number,
-                "stb_type": self.model,
-                "device_id": self.device_id,
-                "device_id2": self.device_id2,
-                "signature": self.signature,
-                "auth_second_step": "1",
-                "JsHttpRequest": "1-xml",
-            },
+            query=query,
             with_auth=True,
         )
         js = payload.get("js")
@@ -410,21 +455,63 @@ class StalkerClient:
         elif isinstance(js, list):
             channels = js
         else:
-            raise StalkerError("Portal channels response was not recognized.")
+            raise StalkerRecoverableError(
+                self._payload_error_text(
+                    payload,
+                    "Portal channels response was not recognized.",
+                )
+            )
 
         if channels is None:
-            raise StalkerError("Portal did not return any live channels.")
+            raise StalkerRecoverableError(
+                self._payload_error_text(
+                    payload,
+                    "Portal did not return any live channels.",
+                )
+            )
         if not isinstance(channels, list):
-            raise StalkerError("Portal returned an invalid live channels response.")
+            raise StalkerRecoverableError(
+                self._payload_error_text(
+                    payload,
+                    "Portal returned an invalid live channels response.",
+                )
+            )
         return channels
 
     def prepare_playback_session(self, portal_url):
         self.handshake(portal_url)
         if self.username or self.password:
             self.authenticate(portal_url)
-        else:
+        elif self._should_use_device_id_auth():
             self.authenticate_with_device_ids(portal_url)
         self.watchdog_update(portal_url)
+
+    def _resolve_playback_url_once(self, portal_url, channel_metadata):
+        self.prepare_playback_session(portal_url)
+        fresh_cmd = self.get_fresh_channel_cmd(portal_url, channel_metadata)
+        if not fresh_cmd:
+            raise StalkerError("Stalker stream is missing a usable live command.")
+        return self.create_link(portal_url, fresh_cmd)
+
+    def _should_retry_playback_resolution(self, exc):
+        if isinstance(exc, StalkerRecoverableError):
+            return True
+
+        message = str(exc).lower()
+        retry_markers = (
+            "empty playback link",
+            "invalid playback link",
+            "create_link response",
+            "auth",
+            "token",
+            "session",
+            "401",
+            "403",
+            "forbidden",
+            "unauthorized",
+            "access denied",
+        )
+        return any(marker in message for marker in retry_markers)
 
     def get_fresh_channel_cmd(self, portal_url, channel_metadata):
         target_channel_id = str(
@@ -495,12 +582,23 @@ class StalkerClient:
             )
         return resolved_url
 
+    def build_media_headers(self, media_url):
+        """Build headers for fetching the resolved Stalker media URL."""
+        return self._headers(media_url, with_auth=True)
+
     def resolve_playback_url(self, portal_url, channel_metadata):
-        self.prepare_playback_session(portal_url)
-        fresh_cmd = self.get_fresh_channel_cmd(portal_url, channel_metadata)
-        if not fresh_cmd:
-            raise StalkerError("Stalker stream is missing a usable live command.")
-        return self.create_link(portal_url, fresh_cmd)
+        try:
+            return self._resolve_playback_url_once(portal_url, channel_metadata)
+        except StalkerError as exc:
+            if not self._should_retry_playback_resolution(exc):
+                raise
+
+            logger.info(
+                "Retrying Stalker playback URL resolution after session recovery for %s: %s",
+                portal_url,
+                exc,
+            )
+            return self._resolve_playback_url_once(portal_url, channel_metadata)
 
     def _normalize_channel(self, channel, portal_url, genre_map):
         if not isinstance(channel, dict):
@@ -557,15 +655,25 @@ class StalkerClient:
     def _extract_create_link_url(self, payload):
         js = payload.get("js")
         if not isinstance(js, dict):
-            raise StalkerError("Portal create_link response was not recognized.")
+            raise StalkerRecoverableError(
+                self._payload_error_text(
+                    payload,
+                    "Portal create_link response was not recognized.",
+                )
+            )
 
         resolved_cmd = str(js.get("cmd") or "").strip()
         if not resolved_cmd:
-            raise StalkerError("Portal returned an empty playback link.")
+            raise StalkerRecoverableError(
+                self._payload_error_text(
+                    payload,
+                    "Portal returned an empty playback link.",
+                )
+            )
 
         parts = resolved_cmd.split()
         if not parts:
-            raise StalkerError("Portal returned an invalid playback link.")
+            raise StalkerRecoverableError("Portal returned an invalid playback link.")
 
         return parts[-1]
 
@@ -584,21 +692,54 @@ class StalkerClient:
             response = self.session.request(method, portal_url, **request_kwargs)
             response.raise_for_status()
         except requests.RequestException as exc:
+            if with_auth and self._is_auth_status_error(exc):
+                raise StalkerRecoverableError(f"Request failed: {exc}") from exc
             raise StalkerError(f"Request failed: {exc}") from exc
 
         try:
             payload = response.json()
         except (json.JSONDecodeError, ValueError) as exc:
             body = response.text.strip()[:200]
-            raise StalkerError(f"Invalid portal response: {body or 'empty body'}") from exc
+            error_cls = StalkerRecoverableError if with_auth else StalkerError
+            raise error_cls(
+                f"Invalid portal response: {body or 'empty body'}"
+            ) from exc
 
         if not isinstance(payload, dict):
-            raise StalkerError("Portal returned an unexpected response shape.")
+            error_cls = StalkerRecoverableError if with_auth else StalkerError
+            raise error_cls("Portal returned an unexpected response shape.")
         return payload
+
+    def _payload_error_text(self, payload, default_message):
+        text = str(payload.get("text") or "").strip()
+        return text or default_message
+
+    def _is_auth_status_error(self, exc):
+        response = getattr(exc, "response", None)
+        return bool(response is not None and response.status_code in (401, 403))
+
+    def _configured_identity_value(self, key, placeholder):
+        value = str(self.custom_properties.get(key) or "").strip()
+        if not value or value == placeholder:
+            return ""
+        return value
+
+    def _should_use_device_id_auth(self):
+        return bool(self.device_id and self.device_id2)
 
     def _headers(self, portal_url, with_auth=False):
         parsed = urlparse(portal_url)
         origin = f"{parsed.scheme}://{parsed.netloc}"
+        cookie_parts = ["PHPSESSID=null"]
+        if self.serial_number:
+            cookie_parts.append(f"sn={quote_plus(self.serial_number)}")
+        cookie_parts.extend(
+            [
+                f"mac={quote_plus(self.mac)}",
+                "stb_lang=en",
+                f"timezone={quote_plus(self.timezone)}",
+            ]
+        )
         headers = {
             "User-Agent": self.user_agent,
             "X-User-Agent": f"Model: {self.model}; Link: Ethernet",
@@ -609,13 +750,7 @@ class StalkerClient:
             "Referer": f"{origin}/",
             "Origin": origin,
             # Match stalkerhek's authenticated request cookie formatting.
-            "Cookie": (
-                "PHPSESSID=null; "
-                f"sn={quote_plus(self.serial_number)}; "
-                f"mac={quote_plus(self.mac)}; "
-                "stb_lang=en; "
-                f"timezone={quote_plus(self.timezone)};"
-            ),
+            "Cookie": "; ".join(cookie_parts) + ";",
         }
         if with_auth and self.token:
             headers["Authorization"] = f"Bearer {self.token}"
@@ -624,6 +759,16 @@ class StalkerClient:
     def _handshake_headers(self, portal_url):
         parsed = urlparse(portal_url)
         origin = f"{parsed.scheme}://{parsed.netloc}"
+        cookie_parts = []
+        if self.serial_number:
+            cookie_parts.append(f"sn={self.serial_number}")
+        cookie_parts.extend(
+            [
+                f"mac={self.mac}",
+                "stb_lang=en",
+                f"timezone={self.timezone}",
+            ]
+        )
         return {
             "User-Agent": self.user_agent,
             "X-User-Agent": f"Model: {self.model}; Link: Ethernet",
@@ -634,10 +779,5 @@ class StalkerClient:
             "Referer": f"{origin}/",
             "Origin": origin,
             # Match stalkerhek's special-case handshake cookie formatting.
-            "Cookie": (
-                f"sn={self.serial_number}; "
-                f"mac={self.mac}; "
-                "stb_lang=en; "
-                f"timezone={self.timezone}"
-            ),
+            "Cookie": "; ".join(cookie_parts),
         }

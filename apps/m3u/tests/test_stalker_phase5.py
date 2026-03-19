@@ -4,7 +4,7 @@ from django.test import TestCase
 
 from apps.channels.models import Stream
 from apps.m3u.models import M3UAccount, M3UAccountProfile
-from apps.m3u.stalker import StalkerClient, StalkerError
+from apps.m3u.stalker import StalkerClient, StalkerError, DEFAULT_USER_AGENT
 from apps.proxy.ts_proxy.url_utils import generate_stream_url, resolve_live_stream_url
 from core.models import PROXY_PROFILE_NAME, StreamProfile, UserAgent
 
@@ -92,7 +92,7 @@ class StalkerPhase5PreviewTests(TestCase):
             autospec=True,
             side_effect=fake_resolve_playback_url,
         ):
-            stream_url, user_agent, transcode, stream_profile_id = generate_stream_url(
+            stream_url, user_agent, input_headers, transcode, stream_profile_id, error_reason = generate_stream_url(
                 self.stream.stream_hash
             )
 
@@ -100,9 +100,12 @@ class StalkerPhase5PreviewTests(TestCase):
             stream_url,
             "http://resolved.example.com/live/world-news-hd",
         )
-        self.assertEqual(user_agent, "DispatcharrTest/1.0")
+        self.assertEqual(user_agent, DEFAULT_USER_AGENT)
+        self.assertIsNotNone(input_headers)
+        self.assertEqual(input_headers["Authorization"], "Bearer NEW-TOKEN")
         self.assertFalse(transcode)
         self.assertEqual(stream_profile_id, self.proxy_profile.id)
+        self.assertIsNone(error_reason)
 
         self.account.refresh_from_db()
         self.assertEqual(self.account.custom_properties["token"], "NEW-TOKEN")
@@ -132,7 +135,7 @@ class StalkerPhase5PreviewTests(TestCase):
             with_auth=True,
         )
 
-    def test_resolve_playback_url_uses_device_id_auth_for_mac_only_portals(self):
+    def test_resolve_playback_url_skips_device_id_auth_for_mac_only_portals(self):
         client = StalkerClient(
             server_url="http://portal.example.com/stalker_portal/portal.php",
             mac="00:1A:79:00:00:40",
@@ -154,9 +157,7 @@ class StalkerPhase5PreviewTests(TestCase):
                 {"stalker_channel_id": "5001", "cmd": "stale"},
             )
 
-        mock_device_auth.assert_called_once_with(
-            "http://portal.example.com/stalker_portal/portal.php"
-        )
+        mock_device_auth.assert_not_called()
         mock_watchdog.assert_called_once_with(
             "http://portal.example.com/stalker_portal/portal.php"
         )
@@ -167,6 +168,36 @@ class StalkerPhase5PreviewTests(TestCase):
         mock_create_link.assert_called_once_with(
             "http://portal.example.com/stalker_portal/portal.php",
             "ffmpeg http://upstream.example.com/live.php?stream=176913&extension=ts",
+        )
+
+    def test_resolve_playback_url_uses_device_id_auth_when_ids_are_configured(self):
+        client = StalkerClient(
+            server_url="http://portal.example.com/stalker_portal/portal.php",
+            mac="00:1A:79:00:00:40",
+            custom_properties={
+                "device_id": "device-1",
+                "device_id2": "device-2",
+            },
+        )
+
+        with patch.object(client, "handshake"), patch.object(
+            client, "authenticate_with_device_ids", return_value={"id": "1"}
+        ) as mock_device_auth, patch.object(
+            client, "watchdog_update", return_value={}
+        ), patch.object(
+            client, "get_fresh_channel_cmd",
+            return_value="ffmpeg http://upstream.example.com/live.php?stream=176913&extension=ts",
+        ), patch.object(
+            client, "create_link",
+            return_value="http://resolved.example.com/live.ts",
+        ):
+            client.resolve_playback_url(
+                "http://portal.example.com/stalker_portal/portal.php",
+                {"stalker_channel_id": "5001", "cmd": "stale"},
+            )
+
+        mock_device_auth.assert_called_once_with(
+            "http://portal.example.com/stalker_portal/portal.php"
         )
 
     def test_create_link_logs_unusable_resolved_url_payload(self):
@@ -238,6 +269,27 @@ class StalkerPhase5PreviewTests(TestCase):
                     "http://portal.example.com/stalker_portal/portal.php"
                 )
 
+    def test_authenticate_with_device_ids_omits_placeholder_identity_values(self):
+        client = StalkerClient(
+            server_url="http://portal.example.com/stalker_portal/portal.php",
+            mac="00:1A:79:00:00:40",
+        )
+
+        with patch.object(
+            client,
+            "_request",
+            return_value={"js": {"id": "1"}},
+        ) as mock_request:
+            client.authenticate_with_device_ids(
+                "http://portal.example.com/stalker_portal/portal.php"
+            )
+
+        query = mock_request.call_args.kwargs["query"]
+        self.assertNotIn("sn", query)
+        self.assertNotIn("device_id", query)
+        self.assertNotIn("device_id2", query)
+        self.assertEqual(query["stb_type"], "MAG254")
+
     def test_authenticated_headers_match_stalkerhek_cookie_encoding(self):
         client = StalkerClient(
             server_url="http://portal.example.com/stalker_portal/portal.php",
@@ -254,5 +306,5 @@ class StalkerPhase5PreviewTests(TestCase):
         self.assertEqual(headers["Authorization"], "Bearer TOKEN-123")
         self.assertEqual(
             headers["Cookie"],
-            "PHPSESSID=null; sn=0000000000000; mac=00%3A1A%3A79%3A36%3A6A%3AE9; stb_lang=en; timezone=America%2FToronto;",
+            "PHPSESSID=null; mac=00%3A1A%3A79%3A36%3A6A%3AE9; stb_lang=en; timezone=America%2FToronto;",
         )

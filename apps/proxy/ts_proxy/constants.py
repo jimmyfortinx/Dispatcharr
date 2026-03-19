@@ -47,6 +47,7 @@ class ChannelMetadataField:
     # Basic fields
     URL = "url"
     USER_AGENT = "user_agent"
+    INPUT_HEADERS = "input_headers"
     STATE = "state"
     OWNER = "owner"
     STREAM_ID = "stream_id"

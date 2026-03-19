@@ -78,6 +78,34 @@ class StalkerPhase0SerializerTests(TestCase):
         self.assertEqual(updated.custom_properties["mac"], "00:1A:79:00:00:03")
         self.assertEqual(updated.custom_properties["device_id"], "device-1")
 
+    def test_stalker_update_preserves_existing_password_when_left_blank(self):
+        account = M3UAccount.objects.create(
+            name="Password Stalker",
+            account_type=M3UAccount.Types.STALKER,
+            server_url="http://portal.example.com/stalker_portal/c/",
+            username="demo",
+            password="secret",
+            custom_properties={"mac": "00:1A:79:00:00:05"},
+        )
+
+        serializer = M3UAccountSerializer(
+            account,
+            data={
+                "name": account.name,
+                "account_type": M3UAccount.Types.STALKER,
+                "server_url": account.server_url,
+                "username": account.username,
+                "password": "",
+                "mac": "00:1A:79:00:00:05",
+            },
+            partial=True,
+        )
+
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+        updated = serializer.save()
+
+        self.assertEqual(updated.password, "secret")
+
 
 class StalkerPhase0SignalTests(TestCase):
     @patch("apps.m3u.signals.refresh_m3u_groups.delay")

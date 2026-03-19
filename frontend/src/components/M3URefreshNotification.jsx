@@ -135,6 +135,8 @@ export default function M3URefreshNotification() {
       fetchStreams();
       API.requeryChannels();
       fetchChannelIds();
+      fetchChannelGroups();
+      fetchPlaylists();
     } else if (action == 'processing_groups') {
       fetchStreams();
       fetchChannelGroups();

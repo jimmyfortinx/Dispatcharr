@@ -303,6 +303,15 @@ class M3UAccountSerializer(serializers.ModelSerializer):
     def update(self, instance, validated_data):
         # Pop exp_date — it's written to the default profile, not the account
         exp_date = validated_data.pop("exp_date", "__NOT_SET__")
+        account_type = validated_data.get("account_type", instance.account_type)
+
+        # Mirror the UI behavior for credentialed providers: an empty password
+        # means "keep the existing secret", not "overwrite with blank".
+        if (
+            validated_data.get("password", None) == ""
+            and account_type in {M3UAccount.Types.XC, M3UAccount.Types.STALKER}
+        ):
+            validated_data.pop("password")
 
         # Pop cron_expression before it reaches model fields
         # If not present (partial update), preserve the existing cron from the PeriodicTask

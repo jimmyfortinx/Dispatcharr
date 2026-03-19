@@ -23,7 +23,7 @@ class ChannelService:
     """Service class for channel operations"""
 
     @staticmethod
-    def initialize_channel(channel_id, stream_url, user_agent, transcode=False, stream_profile_value=None, stream_id=None, m3u_profile_id=None):
+    def initialize_channel(channel_id, stream_url, user_agent, input_headers=None, transcode=False, stream_profile_value=None, stream_id=None, m3u_profile_id=None):
         """
         Initialize a channel with the given parameters.
 
@@ -31,6 +31,7 @@ class ChannelService:
             channel_id: UUID of the channel
             stream_url: URL of the stream
             user_agent: User agent for the stream connection
+            input_headers: Optional upstream headers required to fetch the stream
             transcode: Whether to transcode the stream
             stream_profile_value: Stream profile value to store in metadata
             stream_id: ID of the stream being used
@@ -66,7 +67,14 @@ class ChannelService:
                 logger.error(f"Failed to set stream_id {stream_id} in Redis before initialization")
 
         # Now proceed with channel initialization
-        success = proxy_server.initialize_channel(stream_url, channel_id, user_agent, transcode, stream_id)
+        success = proxy_server.initialize_channel(
+            stream_url,
+            channel_id,
+            user_agent=user_agent,
+            input_headers=input_headers,
+            transcode=transcode,
+            stream_id=stream_id,
+        )
 
         # Store additional metadata if initialization was successful
         if success and proxy_server.redis_client:
@@ -78,6 +86,8 @@ class ChannelService:
                 update_data[ChannelMetadataField.STREAM_ID] = str(stream_id)
             if m3u_profile_id:
                 update_data[ChannelMetadataField.M3U_PROFILE] = str(m3u_profile_id)
+            if input_headers:
+                update_data[ChannelMetadataField.INPUT_HEADERS] = json.dumps(input_headers)
 
             if update_data:
                 proxy_server.redis_client.hset(metadata_key, mapping=update_data)
@@ -103,6 +113,7 @@ class ChannelService:
 
         # If no direct URL is provided but a target stream is, get URL from target stream
         stream_id = None
+        input_headers = None
         if not new_url and target_stream_id:
             stream_info = get_stream_info_for_switch(channel_id, target_stream_id)
             if 'error' in stream_info:
@@ -112,6 +123,7 @@ class ChannelService:
                 }
             new_url = stream_info['url']
             user_agent = stream_info['user_agent']
+            input_headers = stream_info.get('input_headers')
             stream_id = target_stream_id
             # Extract M3U profile ID from stream info if available
             if 'm3u_profile_id' in stream_info:
@@ -149,7 +161,11 @@ class ChannelService:
             # Try to recover if Redis keys exist but channel check failed
             if redis_keys:
                 logger.warning(f"Channel {channel_id} not detected but Redis keys exist. Forcing initialization.")
-                proxy_server.initialize_channel(new_url, channel_id, user_agent)
+                proxy_server.initialize_channel(
+                    new_url,
+                    channel_id,
+                    user_agent=user_agent,
+                )
                 result = {
                     'status': 'recovered',
                     'message': 'Channel was recovered and initialized'
@@ -171,7 +187,14 @@ class ChannelService:
         # Update metadata in Redis regardless of ownership
         if proxy_server.redis_client:
             try:
-                ChannelService._update_channel_metadata(channel_id, new_url, user_agent, stream_id, m3u_profile_id)
+                ChannelService._update_channel_metadata(
+                    channel_id,
+                    new_url,
+                    user_agent,
+                    input_headers,
+                    stream_id,
+                    m3u_profile_id,
+                )
                 result['metadata_updated'] = True
             except Exception as e:
                 logger.error(f"Error updating Redis metadata: {e}", exc_info=True)
@@ -184,7 +207,12 @@ class ChannelService:
             old_url = manager.url
 
             # Update the stream
-            success = manager.update_url(new_url, stream_id, m3u_profile_id)
+            success = manager.update_url(
+                new_url,
+                stream_id,
+                m3u_profile_id,
+                input_headers,
+            )
             logger.info(f"Stream URL changed from {old_url} to {new_url}, result: {success}")
 
             result.update({
@@ -569,7 +597,7 @@ class ChannelService:
     # Helper methods for Redis operations
 
     @staticmethod
-    def _update_channel_metadata(channel_id, url, user_agent=None, stream_id=None, m3u_profile_id=None):
+    def _update_channel_metadata(channel_id, url, user_agent=None, input_headers=None, stream_id=None, m3u_profile_id=None):
         """Update channel metadata in Redis"""
         proxy_server = ProxyServer.get_instance()
 
@@ -586,6 +614,8 @@ class ChannelService:
         metadata = {ChannelMetadataField.URL: url}
         if user_agent:
             metadata[ChannelMetadataField.USER_AGENT] = user_agent
+        if input_headers:
+            metadata[ChannelMetadataField.INPUT_HEADERS] = json.dumps(input_headers)
         if stream_id:
             metadata[ChannelMetadataField.STREAM_ID] = str(stream_id)
         if m3u_profile_id:

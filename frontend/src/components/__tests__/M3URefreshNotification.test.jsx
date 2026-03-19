@@ -236,6 +236,8 @@ describe('M3URefreshNotification', () => {
         expect(mockStreamsStore.fetchStreams).toHaveBeenCalled();
         expect(API.requeryChannels).toHaveBeenCalled();
         expect(mockChannelsStore.fetchChannelIds).toHaveBeenCalled();
+        expect(mockChannelsStore.fetchChannelGroups).toHaveBeenCalled();
+        expect(mockPlaylistsStore.fetchPlaylists).toHaveBeenCalled();
       });
     });
   });

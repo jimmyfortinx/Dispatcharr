@@ -8,6 +8,7 @@ import requests
 import subprocess
 import gevent
 import re
+import json
 from typing import Optional, List
 from django.db import connection
 from django.shortcuts import get_object_or_404
@@ -29,7 +30,7 @@ logger = get_logger()
 class StreamManager:
     """Manages a connection to a TS stream without using raw sockets"""
 
-    def __init__(self, channel_id, url, buffer, user_agent=None, transcode=False, stream_id=None, worker_id=None):
+    def __init__(self, channel_id, url, buffer, user_agent=None, input_headers=None, transcode=False, stream_id=None, worker_id=None):
         # Basic properties
         self.channel_id = channel_id
         self.url = url
@@ -57,6 +58,7 @@ class StreamManager:
 
         # User agent for connection
         self.user_agent = user_agent or Config.DEFAULT_USER_AGENT
+        self.input_headers = dict(input_headers or {})
 
         # Stream health monitoring
         self.last_data_time = time.time()
@@ -250,6 +252,8 @@ class StreamManager:
                     continue
                 # Connection retry loop for current URL
                 while self.running and self.retry_count < self.max_retries and not url_failed and not self.needs_stream_switch:
+                    if self.retry_count > 0:
+                        self._refresh_runtime_stream_url(reason="retry")
 
                     logger.info(f"Connection attempt {self.retry_count + 1}/{self.max_retries} for URL: {self.url} for channel {self.channel_id}")
 
@@ -503,6 +507,7 @@ class StreamManager:
 
             # Build and start transcode command
             self.transcode_cmd = stream_profile.build_command(self.url, self.user_agent)
+            self.transcode_cmd = self._inject_ffmpeg_input_headers(self.transcode_cmd)
 
             # Store stream command for efficient log parser routing
             self.stream_command = stream_profile.command
@@ -914,6 +919,7 @@ class StreamManager:
             self.http_reader = HTTPStreamReader(
                 url=self.url,
                 user_agent=self.user_agent,
+                headers=self.input_headers,
                 chunk_size=self.chunk_size
             )
 
@@ -1057,7 +1063,7 @@ class StreamManager:
         # Set running to false to ensure thread exits
         self.running = False
 
-    def update_url(self, new_url, stream_id=None, m3u_profile_id=None):
+    def update_url(self, new_url, stream_id=None, m3u_profile_id=None, input_headers=None):
         """Update stream URL and reconnect with proper cleanup for both HTTP and transcode sessions"""
         if new_url == self.url:
             logger.info(f"URL unchanged: {new_url}")
@@ -1112,6 +1118,8 @@ class StreamManager:
             # Update URL and reset connection state
             old_url = self.url
             self.url = new_url
+            if input_headers is not None:
+                self.input_headers = dict(input_headers or {})
             self.connected = False
 
             # Update stream ID if provided
@@ -1158,6 +1166,53 @@ class StreamManager:
     def should_retry(self) -> bool:
         """Check if connection retry is allowed"""
         return self.retry_count < self.max_retries
+
+    def _refresh_runtime_stream_url(self, reason="reconnect"):
+        """Refresh the current stream URL when the provider uses short-lived URLs."""
+        if not self.current_stream_id:
+            return False
+
+        stream_info = get_stream_info_for_switch(self.channel_id, self.current_stream_id)
+        if not stream_info or 'error' in stream_info or not stream_info.get('url'):
+            logger.warning(
+                f"Could not refresh runtime stream URL for channel {self.channel_id} during {reason}: "
+                f"{stream_info.get('error', 'missing URL') if stream_info else 'no stream info'}"
+            )
+            return False
+
+        refreshed = stream_info['url'] != self.url
+        old_url = self.url
+        self.url = stream_info['url']
+        self.user_agent = stream_info.get('user_agent') or self.user_agent
+        self.input_headers = dict(stream_info.get('input_headers') or {})
+        self.transcode = stream_info.get('transcode', self.transcode)
+
+        if hasattr(self.buffer, 'redis_client') and self.buffer.redis_client:
+            try:
+                metadata_key = RedisKeys.channel_metadata(self.channel_id)
+                self.buffer.redis_client.hset(
+                    metadata_key,
+                    mapping={
+                        ChannelMetadataField.URL: self.url,
+                        ChannelMetadataField.USER_AGENT: self.user_agent,
+                        ChannelMetadataField.INPUT_HEADERS: json.dumps(self.input_headers),
+                        ChannelMetadataField.STREAM_PROFILE: str(stream_info['stream_profile']),
+                        ChannelMetadataField.M3U_PROFILE: str(stream_info['m3u_profile_id']),
+                        ChannelMetadataField.STREAM_ID: str(stream_info['stream_id']),
+                    },
+                )
+            except Exception as e:
+                logger.debug(
+                    f"Error updating runtime stream metadata for channel {self.channel_id}: {e}"
+                )
+
+        if refreshed:
+            logger.info(
+                f"Refreshed runtime stream URL for channel {self.channel_id} during {reason}: "
+                f"{old_url} -> {self.url}"
+            )
+
+        return refreshed
 
     def _monitor_health(self):
         """Monitor stream health and set flags for the main loop to handle recovery"""
@@ -1240,6 +1295,8 @@ class StreamManager:
             self.reconnecting = True
 
             try:
+                self._refresh_runtime_stream_url(reason="health_reconnect")
+
                 # Close existing connection and wait for it to fully terminate
                 if self.transcode or self.socket:
                     logger.debug(f"Closing transcode process before reconnect for channel {self.channel_id}")
@@ -1666,7 +1723,12 @@ class StreamManager:
                 logger.info(f"Switching from URL {self.url} to {new_url} for channel {self.channel_id}")
 
                 # IMPORTANT: Just update the URL, don't stop the channel or release resources
-                switch_result = self.update_url(new_url, stream_id, profile_id)
+                switch_result = self.update_url(
+                    new_url,
+                    stream_id,
+                    profile_id,
+                    stream_info.get('input_headers'),
+                )
                 if not switch_result:
                     logger.error(f"Failed to update URL for stream ID {stream_id} for channel {self.channel_id}")
                     continue  # Try next stream
@@ -1684,6 +1746,7 @@ class StreamManager:
                     self.buffer.redis_client.hset(metadata_key, mapping={
                         ChannelMetadataField.URL: new_url,
                         ChannelMetadataField.USER_AGENT: new_user_agent,
+                        ChannelMetadataField.INPUT_HEADERS: json.dumps(stream_info.get('input_headers') or {}),
                         ChannelMetadataField.STREAM_PROFILE: stream_info['stream_profile'],
                         ChannelMetadataField.M3U_PROFILE: str(profile_id),  # Use the profile_id from get_alternate_streams
                         ChannelMetadataField.STREAM_ID: str(stream_id),
@@ -1711,3 +1774,27 @@ class StreamManager:
         self.url_switching = False
         self.url_switch_start_time = 0
         logger.info(f"Reset URL switching state for channel {self.channel_id}")
+
+    def _inject_ffmpeg_input_headers(self, cmd):
+        """Add provider-required input headers to ffmpeg commands before the input URL."""
+        if not self.input_headers or not cmd:
+            return cmd
+
+        if not cmd or cmd[0].lower() != 'ffmpeg':
+            return cmd
+
+        header_lines = []
+        for key, value in self.input_headers.items():
+            if not value or key.lower() == 'user-agent':
+                continue
+            header_lines.append(f"{key}: {value}")
+
+        if not header_lines:
+            return cmd
+
+        try:
+            input_index = cmd.index('-i')
+        except ValueError:
+            return cmd
+
+        return cmd[:input_index] + ['-headers', '\r\n'.join(header_lines) + '\r\n'] + cmd[input_index:]

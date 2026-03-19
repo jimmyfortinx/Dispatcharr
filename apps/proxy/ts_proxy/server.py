@@ -25,7 +25,7 @@ from .stream_manager import StreamManager
 from .stream_buffer import StreamBuffer
 from .client_manager import ClientManager
 from .redis_keys import RedisKeys
-from .constants import ChannelState, EventType, StreamType
+from .constants import ChannelState, EventType, StreamType, ChannelMetadataField
 from .config_helper import ConfigHelper
 from .utils import get_logger
 
@@ -480,7 +480,7 @@ class ProxyServer:
             logger.error(f"Error extending ownership: {e}")
             return False
 
-    def initialize_channel(self, url, channel_id, user_agent=None, transcode=False, stream_id=None):
+    def initialize_channel(self, url, channel_id, user_agent=None, input_headers=None, transcode=False, stream_id=None):
         """Initialize a channel without redundant active key"""
         try:
             # IMPROVED: First check if channel is already being initialized by another process
@@ -529,12 +529,15 @@ class ProxyServer:
                 }
                 if stream_id:
                     initial_metadata["stream_id"] = str(stream_id)
+                if input_headers:
+                    initial_metadata[ChannelMetadataField.INPUT_HEADERS] = json.dumps(input_headers)
                 self.redis_client.hset(metadata_key, mapping=initial_metadata)
                 logger.info(f"Set early initializing state for channel {channel_id}")
 
             # Get channel URL from Redis if available
             channel_url = url
             channel_user_agent = user_agent
+            channel_input_headers = input_headers
             channel_stream_id = stream_id  # Store the stream ID
 
             # First check if channel metadata already exists
@@ -553,6 +556,12 @@ class ProxyServer:
                     ua_bytes = existing_metadata.get(b'user_agent')
                     if ua_bytes:
                         channel_user_agent = ua_bytes.decode('utf-8')
+                    input_headers_bytes = existing_metadata.get(ChannelMetadataField.INPUT_HEADERS.encode('utf-8'))
+                    if input_headers_bytes:
+                        try:
+                            channel_input_headers = json.loads(input_headers_bytes.decode('utf-8'))
+                        except Exception:
+                            logger.debug(f"Could not parse input headers for channel {channel_id}")
 
                 # Get stream ID from metadata if not provided
                 if not channel_stream_id and b'stream_id' in existing_metadata:
@@ -619,6 +628,8 @@ class ProxyServer:
                 }
                 if channel_user_agent:
                     metadata["user_agent"] = channel_user_agent
+                if input_headers:
+                    metadata[ChannelMetadataField.INPUT_HEADERS] = json.dumps(input_headers)
 
                 # Make sure stream_id is always set in metadata and properly logged
                 if channel_stream_id:
@@ -649,6 +660,7 @@ class ProxyServer:
                 channel_url,
                 buffer,
                 user_agent=channel_user_agent,
+                input_headers=channel_input_headers,
                 transcode=transcode,
                 stream_id=channel_stream_id,  # Pass stream ID to the manager
                 worker_id=self.worker_id  # Pass worker_id explicitly to eliminate circular dependency

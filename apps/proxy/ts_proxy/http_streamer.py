@@ -15,9 +15,10 @@ logger = get_logger()
 class HTTPStreamReader:
     """Thread-based HTTP stream reader that writes to a pipe"""
 
-    def __init__(self, url, user_agent=None, chunk_size=8192):
+    def __init__(self, url, user_agent=None, headers=None, chunk_size=8192):
         self.url = url
         self.user_agent = user_agent
+        self.headers = dict(headers or {})
         self.chunk_size = chunk_size
         self.session = None
         self.response = None
@@ -43,7 +44,7 @@ class HTTPStreamReader:
         """Thread worker that reads HTTP stream and writes to pipe"""
         try:
             # Build headers
-            headers = {}
+            headers = dict(self.headers)
             if self.user_agent:
                 headers['User-Agent'] = self.user_agent
 

@@ -157,6 +157,7 @@ def stream_ts(request, channel_id):
 
             stream_url = None
             stream_user_agent = None
+            stream_input_headers = None
             transcode = False
             profile_value = None
             error_reason = None
@@ -166,7 +167,7 @@ def stream_ts(request, channel_id):
             # Try to get a stream with fixed interval retries
             while should_retry and time.time() - wait_start_time < retry_timeout:
                 attempt += 1
-                stream_url, stream_user_agent, transcode, profile_value = (
+                stream_url, stream_user_agent, stream_input_headers, transcode, profile_value, error_reason = (
                     generate_stream_url(channel_id)
                 )
 
@@ -176,15 +177,12 @@ def stream_ts(request, channel_id):
                     )
                     break
 
-                # On first failure, check if the error is retryable
-                if attempt == 1:
-                    _, _, error_reason = channel.get_stream()
-                    if error_reason and "maximum connection limits" not in error_reason:
-                        logger.warning(
-                            f"[{client_id}] Can't retry - error not related to connection limits: {error_reason}"
-                        )
-                        should_retry = False
-                        break
+                if error_reason and "maximum connection limits" not in error_reason:
+                    logger.warning(
+                        f"[{client_id}] Can't retry - error not related to connection limits: {error_reason}"
+                    )
+                    should_retry = False
+                    break
 
                 # Check if we have time remaining for another sleep cycle
                 elapsed_time = time.time() - wait_start_time
@@ -211,7 +209,7 @@ def stream_ts(request, channel_id):
                 logger.info(
                     f"[{client_id}] Making final attempt {attempt} at timeout boundary"
                 )
-                stream_url, stream_user_agent, transcode, profile_value = (
+                stream_url, stream_user_agent, stream_input_headers, transcode, profile_value, error_reason = (
                     generate_stream_url(channel_id)
                 )
                 if stream_url is not None:
@@ -356,6 +354,7 @@ def stream_ts(request, channel_id):
                 channel_id,
                 stream_url,
                 stream_user_agent,
+                stream_input_headers,
                 transcode,
                 profile_value,
                 stream_id,
@@ -499,7 +498,10 @@ def stream_ts(request, channel_id):
 
             # Use client_user_agent as fallback if stream_user_agent is None
             success = proxy_server.initialize_channel(
-                url, channel_id, stream_user_agent or client_user_agent, use_transcode
+                url,
+                channel_id,
+                user_agent=stream_user_agent or client_user_agent,
+                transcode=use_transcode,
             )
             if not success:
                 logger.error(
