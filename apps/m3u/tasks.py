@@ -1134,6 +1134,17 @@ def process_m3u_batch_direct(account_id, batch, groups, hash_keys):
         ]
         return "|".join(part for part in identity_parts if part)
 
+    def parse_stalker_channel_number(attributes):
+        for key in ("number", "num", "channel_number", "channel-number", "tvg-chno"):
+            raw_value = attributes.get(key)
+            if raw_value in (None, ""):
+                continue
+            try:
+                return float(raw_value)
+            except (ValueError, TypeError):
+                continue
+        return None
+
     logger.debug(f"Processing batch of {len(batch)} for M3U account {account_id}")
     if compiled_filters:
         logger.debug(f"Using compiled filters: {[f[1].regex_pattern for f in compiled_filters]}")
@@ -1204,6 +1215,7 @@ def process_m3u_batch_direct(account_id, batch, groups, hash_keys):
             elif account.account_type == M3UAccount.Types.STALKER:
                 account_type_for_hash = 'STALKER'
                 provider_identity = build_stalker_identity(stream_info["attributes"])
+                channel_num = parse_stalker_channel_number(stream_info["attributes"])
 
                 raw_stalker_channel_id = (
                     stream_info["attributes"].get("stalker_channel_id")
