@@ -602,6 +602,8 @@ def change_stream(request, channel_id):
         new_url = data.get("url")
         user_agent = data.get("user_agent")
         stream_id = data.get("stream_id")
+        input_headers = None
+        m3u_profile_id = None
 
         # If stream_id is provided, get the URL and user_agent from it
         if stream_id:
@@ -618,6 +620,7 @@ def change_stream(request, channel_id):
             # Use the info from the stream
             new_url = stream_info["url"]
             user_agent = stream_info["user_agent"]
+            input_headers = stream_info.get("input_headers") or {}
             m3u_profile_id = stream_info.get("m3u_profile_id")
             # Stream ID will be passed to change_stream_url later
         elif not new_url:
@@ -632,7 +635,12 @@ def change_stream(request, channel_id):
         # Use the service layer instead of direct implementation
         # Pass stream_id to ensure proper connection tracking
         result = ChannelService.change_stream_url(
-            channel_id, new_url, user_agent, stream_id, m3u_profile_id
+            channel_id,
+            new_url,
+            user_agent,
+            stream_id,
+            m3u_profile_id,
+            input_headers,
         )
 
         # Get the stream manager before updating URL
@@ -919,6 +927,8 @@ def next_stream(request, channel_id):
             stream_info["url"],
             stream_info["user_agent"],
             next_stream_id,  # Pass the stream_id to be stored in Redis
+            stream_info.get("m3u_profile_id"),
+            stream_info.get("input_headers") or {},
         )
 
         if result.get("status") == "error":

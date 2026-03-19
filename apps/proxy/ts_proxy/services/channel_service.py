@@ -95,7 +95,14 @@ class ChannelService:
         return success
 
     @staticmethod
-    def change_stream_url(channel_id, new_url=None, user_agent=None, target_stream_id=None, m3u_profile_id=None):
+    def change_stream_url(
+        channel_id,
+        new_url=None,
+        user_agent=None,
+        target_stream_id=None,
+        m3u_profile_id=None,
+        input_headers=None,
+    ):
         """
         Change the URL of an existing stream.
 
@@ -113,23 +120,41 @@ class ChannelService:
 
         # If no direct URL is provided but a target stream is, get URL from target stream
         stream_id = None
-        input_headers = None
         if not new_url and target_stream_id:
             stream_info = get_stream_info_for_switch(channel_id, target_stream_id)
             if 'error' in stream_info:
                 return {
                     'status': 'error',
                     'message': stream_info['error']
-                }
+            }
             new_url = stream_info['url']
             user_agent = stream_info['user_agent']
-            input_headers = stream_info.get('input_headers')
+            input_headers = stream_info.get('input_headers') or {}
             stream_id = target_stream_id
             # Extract M3U profile ID from stream info if available
             if 'm3u_profile_id' in stream_info:
                 m3u_profile_id = stream_info['m3u_profile_id']
                 logger.info(f"Found M3U profile ID {m3u_profile_id} for stream ID {stream_id}")
         elif target_stream_id:
+            # If the caller already resolved the URL but omitted runtime context,
+            # fetch the switch info so provider-specific headers/profile state are preserved.
+            if (
+                user_agent is None
+                or m3u_profile_id is None
+                or input_headers is None
+            ):
+                stream_info = get_stream_info_for_switch(channel_id, target_stream_id)
+                if 'error' in stream_info:
+                    return {
+                        'status': 'error',
+                        'message': stream_info['error']
+                    }
+                new_url = new_url or stream_info['url']
+                user_agent = user_agent or stream_info['user_agent']
+                input_headers = stream_info.get('input_headers') or {}
+                if m3u_profile_id is None:
+                    m3u_profile_id = stream_info.get('m3u_profile_id')
+
             # If we have both URL and target_stream_id, use the target_stream_id
             stream_id = target_stream_id
 
@@ -165,6 +190,8 @@ class ChannelService:
                     new_url,
                     channel_id,
                     user_agent=user_agent,
+                    input_headers=input_headers,
+                    stream_id=stream_id,
                 )
                 result = {
                     'status': 'recovered',
@@ -224,7 +251,14 @@ class ChannelService:
             # If we're not the owner, publish an event for the owner to pick up
             logger.info(f"Not the owner, requesting URL change via Redis PubSub")
             if proxy_server.redis_client:
-                ChannelService._publish_stream_switch_event(channel_id, new_url, user_agent, stream_id, m3u_profile_id)
+                ChannelService._publish_stream_switch_event(
+                    channel_id,
+                    new_url,
+                    user_agent,
+                    stream_id,
+                    m3u_profile_id,
+                    input_headers,
+                )
                 result.update({
                     'direct_update': False,
                     'event_published': True,
@@ -614,8 +648,8 @@ class ChannelService:
         metadata = {ChannelMetadataField.URL: url}
         if user_agent:
             metadata[ChannelMetadataField.USER_AGENT] = user_agent
-        if input_headers:
-            metadata[ChannelMetadataField.INPUT_HEADERS] = json.dumps(input_headers)
+        if input_headers is not None:
+            metadata[ChannelMetadataField.INPUT_HEADERS] = json.dumps(input_headers or {})
         if stream_id:
             metadata[ChannelMetadataField.STREAM_ID] = str(stream_id)
         if m3u_profile_id:
@@ -642,7 +676,14 @@ class ChannelService:
         return True
 
     @staticmethod
-    def _publish_stream_switch_event(channel_id, new_url, user_agent=None, stream_id=None, m3u_profile_id=None):
+    def _publish_stream_switch_event(
+        channel_id,
+        new_url,
+        user_agent=None,
+        stream_id=None,
+        m3u_profile_id=None,
+        input_headers=None,
+    ):
         """Publish a stream switch event to Redis pubsub"""
         proxy_server = ProxyServer.get_instance()
 
@@ -656,6 +697,7 @@ class ChannelService:
             "user_agent": user_agent,
             "stream_id": stream_id,
             "m3u_profile_id": m3u_profile_id,
+            "input_headers": input_headers,
             "requester": proxy_server.worker_id,
             "timestamp": time.time()
         }
