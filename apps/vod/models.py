@@ -242,19 +242,10 @@ class M3UMovieRelation(models.Model):
         return f"{self.m3u_account.name} - {self.movie.name}"
 
     def get_stream_url(self):
-        """Get the full stream URL for this movie from this provider"""
-        # Build URL dynamically for XtreamCodes accounts
-        if self.m3u_account.account_type == 'XC':
-            from core.xtream_codes import Client as XCClient
-            # Use XC client's URL normalization to handle malformed URLs
-            # (e.g., URLs with /player_api.php or query parameters)
-            normalized_url = XCClient(self.m3u_account.server_url, '', '')._normalize_url(self.m3u_account.server_url)
-            username = self.m3u_account.username
-            password = self.m3u_account.password
-            return f"{normalized_url}/movie/{username}/{password}/{self.stream_id}.{self.container_extension or 'mp4'}"
-        else:
-            # For other account types, we would need another way to build URLs
-            return None
+        """Resolve the full upstream URL for this movie relation."""
+        from .resolvers import resolve_vod_stream_context
+
+        return resolve_vod_stream_context(self).url
 
 
 class M3UEpisodeRelation(models.Model):
@@ -291,21 +282,10 @@ class M3UEpisodeRelation(models.Model):
         return f"{self.m3u_account.name} - {self.episode}"
 
     def get_stream_url(self):
-        """Get the full stream URL for this episode from this provider"""
-        from core.xtream_codes import Client as XtreamCodesClient
+        """Resolve the full upstream URL for this episode relation."""
+        from .resolvers import resolve_vod_stream_context
 
-        if self.m3u_account.account_type == 'XC':
-            # For XtreamCodes accounts, build the URL dynamically
-            # Use XC client's URL normalization to handle malformed URLs
-            # (e.g., URLs with /player_api.php or query parameters)
-            normalized_url = XtreamCodesClient(self.m3u_account.server_url, '', '')._normalize_url(self.m3u_account.server_url)
-            username = self.m3u_account.username
-            password = self.m3u_account.password
-            return f"{normalized_url}/series/{username}/{password}/{self.stream_id}.{self.container_extension or 'mp4'}"
-        else:
-            # We might support non XC accounts in the future
-            # For now, return None
-            return None
+        return resolve_vod_stream_context(self).url
 
 class M3UVODCategoryRelation(models.Model):
     """Links M3U accounts to categories with provider-specific information"""

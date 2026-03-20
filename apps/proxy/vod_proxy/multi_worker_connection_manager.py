@@ -761,7 +761,8 @@ class MultiWorkerVODConnectionManager:
 
     def stream_content_with_session(self, session_id, content_obj, stream_url, m3u_profile,
                                   client_ip, client_user_agent, request,
-                                  utc_start=None, utc_end=None, offset=None, range_header=None):
+                                  utc_start=None, utc_end=None, offset=None, range_header=None,
+                                  input_headers=None):
         """Stream content with Redis-backed persistent connection"""
 
         # Generate client ID
@@ -843,6 +844,12 @@ class MultiWorkerVODConnectionManager:
                     django_header = f'HTTP_{header_name.upper().replace("-", "_")}'
                     if hasattr(request, 'META') and django_header in request.META:
                         headers[header_name] = request.META[django_header]
+
+                if input_headers:
+                    headers.update(input_headers)
+                    logger.info(
+                        f"[{client_id}] Applied provider input headers: {sorted(input_headers.keys())}"
+                    )
 
                 # Create connection state in Redis with consolidated session metadata
                 if not redis_connection.create_connection(

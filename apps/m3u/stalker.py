@@ -779,6 +779,10 @@ class StalkerClient:
             raise StalkerError("Stalker stream is missing a usable live command.")
         return self.create_link(portal_url, fresh_cmd)
 
+    def _resolve_vod_playback_url_once(self, portal_url, cmd):
+        self.prepare_playback_session(portal_url)
+        return self.create_vod_link(portal_url, cmd)
+
     def _should_retry_playback_resolution(self, exc):
         if isinstance(exc, StalkerRecoverableError):
             return True
@@ -885,6 +889,20 @@ class StalkerClient:
                 exc,
             )
             return self._resolve_playback_url_once(portal_url, channel_metadata)
+
+    def resolve_vod_playback_url(self, portal_url, cmd):
+        try:
+            return self._resolve_vod_playback_url_once(portal_url, cmd)
+        except StalkerError as exc:
+            if not self._should_retry_playback_resolution(exc):
+                raise
+
+            logger.info(
+                "Retrying Stalker VOD playback URL resolution after session recovery for %s: %s",
+                portal_url,
+                exc,
+            )
+            return self._resolve_vod_playback_url_once(portal_url, cmd)
 
     def _normalize_channel(self, channel, portal_url, genre_map):
         if not isinstance(channel, dict):

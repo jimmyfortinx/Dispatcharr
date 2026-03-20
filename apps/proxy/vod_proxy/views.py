@@ -13,6 +13,7 @@ from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
 from django.views import View
 from apps.vod.models import Movie, Series, Episode
+from apps.vod.resolvers import resolve_vod_stream_context
 from apps.m3u.models import M3UAccount, M3UAccountProfile
 from apps.proxy.vod_proxy.connection_manager import VODConnectionManager
 from apps.proxy.vod_proxy.multi_worker_connection_manager import MultiWorkerVODConnectionManager, infer_content_type_from_url, get_vod_client_stop_key
@@ -168,8 +169,9 @@ class VODStreamView(View):
             m3u_account = relation.m3u_account
             logger.info(f"[VOD-ACCOUNT] Using M3U account: {m3u_account.name}")
 
-            # Get stream URL from relation
-            stream_url = self._get_stream_url_from_relation(relation)
+            # Resolve provider-specific playback context before profile transforms.
+            stream_context = self._get_stream_context_from_relation(relation)
+            stream_url = stream_context.get("url")
             logger.info(f"[VOD-CONTENT] Content URL: {stream_url or 'No URL found'}")
 
             if not stream_url:
@@ -212,7 +214,8 @@ class VODStreamView(View):
                 utc_start=utc_start,
                 utc_end=utc_end,
                 offset=offset,
-                range_header=range_header
+                range_header=range_header,
+                input_headers=stream_context.get("input_headers"),
             )
 
             logger.info(f"[VOD-SUCCESS] Stream response created successfully, type: {type(response)}")
@@ -275,7 +278,8 @@ class VODStreamView(View):
 
             # Get M3U account and stream URL
             m3u_account = relation.m3u_account
-            stream_url = self._get_stream_url_from_relation(relation)
+            stream_context = self._get_stream_context_from_relation(relation)
+            stream_url = stream_context.get("url")
             if not stream_url:
                 logger.error(f"[VOD-HEAD] No stream URL available for {content_type} {content_id}")
                 return HttpResponse("No stream URL available", status=503)
@@ -300,6 +304,8 @@ class VODStreamView(View):
                 'Accept': '*/*',
                 'Range': 'bytes=0-1'  # Request only first 2 bytes
             }
+            if stream_context.get("input_headers"):
+                headers.update(stream_context["input_headers"])
 
             logger.info(f"[VOD-HEAD] Making small range GET request to provider: {final_stream_url}")
             response = requests.get(final_stream_url, headers=headers, timeout=30, allow_redirects=True, stream=True)
@@ -510,28 +516,48 @@ class VODStreamView(View):
             logger.error(f"Error getting content object: {e}")
             return None, None
 
-    def _get_stream_url_from_relation(self, relation):
-        """Get stream URL from the M3U relation"""
+    def _get_stream_context_from_relation(self, relation):
+        """Resolve stream URL and any provider-specific request headers."""
         try:
             # Log the relation type and available attributes
             logger.info(f"[VOD-URL] Relation type: {type(relation).__name__}")
             logger.info(f"[VOD-URL] Account type: {relation.m3u_account.account_type}")
             logger.info(f"[VOD-URL] Stream ID: {getattr(relation, 'stream_id', 'N/A')}")
 
-            # First try the get_stream_url method (this should build URLs dynamically)
+            stream_context = resolve_vod_stream_context(relation)
+            if stream_context.url:
+                logger.info(f"[VOD-URL] Resolved provider-aware URL: {stream_context.url}")
+                return {
+                    "url": stream_context.url,
+                    "user_agent": stream_context.user_agent,
+                    "input_headers": stream_context.input_headers,
+                }
+
+            # Fallback to legacy relation behavior for unsupported relation types.
             if hasattr(relation, 'get_stream_url'):
                 url = relation.get_stream_url()
                 if url:
-                    logger.info(f"[VOD-URL] Built URL from get_stream_url(): {url}")
-                    return url
-                else:
-                    logger.warning(f"[VOD-URL] get_stream_url() returned None")
+                    logger.info(f"[VOD-URL] Built URL from legacy get_stream_url(): {url}")
+                    return {
+                        "url": url,
+                        "user_agent": None,
+                        "input_headers": None,
+                    }
+                logger.warning(f"[VOD-URL] get_stream_url() returned None")
 
             logger.error(f"[VOD-URL] Relation has no get_stream_url method or it failed")
-            return None
+            return {
+                "url": None,
+                "user_agent": None,
+                "input_headers": None,
+            }
         except Exception as e:
             logger.error(f"[VOD-URL] Error getting stream URL from relation: {e}", exc_info=True)
-            return None
+            return {
+                "url": None,
+                "user_agent": None,
+                "input_headers": None,
+            }
 
     def _get_m3u_profile(self, m3u_account, profile_id, session_id=None):
         """Get appropriate M3U profile for streaming using Redis-based viewer counts
@@ -1078,5 +1104,4 @@ def stop_vod_client(request):
     except Exception as e:
         logger.error(f"Error stopping VOD client: {e}", exc_info=True)
         return JsonResponse({'error': str(e)}, status=500)
-
 
