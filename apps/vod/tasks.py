@@ -208,6 +208,7 @@ def refresh_categories(account_id, client=None):
 def refresh_movies(client, account, categories_by_provider, relations, scan_start_time=None):
     """Refresh movie content using single API call for all movies"""
     logger.info(f"Refreshing movies for account {account.name}")
+    seen_movie_keys = set()
 
     # Ensure "Uncategorized" category exists for movies without a category
     uncategorized_category, created = VODCategory.objects.get_or_create(
@@ -264,6 +265,7 @@ def refresh_movies(client, account, categories_by_provider, relations, scan_star
                 categories_by_provider,
                 relations,
                 scan_start_time,
+                seen_movie_keys=seen_movie_keys,
             )
 
         logger.info(
@@ -287,7 +289,14 @@ def refresh_movies(client, account, categories_by_provider, relations, scan_star
         chunk_num = (i // chunk_size) + 1
 
         logger.info(f"Processing movie chunk {chunk_num}/{total_chunks} ({len(chunk)} movies)")
-        process_movie_batch(account, chunk, categories_by_provider, relations, scan_start_time)
+        process_movie_batch(
+            account,
+            chunk,
+            categories_by_provider,
+            relations,
+            scan_start_time,
+            seen_movie_keys=seen_movie_keys,
+        )
 
     logger.info(f"Completed processing all {total_movies} movies in {total_chunks} chunks")
 
@@ -295,6 +304,7 @@ def refresh_movies(client, account, categories_by_provider, relations, scan_star
 def refresh_series(client, account, categories_by_provider, relations, scan_start_time=None):
     """Refresh series content using single API call for all series"""
     logger.info(f"Refreshing series for account {account.name}")
+    seen_series_keys = set()
 
     # Ensure "Uncategorized" category exists for series without a category
     uncategorized_category, created = VODCategory.objects.get_or_create(
@@ -351,6 +361,7 @@ def refresh_series(client, account, categories_by_provider, relations, scan_star
                 categories_by_provider,
                 relations,
                 scan_start_time,
+                seen_series_keys=seen_series_keys,
             )
 
         logger.info(
@@ -374,7 +385,14 @@ def refresh_series(client, account, categories_by_provider, relations, scan_star
         chunk_num = (i // chunk_size) + 1
 
         logger.info(f"Processing series chunk {chunk_num}/{total_chunks} ({len(chunk)} series)")
-        process_series_batch(account, chunk, categories_by_provider, relations, scan_start_time)
+        process_series_batch(
+            account,
+            chunk,
+            categories_by_provider,
+            relations,
+            scan_start_time,
+            seen_series_keys=seen_series_keys,
+        )
 
     logger.info(f"Completed processing all {total_series} series in {total_chunks} chunks")
 
@@ -836,7 +854,7 @@ def build_series_relation_custom_properties(existing_props, series_data):
 
 
 @shared_task
-def process_movie_batch(account, batch, categories, relations, scan_start_time=None):
+def process_movie_batch(account, batch, categories, relations, scan_start_time=None, seen_movie_keys=None):
     """Process a batch of movies using simple bulk operations like M3U processing"""
     logger.info(f"Processing movie batch of {len(batch)} movies for account {account.name}")
 
@@ -845,6 +863,8 @@ def process_movie_batch(account, batch, categories, relations, scan_start_time=N
     relations_to_create = []
     relations_to_update = []
     movie_keys = {}  # For deduplication like M3U stream_hashes
+    if seen_movie_keys is None:
+        seen_movie_keys = set()
 
     # Process each movie in the batch
     for movie_data in batch:
@@ -913,8 +933,8 @@ def process_movie_batch(account, batch, categories, relations, scan_start_time=N
             else:
                 movie_key = f"name_{name}_{year or 'None'}"
 
-            # Skip duplicates in this batch
-            if movie_key in movie_keys:
+            # Skip duplicates already seen earlier in this refresh or earlier in this batch
+            if movie_key in movie_keys or movie_key in seen_movie_keys:
                 continue
 
             # Prepare movie properties
@@ -953,6 +973,7 @@ def process_movie_batch(account, batch, categories, relations, scan_start_time=N
                 'movie_data': movie_data,
                 'logo_url': logo_url  # Keep logo URL for later processing
             }
+            seen_movie_keys.add(movie_key)
 
         except Exception as e:
             logger.error(f"Error preparing movie {movie_data.get('name', 'Unknown')}: {str(e)}")
@@ -1195,7 +1216,7 @@ def process_movie_batch(account, batch, categories, relations, scan_start_time=N
 
 
 @shared_task
-def process_series_batch(account, batch, categories, relations, scan_start_time=None):
+def process_series_batch(account, batch, categories, relations, scan_start_time=None, seen_series_keys=None):
     """Process a batch of series using simple bulk operations like M3U processing"""
     logger.info(f"Processing series batch of {len(batch)} series for account {account.name}")
 
@@ -1204,6 +1225,8 @@ def process_series_batch(account, batch, categories, relations, scan_start_time=
     relations_to_create = []
     relations_to_update = []
     series_keys = {}  # For deduplication like M3U stream_hashes
+    if seen_series_keys is None:
+        seen_series_keys = set()
 
     # Process each series in the batch
     for series_data in batch:
@@ -1272,8 +1295,8 @@ def process_series_batch(account, batch, categories, relations, scan_start_time=
             else:
                 series_key = f"name_{name}_{year or 'None'}"
 
-            # Skip duplicates in this batch
-            if series_key in series_keys:
+            # Skip duplicates already seen earlier in this refresh or earlier in this batch
+            if series_key in series_keys or series_key in seen_series_keys:
                 continue
 
             # Prepare series properties
@@ -1321,6 +1344,7 @@ def process_series_batch(account, batch, categories, relations, scan_start_time=
                 'series_data': series_data,
                 'logo_url': logo_url  # Keep logo URL for later processing
             }
+            seen_series_keys.add(series_key)
 
         except Exception as e:
             logger.error(f"Error preparing series {series_data.get('name', 'Unknown')}: {str(e)}")

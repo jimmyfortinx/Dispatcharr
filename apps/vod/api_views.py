@@ -42,6 +42,20 @@ from datetime import timedelta
 logger = logging.getLogger(__name__)
 
 
+def _dedupe_relations_by_account(relations):
+    """Return one provider relation per M3U account, preferring the freshest row."""
+    unique_relations = []
+    seen_accounts = set()
+
+    for relation in relations.order_by('m3u_account_id', '-last_seen', '-id'):
+        if relation.m3u_account_id in seen_accounts:
+            continue
+        seen_accounts.add(relation.m3u_account_id)
+        unique_relations.append(relation)
+
+    return unique_relations
+
+
 class VODPagination(PageNumberPagination):
     page_size = 20  # Default page size to match frontend default
     page_size_query_param = "page_size"  # Allow clients to specify page size
@@ -110,7 +124,10 @@ class MovieViewSet(viewsets.ReadOnlyModelViewSet):
             m3u_account__is_active=True
         ).select_related('m3u_account', 'category')
 
-        serializer = M3UMovieRelationSerializer(relations, many=True)
+        serializer = M3UMovieRelationSerializer(
+            _dedupe_relations_by_account(relations),
+            many=True,
+        )
         return Response(serializer.data)
 
 
@@ -291,7 +308,10 @@ class SeriesViewSet(viewsets.ReadOnlyModelViewSet):
             m3u_account__is_active=True
         ).select_related('m3u_account', 'category')
 
-        serializer = M3USeriesRelationSerializer(relations, many=True)
+        serializer = M3USeriesRelationSerializer(
+            _dedupe_relations_by_account(relations),
+            many=True,
+        )
         return Response(serializer.data)
 
     @action(detail=True, methods=['get'], url_path='episodes')

@@ -16,6 +16,8 @@ from apps.vod.models import (
 from apps.vod.tasks import (
     cleanup_orphaned_vod_content,
     get_stalker_category_requests,
+    process_movie_batch,
+    process_series_batch,
     refresh_movies,
     refresh_series,
 )
@@ -336,3 +338,130 @@ class StalkerPhase12CleanupTests(TestCase):
         self.assertTrue(Series.objects.filter(id=shared_series.id).exists())
         self.assertFalse(Movie.objects.filter(id=orphan_movie.id).exists())
         self.assertFalse(Series.objects.filter(id=orphan_series.id).exists())
+
+
+class VODCrossChunkDedupTests(TestCase):
+    def setUp(self):
+        self.xc_account = M3UAccount.objects.create(
+            name="XC VOD",
+            account_type=M3UAccount.Types.XC,
+            server_url="http://xc.example.com",
+            username="demo",
+            password="secret",
+            custom_properties={"enable_vod": True},
+        )
+        self.movie_category = VODCategory.objects.create(
+            name="Movies",
+            category_type="movie",
+        )
+        self.series_category = VODCategory.objects.create(
+            name="Series",
+            category_type="series",
+        )
+        self.movie_category_relation = M3UVODCategoryRelation.objects.create(
+            m3u_account=self.xc_account,
+            category=self.movie_category,
+            enabled=True,
+        )
+        self.series_category_relation = M3UVODCategoryRelation.objects.create(
+            m3u_account=self.xc_account,
+            category=self.series_category,
+            enabled=True,
+        )
+        self.scan_start_time = timezone.now()
+
+    def test_process_movie_batch_deduplicates_same_movie_across_batches(self):
+        seen_movie_keys = set()
+        categories = {"1": self.movie_category}
+        relations = {self.movie_category.id: self.movie_category_relation}
+
+        first_batch = [
+            {
+                "stream_id": "1001",
+                "name": "Dust Bunny",
+                "tmdb_id": "1043197",
+                "year": "2025",
+                "category_id": "1",
+            }
+        ]
+        second_batch = [
+            {
+                "stream_id": "1002",
+                "name": "Dust Bunny DE",
+                "tmdb_id": "1043197",
+                "year": "2025",
+                "category_id": "1",
+            }
+        ]
+
+        process_movie_batch(
+            self.xc_account,
+            first_batch,
+            categories,
+            relations,
+            scan_start_time=self.scan_start_time,
+            seen_movie_keys=seen_movie_keys,
+        )
+        process_movie_batch(
+            self.xc_account,
+            second_batch,
+            categories,
+            relations,
+            scan_start_time=self.scan_start_time,
+            seen_movie_keys=seen_movie_keys,
+        )
+
+        self.assertEqual(Movie.objects.count(), 1)
+        self.assertEqual(M3UMovieRelation.objects.count(), 1)
+        self.assertEqual(
+            M3UMovieRelation.objects.get().stream_id,
+            "1001",
+        )
+
+    def test_process_series_batch_deduplicates_same_series_across_batches(self):
+        seen_series_keys = set()
+        categories = {"2": self.series_category}
+        relations = {self.series_category.id: self.series_category_relation}
+
+        first_batch = [
+            {
+                "series_id": "2001",
+                "name": "Fatal Seduction",
+                "tmdb_id": "12345",
+                "year": "2023",
+                "category_id": "2",
+            }
+        ]
+        second_batch = [
+            {
+                "series_id": "2002",
+                "name": "Fatal Seduction DE",
+                "tmdb_id": "12345",
+                "year": "2023",
+                "category_id": "2",
+            }
+        ]
+
+        process_series_batch(
+            self.xc_account,
+            first_batch,
+            categories,
+            relations,
+            scan_start_time=self.scan_start_time,
+            seen_series_keys=seen_series_keys,
+        )
+        process_series_batch(
+            self.xc_account,
+            second_batch,
+            categories,
+            relations,
+            scan_start_time=self.scan_start_time,
+            seen_series_keys=seen_series_keys,
+        )
+
+        self.assertEqual(Series.objects.count(), 1)
+        self.assertEqual(M3USeriesRelation.objects.count(), 1)
+        self.assertEqual(
+            M3USeriesRelation.objects.get().external_series_id,
+            "2001",
+        )

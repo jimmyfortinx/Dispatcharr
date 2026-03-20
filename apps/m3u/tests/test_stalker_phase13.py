@@ -9,7 +9,9 @@ from rest_framework.test import APIClient
 from apps.m3u.models import M3UAccount
 from apps.vod.models import (
     Episode,
+    Movie,
     M3UEpisodeRelation,
+    M3UMovieRelation,
     M3USeriesRelation,
     M3UVODCategoryRelation,
     Series,
@@ -485,3 +487,61 @@ class StalkerPhase13ProviderInfoApiTests(StalkerPhase13Base):
         self.assertEqual(payload["episodes"]["1"][0]["container_extension"], "mkv")
         self.assertEqual(payload["episodes"]["2"][0]["title"], "Episode 1")
         mock_prepare_authenticated_session.assert_called()
+
+
+class VODProvidersApiTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username="provider-admin",
+            password="testpass123",
+            user_level=10,
+        )
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.user)
+
+        self.movie = Movie.objects.create(
+            name="Dust Bunny",
+            year=2025,
+            tmdb_id="1043197",
+        )
+        self.primary_account = M3UAccount.objects.create(
+            name="trexiptv",
+            account_type=M3UAccount.Types.XC,
+            server_url="http://xc.example.com",
+            username="demo1",
+            password="secret1",
+        )
+        self.secondary_account = M3UAccount.objects.create(
+            name="onair",
+            account_type=M3UAccount.Types.XC,
+            server_url="http://xc2.example.com",
+            username="demo2",
+            password="secret2",
+        )
+
+    def test_movie_providers_endpoint_returns_one_relation_per_account(self):
+        M3UMovieRelation.objects.create(
+            m3u_account=self.primary_account,
+            movie=self.movie,
+            stream_id="1001",
+        )
+        M3UMovieRelation.objects.create(
+            m3u_account=self.primary_account,
+            movie=self.movie,
+            stream_id="1002",
+        )
+        M3UMovieRelation.objects.create(
+            m3u_account=self.secondary_account,
+            movie=self.movie,
+            stream_id="2001",
+        )
+
+        response = self.client.get(f"/api/vod/movies/{self.movie.id}/providers/")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        payload = response.json()
+        self.assertEqual(len(payload), 2)
+        self.assertCountEqual(
+            [item["m3u_account"]["name"] for item in payload],
+            ["trexiptv", "onair"],
+        )
