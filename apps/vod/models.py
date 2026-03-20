@@ -329,3 +329,30 @@ class M3UVODCategoryRelation(models.Model):
 
     def __str__(self):
         return f"{self.m3u_account.name} - {self.category.name}"
+
+
+def ensure_default_vod_category_relations(account):
+    """Ensure default VOD category relations exist for a VOD-enabled account."""
+    custom_props = account.custom_properties or {}
+    results = {}
+
+    for category_type, auto_enable_key in (
+        ("movie", "auto_enable_new_groups_vod"),
+        ("series", "auto_enable_new_groups_series"),
+    ):
+        category, _ = VODCategory.objects.get_or_create(
+            name="Uncategorized",
+            category_type=category_type,
+            defaults={},
+        )
+        relation, _ = M3UVODCategoryRelation.objects.get_or_create(
+            category=category,
+            m3u_account=account,
+            defaults={
+                "enabled": custom_props.get(auto_enable_key, True),
+                "custom_properties": {},
+            },
+        )
+        results[category_type] = relation
+
+    return results

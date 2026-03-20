@@ -23,7 +23,10 @@ from .models import M3UAccount, M3UFilter, ServerGroup, M3UAccountProfile
 from core.models import UserAgent
 from apps.channels.models import ChannelGroupM3UAccount
 from core.serializers import UserAgentSerializer
-from apps.vod.models import M3UVODCategoryRelation
+from apps.vod.models import (
+    M3UVODCategoryRelation,
+    ensure_default_vod_category_relations,
+)
 
 from .serializers import (
     M3UAccountSerializer,
@@ -95,15 +98,23 @@ class M3UAccountViewSet(viewsets.ModelViewSet):
             'playlist_id': account_id
         })
 
+        enable_vod = request.data.get("enable_vod", False)
+
         if account_type == M3UAccount.Types.XC:
             refresh_m3u_groups(account_id)
 
-            # Check if VOD is enabled
-            enable_vod = request.data.get("enable_vod", False)
             if enable_vod:
+                ensure_default_vod_category_relations(
+                    M3UAccount.objects.get(id=account_id)
+                )
+
                 from apps.vod.tasks import refresh_categories
 
                 refresh_categories(account_id)
+        elif account_type == M3UAccount.Types.STALKER and enable_vod:
+            ensure_default_vod_category_relations(
+                M3UAccount.objects.get(id=account_id)
+            )
 
         # After the instance is created, return the response
         return response
@@ -154,54 +165,13 @@ class M3UAccountViewSet(viewsets.ModelViewSet):
         # Check if VOD setting changed and trigger refresh if needed
         new_vod_enabled = request.data.get("enable_vod", old_vod_enabled)
 
-        if (
-            instance.account_type == M3UAccount.Types.XC
-            and not old_vod_enabled
-            and new_vod_enabled
-        ):
-            # Create Uncategorized categories immediately so they're available in the UI
-            from apps.vod.models import VODCategory, M3UVODCategoryRelation
+        if not old_vod_enabled and new_vod_enabled:
+            ensure_default_vod_category_relations(instance)
 
-            # Create movie Uncategorized category
-            movie_category, _ = VODCategory.objects.get_or_create(
-                name="Uncategorized",
-                category_type="movie",
-                defaults={}
-            )
+            if instance.account_type == M3UAccount.Types.XC:
+                from apps.vod.tasks import refresh_vod_content
 
-            # Create series Uncategorized category
-            series_category, _ = VODCategory.objects.get_or_create(
-                name="Uncategorized",
-                category_type="series",
-                defaults={}
-            )
-
-            # Create relations for both categories (disabled by default until first refresh)
-            account_custom_props = instance.custom_properties or {}
-            auto_enable_new = account_custom_props.get("auto_enable_new_groups_vod", True)
-
-            M3UVODCategoryRelation.objects.get_or_create(
-                category=movie_category,
-                m3u_account=instance,
-                defaults={
-                    'enabled': auto_enable_new,
-                    'custom_properties': {}
-                }
-            )
-
-            M3UVODCategoryRelation.objects.get_or_create(
-                category=series_category,
-                m3u_account=instance,
-                defaults={
-                    'enabled': auto_enable_new,
-                    'custom_properties': {}
-                }
-            )
-
-            # Trigger full VOD refresh
-            from apps.vod.tasks import refresh_vod_content
-
-            refresh_vod_content.delay(instance.id)
+                refresh_vod_content.delay(instance.id)
 
         # After the instance is updated, return the response
         return response
@@ -316,6 +286,56 @@ class M3UAccountViewSet(viewsets.ModelViewSet):
                 {"error": f"Failed to initiate VOD refresh: {str(e)}"},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
+
+    @action(detail=True, methods=["post"], url_path="discover-vod-protocol")
+    def discover_vod_protocol(self, request, pk=None):
+        """Capture Stalker VOD samples so later phases can use validated payloads."""
+        account = self.get_object()
+
+        if account.account_type != M3UAccount.Types.STALKER:
+            return Response(
+                {"error": "VOD protocol discovery is only available for Stalker accounts"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        custom_props = account.custom_properties or {}
+        client = StalkerClient(
+            server_url=account.server_url,
+            mac=custom_props.get("mac", ""),
+            username=account.username or "",
+            password=account.password or "",
+            custom_properties=custom_props,
+        )
+
+        try:
+            result = client.discover_vod_protocol()
+        except StalkerError as exc:
+            account.status = M3UAccount.Status.ERROR
+            account.last_message = str(exc)
+            account.save(update_fields=["status", "last_message"])
+            return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        updated_props = dict(custom_props)
+        updated_props["token"] = result.token
+        updated_props["stalker_vod_protocol_samples"] = result.samples
+        account.custom_properties = updated_props
+        account.status = M3UAccount.Status.SUCCESS
+        account.last_message = (
+            f"Captured Stalker VOD protocol samples from {result.normalized_portal_url} "
+            f"as {result.profile_name}."
+        )
+        account.save(update_fields=["custom_properties", "status", "last_message"])
+
+        return Response(
+            {
+                "message": account.last_message,
+                "normalized_portal_url": result.normalized_portal_url,
+                "profile_name": result.profile_name,
+                "used_authentication": result.used_authentication,
+                "samples": result.samples,
+                "account": self.get_serializer(account).data,
+            }
+        )
 
     @action(detail=True, methods=["patch"], url_path="group-settings")
     def update_group_settings(self, request, pk=None):

@@ -58,6 +58,15 @@ class StalkerChannelDiscoveryResult:
     used_authentication: bool
 
 
+@dataclass
+class StalkerVodDiscoveryResult:
+    normalized_portal_url: str
+    profile_name: str
+    samples: dict
+    token: str
+    used_authentication: bool
+
+
 class StalkerClient:
     def __init__(
         self,
@@ -199,6 +208,22 @@ class StalkerClient:
         detail = errors[-1] if errors else "No portal endpoints could be tested."
         raise StalkerError(detail)
 
+    def discover_vod_protocol(self):
+        errors = []
+        for candidate in self.normalize_portal_candidates(self.server_url):
+            try:
+                return self._discover_vod_candidate(candidate)
+            except StalkerError as exc:
+                errors.append(f"{candidate}: {exc}")
+                logger.info(
+                    "Stalker VOD discovery attempt failed for %s: %s",
+                    candidate,
+                    exc,
+                )
+
+        detail = errors[-1] if errors else "No portal endpoints could be tested."
+        raise StalkerError(detail)
+
     def _discover_candidate(self, portal_url):
         self.handshake(portal_url)
         used_authentication = False
@@ -267,6 +292,82 @@ class StalkerClient:
             profile_name=str(profile_name).strip() or self.mac,
             genres=genres,
             channels=normalized_channels,
+            token=self.token,
+            used_authentication=used_authentication,
+        )
+
+    def _discover_vod_candidate(self, portal_url):
+        self.handshake(portal_url)
+        used_authentication = False
+        if self.username or self.password:
+            self.authenticate(portal_url)
+            used_authentication = True
+        elif self._should_use_device_id_auth():
+            self.authenticate_with_device_ids(portal_url)
+        profile = self.get_profile(portal_url)
+
+        profile_name = (
+            profile.get("name")
+            or profile.get("fname")
+            or profile.get("login")
+            or self.username
+            or self.mac
+        )
+
+        movie_categories = self.get_vod_categories(portal_url)
+        series_categories = self.get_series_categories(portal_url)
+        movie_list = self.get_vod_movies(
+            portal_url,
+            category_id=self._extract_first_vod_category_id(movie_categories),
+        )
+        series_list = self.get_vod_series(
+            portal_url,
+            category_id=self._extract_first_vod_category_id(series_categories),
+        )
+
+        movie_item = self._extract_first_dict(movie_list)
+        series_item = self._extract_first_dict(series_list)
+
+        series_detail = []
+        if series_item:
+            series_id = self._extract_vod_item_id(series_item)
+            if series_id:
+                series_detail = self.get_series_seasons(portal_url, series_id)
+
+        season_item = self._extract_first_dict(series_detail)
+        episode_list = []
+        if series_item and season_item:
+            series_id = self._extract_vod_item_id(series_item)
+            season_id = self._extract_vod_item_id(season_item)
+            if series_id and season_id:
+                episode_list = self.get_series_episodes(
+                    portal_url,
+                    series_id=series_id,
+                    season_id=season_id,
+                )
+
+        episode_item = self._extract_first_dict(episode_list)
+        link_cmd = (
+            self._extract_vod_cmd(movie_item)
+            or self._extract_vod_cmd(episode_item)
+            or self._extract_vod_cmd(series_item)
+        )
+        vod_link = self.create_vod_link(portal_url, link_cmd) if link_cmd else None
+
+        samples = {
+            "movie_categories": self._sample_list(movie_categories),
+            "series_categories": self._sample_list(series_categories),
+            "movie_list": self._sample_list(movie_list),
+            "series_list": self._sample_list(series_list),
+            "series_detail": self._sample_list(series_detail),
+            "episodes": self._sample_list(episode_list),
+            "vod_link": vod_link,
+        }
+
+        return StalkerVodDiscoveryResult(
+            normalized_portal_url=portal_url,
+            profile_name=str(profile_name).strip() or self.mac,
+            samples=samples,
             token=self.token,
             used_authentication=used_authentication,
         )
@@ -478,6 +579,120 @@ class StalkerClient:
             )
         return channels
 
+    def get_vod_categories(self, portal_url):
+        payload = self._request(
+            "GET",
+            portal_url,
+            query={
+                "type": "vod",
+                "action": "get_categories",
+                "JsHttpRequest": "1-xml",
+            },
+            with_auth=True,
+        )
+        categories = payload.get("js")
+        if not isinstance(categories, list):
+            raise StalkerRecoverableError(
+                self._payload_error_text(
+                    payload,
+                    "Portal VOD categories response was not recognized.",
+                )
+            )
+        return categories
+
+    def get_series_categories(self, portal_url):
+        # Many portals expose both movie and series trees through the shared VOD surface.
+        return self.get_vod_categories(portal_url)
+
+    def get_vod_movies(self, portal_url, category_id=None, page=1):
+        return self._get_vod_ordered_list(
+            portal_url,
+            category_id=category_id,
+            page=page,
+        )
+
+    def get_vod_series(self, portal_url, category_id=None, page=1):
+        return self._get_vod_ordered_list(
+            portal_url,
+            category_id=category_id,
+            page=page,
+        )
+
+    def get_series_seasons(self, portal_url, series_id, page=1):
+        return self._get_vod_ordered_list(
+            portal_url,
+            page=page,
+            movie_id=series_id,
+            season_id="0",
+            episode_id="0",
+        )
+
+    def get_series_episodes(self, portal_url, series_id, season_id, page=1):
+        return self._get_vod_ordered_list(
+            portal_url,
+            page=page,
+            movie_id=series_id,
+            season_id=season_id,
+            episode_id="0",
+        )
+
+    def create_vod_link(self, portal_url, cmd):
+        normalized_cmd = str(cmd or "").strip()
+        if not normalized_cmd:
+            raise StalkerError("Stalker VOD item is missing the source command.")
+
+        encoded_cmd = quote(
+            normalized_cmd,
+            safe="!$&'()*+,;=:@-._~",
+        )
+        request_url = (
+            f"{portal_url}?action=create_link&type=vod"
+            f"&cmd={encoded_cmd}"
+            f"&JsHttpRequest=1-xml"
+        )
+        payload = self._request("GET", request_url, with_auth=True)
+        return self._extract_create_link_url(payload)
+
+    def _get_vod_ordered_list(
+        self,
+        portal_url,
+        category_id=None,
+        page=1,
+        movie_id=None,
+        season_id=None,
+        episode_id=None,
+    ):
+        query = {
+            "type": "vod",
+            "action": "get_ordered_list",
+            "JsHttpRequest": "1-xml",
+            "p": page,
+        }
+        if category_id not in (None, ""):
+            query["category"] = category_id
+        if movie_id not in (None, ""):
+            query["movie_id"] = movie_id
+        if season_id not in (None, ""):
+            query["season_id"] = season_id
+        if episode_id not in (None, ""):
+            query["episode_id"] = episode_id
+
+        payload = self._request(
+            "GET",
+            portal_url,
+            query=query,
+            with_auth=True,
+        )
+        items = self._extract_ordered_list_items(payload)
+        if not isinstance(items, list):
+            raise StalkerRecoverableError(
+                self._payload_error_text(
+                    payload,
+                    "Portal returned an invalid VOD ordered list response.",
+                )
+            )
+        return items
+
     def prepare_playback_session(self, portal_url):
         self.handshake(portal_url)
         if self.username or self.password:
@@ -676,6 +891,60 @@ class StalkerClient:
             raise StalkerRecoverableError("Portal returned an invalid playback link.")
 
         return parts[-1]
+
+    def _extract_ordered_list_items(self, payload):
+        js = payload.get("js")
+        if isinstance(js, dict):
+            return js.get("data")
+        if isinstance(js, list):
+            return js
+        raise StalkerRecoverableError(
+            self._payload_error_text(
+                payload,
+                "Portal ordered list response was not recognized.",
+            )
+        )
+
+    def _extract_first_vod_category_id(self, categories):
+        first_category = self._extract_first_dict(categories)
+        if not first_category:
+            return None
+        for key in ("id", "category_id"):
+            value = first_category.get(key)
+            if value not in (None, ""):
+                return value
+        return None
+
+    def _extract_vod_item_id(self, item):
+        if not isinstance(item, dict):
+            return None
+        for key in ("id", "movie_id", "series_id", "season_id", "episode_id"):
+            value = item.get(key)
+            if value not in (None, ""):
+                return value
+        return None
+
+    def _extract_vod_cmd(self, item):
+        if not isinstance(item, dict):
+            return ""
+        for key in ("cmd", "stream_cmd", "play_cmd", "play_url"):
+            value = item.get(key)
+            if value:
+                return str(value).strip()
+        return ""
+
+    def _extract_first_dict(self, items):
+        if not isinstance(items, list):
+            return None
+        for item in items:
+            if isinstance(item, dict):
+                return item
+        return None
+
+    def _sample_list(self, items, limit=2):
+        if not isinstance(items, list):
+            return []
+        return items[:limit]
 
     def _request(self, method, portal_url, query=None, data=None, with_auth=False):
         headers = self._headers(portal_url, with_auth=with_auth)

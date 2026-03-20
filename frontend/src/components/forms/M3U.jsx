@@ -201,7 +201,7 @@ const M3U = ({
       delete values.password;
     }
 
-    if (values.account_type !== 'XC') {
+    if (values.account_type !== 'XC' && values.account_type !== 'STALKER') {
       values.enable_vod = false;
     }
 
@@ -277,7 +277,10 @@ const M3U = ({
       await Promise.all([fetchChannelGroups(), fetchEPGs()]);
 
       // If this is an XC account with VOD enabled, also fetch VOD categories
-      if (values.account_type === 'XC' && values.enable_vod) {
+      if (
+        (values.account_type === 'XC' || values.account_type === 'STALKER') &&
+        values.enable_vod
+      ) {
         fetchCategories();
       }
 
@@ -427,9 +430,9 @@ const M3U = ({
                 {...form.getInputProps('account_type')}
               />
 
-              {isXC && (
+              {(isXC || isStalker) && (
                 <Box>
-                  {!m3uAccount && (
+                  {isXC && !m3uAccount && (
                     <Group justify="space-between">
                       <Box>Create EPG</Box>
                       <Switch
@@ -449,7 +452,7 @@ const M3U = ({
                     <Switch
                       id="enable_vod"
                       name="enable_vod"
-                      description="Scan and import VOD content (movies/series) from this Xtream account"
+                      description="Scan and import VOD content (movies/series) from this provider account"
                       key={form.key('enable_vod')}
                       {...form.getInputProps('enable_vod', {
                         type: 'checkbox',
@@ -457,21 +460,25 @@ const M3U = ({
                     />
                   </Group>
 
-                  <TextInput
-                    id="username"
-                    name="username"
-                    label="Username"
-                    description="Username for Xtream Codes authentication"
-                    {...form.getInputProps('username')}
-                  />
+                  {isXC && (
+                    <>
+                      <TextInput
+                        id="username"
+                        name="username"
+                        label="Username"
+                        description="Username for Xtream Codes authentication"
+                        {...form.getInputProps('username')}
+                      />
 
-                  <PasswordInput
-                    id="password"
-                    name="password"
-                    label="Password"
-                    description="Password for Xtream Codes authentication (leave empty to keep existing)"
-                    {...form.getInputProps('password')}
-                  />
+                      <PasswordInput
+                        id="password"
+                        name="password"
+                        label="Password"
+                        description="Password for Xtream Codes authentication (leave empty to keep existing)"
+                        {...form.getInputProps('password')}
+                      />
+                    </>
+                  )}
                 </Box>
               )}
 
@@ -695,8 +702,9 @@ const M3U = ({
                   size="sm"
                   onClick={() => {
                     if (
-                      m3uAccount?.account_type === 'XC' &&
-                      m3uAccount?.enable_vod
+                      (playlist?.account_type === 'XC' ||
+                        playlist?.account_type === 'STALKER') &&
+                      playlist?.enable_vod
                     ) {
                       fetchCategories();
                     }

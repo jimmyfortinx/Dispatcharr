@@ -183,7 +183,7 @@ For live and VOD alike, do not key identity off a `create_link` result. Persist 
 - [ ] Phase 7 implemented
 - [ ] Phase 8 implemented
 - [ ] Phase 9 implemented
-- [ ] Phase 10 implemented
+- [x] Phase 10 implemented
 - [ ] Phase 11 implemented
 - [ ] Phase 12 implemented
 - [ ] Phase 13 implemented
