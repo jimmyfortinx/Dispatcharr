@@ -320,6 +320,41 @@ class RedisBackedVODConnection:
         finally:
             self._release_lock()
 
+    def refresh_connection_target(self, stream_url: str, headers: dict) -> bool:
+        """Refresh the upstream target for an existing session."""
+        if not self._acquire_lock():
+            logger.warning(f"[{self.session_id}] Could not acquire lock for target refresh")
+            return False
+
+        try:
+            state = self._get_connection_state()
+            if not state:
+                logger.warning(f"[{self.session_id}] No connection state found for target refresh")
+                return False
+
+            normalized_headers = headers or {}
+            changed = False
+
+            if stream_url and state.stream_url != stream_url:
+                state.stream_url = stream_url
+                changed = True
+
+            if state.headers != normalized_headers:
+                state.headers = normalized_headers
+                changed = True
+
+            if not changed:
+                return True
+
+            # A refreshed Stalker URL may invalidate the previous redirect target.
+            state.final_url = None
+            state.last_activity = time.time()
+            self._save_connection_state(state)
+            logger.info(f"[{self.session_id}] Refreshed connection target for session reuse")
+            return True
+        finally:
+            self._release_lock()
+
     def get_stream(self, range_header: str = None):
         """Get stream with optional range header - works across workers"""
         # Get connection state from Redis
@@ -367,9 +402,15 @@ class RedisBackedVODConnection:
             )
             response.raise_for_status()
 
-            # Update state with response info on first request
-            if state.request_count == 1:
-                if not state.content_length:
+            should_refresh_response_metadata = (
+                state.request_count == 1
+                or not state.content_length
+                or not state.content_type
+                or not state.final_url
+            )
+
+            if should_refresh_response_metadata:
+                if not state.content_length or not state.final_url:
                     # Try to get full file size from Content-Range header first (for range requests)
                     content_range = response.headers.get('content-range')
                     if content_range and '/' in content_range:
@@ -391,7 +432,7 @@ class RedisBackedVODConnection:
 
                 logger.debug(f"[{self.session_id}] Response headers received: {dict(response.headers)}")
 
-                if not state.content_type:  # This will be True for None, '', or any falsy value
+                if not state.content_type or not state.final_url:
                     # Get content type from provider response headers
                     provider_content_type = (response.headers.get('content-type') or
                                            response.headers.get('Content-Type') or
@@ -411,10 +452,11 @@ class RedisBackedVODConnection:
                             state.content_type = 'video/mp4'
                 else:
                     logger.debug(f"[{self.session_id}] Content-Type already set in state: {state.content_type}")
-                if not state.final_url:
-                    state.final_url = response.url
 
-                logger.info(f"[{self.session_id}] Updated connection state: length={state.content_length}, type={state.content_type}")
+            if response.url and state.final_url != response.url:
+                state.final_url = response.url
+
+            logger.info(f"[{self.session_id}] Updated connection state: length={state.content_length}, type={state.content_type}")
 
             # Save updated state under lock to avoid overwriting concurrent
             # active_streams changes (e.g., another stream's GeneratorExit decrement)
@@ -759,6 +801,34 @@ class MultiWorkerVODConnectionManager:
             logger.error(f"Error decrementing profile connections: {e}")
             return None
 
+    def _build_provider_request_headers(self, m3u_profile, client_user_agent, request, input_headers=None):
+        headers = {}
+
+        # Use M3U account's user-agent for provider requests, not the client's user-agent.
+        m3u_user_agent = m3u_profile.m3u_account.get_user_agent()
+        if m3u_user_agent:
+            headers['User-Agent'] = m3u_user_agent.user_agent
+            logger.info(f"Using M3U account user-agent: {m3u_user_agent.user_agent}")
+        elif client_user_agent:
+            headers['User-Agent'] = client_user_agent
+            logger.info(f"Using client user-agent (M3U fallback): {client_user_agent}")
+        else:
+            logger.warning("No user-agent available (neither M3U nor client)")
+
+        important_headers = ['authorization', 'referer', 'origin', 'accept']
+        for header_name in important_headers:
+            django_header = f'HTTP_{header_name.upper().replace("-", "_")}'
+            if hasattr(request, 'META') and django_header in request.META:
+                headers[header_name] = request.META[django_header]
+
+        if input_headers:
+            headers.update(input_headers)
+            logger.info(
+                f"Applied provider input headers: {sorted(input_headers.keys())}"
+            )
+
+        return headers
+
     def stream_content_with_session(self, session_id, content_obj, stream_url, m3u_profile,
                                   client_ip, client_user_agent, request,
                                   utc_start=None, utc_end=None, offset=None, range_header=None,
@@ -809,6 +879,13 @@ class MultiWorkerVODConnectionManager:
 
             # Create Redis-backed connection
             redis_connection = RedisBackedVODConnection(effective_session_id, self.redis_client)
+            modified_stream_url = self._apply_timeshift_parameters(stream_url, utc_start, utc_end, offset)
+            headers = self._build_provider_request_headers(
+                m3u_profile,
+                client_user_agent,
+                request,
+                input_headers=input_headers,
+            )
 
             # Check if connection exists, create if not
             existing_state = redis_connection._get_connection_state()
@@ -820,36 +897,6 @@ class MultiWorkerVODConnectionManager:
                     logger.warning(f"[{client_id}] Profile {m3u_profile.name} connection limit exceeded")
                     return HttpResponse("Connection limit exceeded for profile", status=429)
                 profile_connections_incremented = True
-
-                # Apply timeshift parameters
-                modified_stream_url = self._apply_timeshift_parameters(stream_url, utc_start, utc_end, offset)
-
-                # Prepare headers for provider request
-                headers = {}
-                # Use M3U account's user-agent for provider requests, not client's user-agent
-                m3u_user_agent = m3u_profile.m3u_account.get_user_agent()
-                if m3u_user_agent:
-                    headers['User-Agent'] = m3u_user_agent.user_agent
-                    logger.info(f"[{client_id}] Using M3U account user-agent: {m3u_user_agent.user_agent}")
-                elif client_user_agent:
-                    # Fallback to client's user-agent if M3U doesn't have one
-                    headers['User-Agent'] = client_user_agent
-                    logger.info(f"[{client_id}] Using client user-agent (M3U fallback): {client_user_agent}")
-                else:
-                    logger.warning(f"[{client_id}] No user-agent available (neither M3U nor client)")
-
-                # Forward important headers from request
-                important_headers = ['authorization', 'referer', 'origin', 'accept']
-                for header_name in important_headers:
-                    django_header = f'HTTP_{header_name.upper().replace("-", "_")}'
-                    if hasattr(request, 'META') and django_header in request.META:
-                        headers[header_name] = request.META[django_header]
-
-                if input_headers:
-                    headers.update(input_headers)
-                    logger.info(
-                        f"[{client_id}] Applied provider input headers: {sorted(input_headers.keys())}"
-                    )
 
                 # Create connection state in Redis with consolidated session metadata
                 if not redis_connection.create_connection(
@@ -921,6 +968,15 @@ class MultiWorkerVODConnectionManager:
                                 logger.debug(f"[{client_id}] Worker {self.worker_id} retaining ownership")
                     finally:
                         redis_connection._release_lock()
+
+                if (
+                    existing_state.stream_url != modified_stream_url
+                    or existing_state.headers != headers
+                ):
+                    redis_connection.refresh_connection_target(
+                        modified_stream_url,
+                        headers,
+                    )
 
             # Get stream from Redis-backed connection
             upstream_response = redis_connection.get_stream(range_header)

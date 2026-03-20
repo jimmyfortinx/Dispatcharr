@@ -96,7 +96,7 @@ class StalkerPhase14MovieResolverTests(TestCase):
             normalized_portal_url="http://portal.example.com/stalker_portal/server/load.php"
         )
 
-        def fake_resolve(client, portal_url, cmd):
+        def fake_resolve(client, portal_url, cmd, series=None):
             self.assertEqual(
                 portal_url,
                 "http://portal.example.com/stalker_portal/server/load.php",
@@ -105,6 +105,7 @@ class StalkerPhase14MovieResolverTests(TestCase):
                 cmd,
                 "ffmpeg http://provider.example.com/movie-100.mkv",
             )
+            self.assertIsNone(series)
             client.token = "REFRESHED-TOKEN"
             return "http://resolved.example.com/movie-100.mkv"
 

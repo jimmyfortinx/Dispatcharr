@@ -1,3 +1,5 @@
+import base64
+import json
 from dataclasses import dataclass
 from typing import Dict, Optional
 
@@ -24,10 +26,10 @@ def resolve_vod_stream_context(relation) -> ResolvedVODStreamContext:
     if m3u_account.account_type != M3UAccount.Types.STALKER:
         return ResolvedVODStreamContext(url=None)
 
-    if not _is_movie_relation(relation):
+    if _get_relation_content_type(relation) not in {"movie", "episode"}:
         return ResolvedVODStreamContext(url=None)
 
-    return _resolve_stalker_movie_stream_context(relation)
+    return _resolve_stalker_vod_stream_context(relation)
 
 
 def _build_xtream_vod_url(relation) -> Optional[str]:
@@ -53,14 +55,14 @@ def _build_xtream_vod_url(relation) -> Optional[str]:
     )
 
 
-def _resolve_stalker_movie_stream_context(relation) -> ResolvedVODStreamContext:
+def _resolve_stalker_vod_stream_context(relation) -> ResolvedVODStreamContext:
     m3u_account = relation.m3u_account
     account_properties = dict(m3u_account.custom_properties or {})
     relation_properties = dict(relation.custom_properties or {})
     cmd = _extract_stalker_vod_cmd(relation_properties)
     if not cmd:
         raise StalkerError(
-            "Stalker movie is missing portal metadata required for playback."
+            "Stalker VOD item is missing portal metadata required for playback."
         )
 
     client = StalkerClient(
@@ -76,7 +78,16 @@ def _resolve_stalker_movie_stream_context(relation) -> ResolvedVODStreamContext:
         client=client,
         account_properties=account_properties,
     )
-    resolved_url = client.resolve_vod_playback_url(portal_url, cmd)
+    series_number = _get_stalker_episode_series_selector(
+        relation,
+        relation_properties,
+        cmd,
+    )
+    resolved_url = client.resolve_vod_playback_url(
+        portal_url,
+        cmd,
+        series=series_number,
+    )
     input_headers = client.build_media_headers(resolved_url)
 
     _persist_stalker_runtime_state(
@@ -98,11 +109,15 @@ def _get_stalker_vod_portal_url(relation, client, account_properties) -> str:
     basic_data = relation_properties.get("basic_data")
     if not isinstance(basic_data, dict):
         basic_data = {}
+    info_data = relation_properties.get("info")
+    if not isinstance(info_data, dict):
+        info_data = {}
 
     portal_url = (
         str(account_properties.get("stalker_vod_portal_url") or "").strip()
         or str(relation_properties.get("portal_url") or "").strip()
         or str(basic_data.get("portal_url") or "").strip()
+        or str(info_data.get("portal_url") or "").strip()
     )
     if portal_url:
         return portal_url
@@ -144,6 +159,10 @@ def _extract_stalker_vod_cmd(relation_properties) -> str:
     if isinstance(basic_data, dict):
         payloads.append(basic_data)
 
+    info_data = relation_properties.get("info")
+    if isinstance(info_data, dict):
+        payloads.append(info_data)
+
     for payload in payloads:
         for key in ("cmd", "stream_cmd", "play_cmd", "play_url"):
             value = payload.get(key)
@@ -155,13 +174,71 @@ def _extract_stalker_vod_cmd(relation_properties) -> str:
     return ""
 
 
+def _get_stalker_episode_series_selector(relation, relation_properties, cmd) -> Optional[int]:
+    if _get_relation_content_type(relation) != "episode":
+        return None
+
+    info_data = relation_properties.get("info")
+    if not isinstance(info_data, dict):
+        info_data = {}
+
+    should_use_series_selector = bool(
+        info_data.get("_stalker_placeholder_episode")
+        or _is_stalker_series_cmd(cmd)
+    )
+    if not should_use_series_selector:
+        return None
+
+    for payload in (relation_properties, info_data):
+        value = _extract_int_candidate(
+            payload.get("episode_num"),
+            payload.get("episode_number"),
+            payload.get("series_number"),
+        )
+        if value is not None:
+            return value
+
+    episode = getattr(relation, "episode", None)
+    value = _extract_int_candidate(getattr(episode, "episode_number", None))
+    if value is not None:
+        return value
+
+    return None
+
+
+def _is_stalker_series_cmd(cmd) -> bool:
+    text = str(cmd or "").strip()
+    if not text:
+        return False
+
+    normalized = text
+    missing_padding = len(normalized) % 4
+    if missing_padding:
+        normalized += "=" * (4 - missing_padding)
+
+    try:
+        decoded = base64.b64decode(normalized, validate=False).decode("utf-8")
+        payload = json.loads(decoded)
+    except (ValueError, TypeError, json.JSONDecodeError, UnicodeDecodeError):
+        return False
+
+    return isinstance(payload, dict) and str(payload.get("type") or "").strip().lower() == "series"
+
+
+def _extract_int_candidate(*values) -> Optional[int]:
+    for value in values:
+        if value in (None, ""):
+            continue
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
 def _get_relation_content_type(relation) -> str:
     if hasattr(relation, "movie_id"):
         return "movie"
     if hasattr(relation, "episode_id"):
         return "episode"
     return ""
-
-
-def _is_movie_relation(relation) -> bool:
-    return _get_relation_content_type(relation) == "movie"

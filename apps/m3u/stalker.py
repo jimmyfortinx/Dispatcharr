@@ -1,5 +1,6 @@
 import json
 import logging
+import base64
 from dataclasses import dataclass
 from secrets import token_hex
 from posixpath import dirname, join
@@ -703,7 +704,7 @@ class StalkerClient:
             provider_type="series",
         )
 
-    def create_vod_link(self, portal_url, cmd):
+    def create_vod_link(self, portal_url, cmd, series=None):
         normalized_cmd = str(cmd or "").strip()
         if not normalized_cmd:
             raise StalkerError("Stalker VOD item is missing the source command.")
@@ -715,8 +716,10 @@ class StalkerClient:
         request_url = (
             f"{portal_url}?action=create_link&type=vod"
             f"&cmd={encoded_cmd}"
-            f"&JsHttpRequest=1-xml"
         )
+        if series not in (None, ""):
+            request_url += f"&series={quote_plus(str(series).strip())}"
+        request_url += "&JsHttpRequest=1-xml"
         payload = self._request("GET", request_url, with_auth=True)
         return self._extract_create_link_url(payload)
 
@@ -779,9 +782,9 @@ class StalkerClient:
             raise StalkerError("Stalker stream is missing a usable live command.")
         return self.create_link(portal_url, fresh_cmd)
 
-    def _resolve_vod_playback_url_once(self, portal_url, cmd):
+    def _resolve_vod_playback_url_once(self, portal_url, cmd, series=None):
         self.prepare_playback_session(portal_url)
-        return self.create_vod_link(portal_url, cmd)
+        return self.create_vod_link(portal_url, cmd, series=series)
 
     def _should_retry_playback_resolution(self, exc):
         if isinstance(exc, StalkerRecoverableError):
@@ -890,9 +893,9 @@ class StalkerClient:
             )
             return self._resolve_playback_url_once(portal_url, channel_metadata)
 
-    def resolve_vod_playback_url(self, portal_url, cmd):
+    def resolve_vod_playback_url(self, portal_url, cmd, series=None):
         try:
-            return self._resolve_vod_playback_url_once(portal_url, cmd)
+            return self._resolve_vod_playback_url_once(portal_url, cmd, series=series)
         except StalkerError as exc:
             if not self._should_retry_playback_resolution(exc):
                 raise
@@ -902,7 +905,7 @@ class StalkerClient:
                 portal_url,
                 exc,
             )
-            return self._resolve_vod_playback_url_once(portal_url, cmd)
+            return self._resolve_vod_playback_url_once(portal_url, cmd, series=series)
 
     def _normalize_channel(self, channel, portal_url, genre_map):
         if not isinstance(channel, dict):
