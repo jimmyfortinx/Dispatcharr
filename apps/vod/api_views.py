@@ -31,7 +31,11 @@ from .serializers import (
     M3USeriesRelationSerializer,
     M3UEpisodeRelationSerializer
 )
-from .tasks import refresh_series_episodes, refresh_movie_advanced_data
+from .tasks import (
+    refresh_series_episodes,
+    refresh_movie_advanced_data,
+    stalker_episode_import_looks_stale,
+)
 from django.utils import timezone
 from datetime import timedelta
 
@@ -345,11 +349,18 @@ class SeriesViewSet(viewsets.ReadOnlyModelViewSet):
             custom_props = relation.custom_properties or {}
             episodes_fetched = custom_props.get('episodes_fetched', False)
             detailed_fetched = custom_props.get('detailed_fetched', False)
+            stale_stalker_episode_import = stalker_episode_import_looks_stale(relation)
 
             # Force refresh if episodes have never been fetched or if forced
             if not episodes_fetched or not detailed_fetched or force_refresh:
                 force_refresh = True
                 logger.debug(f"Series {series.id} needs detailed/episode refresh, forcing refresh")
+            elif stale_stalker_episode_import:
+                force_refresh = True
+                logger.debug(
+                    "Series %s has a stale Stalker episode import shape, forcing refresh",
+                    series.id,
+                )
             elif last_refreshed is None or (now - last_refreshed) > timedelta(hours=refresh_interval_hours):
                 force_refresh = True
                 logger.debug(f"Series {series.id} refresh interval exceeded or never refreshed, forcing refresh")

@@ -758,15 +758,18 @@ class StalkerClient:
                     payload,
                     "Portal returned an invalid VOD ordered list response.",
                 )
-            )
+        )
         return items
 
-    def prepare_playback_session(self, portal_url):
+    def prepare_authenticated_session(self, portal_url):
         self.handshake(portal_url)
         if self.username or self.password:
             self.authenticate(portal_url)
         elif self._should_use_device_id_auth():
             self.authenticate_with_device_ids(portal_url)
+
+    def prepare_playback_session(self, portal_url):
+        self.prepare_authenticated_session(portal_url)
         self.watchdog_update(portal_url)
 
     def _resolve_playback_url_once(self, portal_url, channel_metadata):

@@ -2596,9 +2596,16 @@ def xc_get_series_info(request, user, series_id):
         custom_props = series_relation.custom_properties or {}
         episodes_fetched = custom_props.get('episodes_fetched', False)
         detailed_fetched = custom_props.get('detailed_fetched', False)
+        from apps.vod.tasks import stalker_episode_import_looks_stale
+        stale_stalker_episode_import = stalker_episode_import_looks_stale(series_relation)
 
         # Force refresh if episodes/details have never been fetched or time interval exceeded
-        if not episodes_fetched or not detailed_fetched or should_refresh:
+        if (
+            not episodes_fetched
+            or not detailed_fetched
+            or should_refresh
+            or stale_stalker_episode_import
+        ):
             from apps.vod.tasks import refresh_series_episodes
             account = series_relation.m3u_account
             if account and account.is_active:

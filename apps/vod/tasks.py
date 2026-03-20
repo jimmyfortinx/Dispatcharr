@@ -597,6 +597,30 @@ def extract_stalker_relation_id(item):
     return None
 
 
+def extract_stalker_season_relation_id(item):
+    if not isinstance(item, dict):
+        return None
+
+    for key in ("_stalker_relation_id", "id", "season_id", "movie_id"):
+        value = item.get(key)
+        if value not in (None, ""):
+            return str(value)
+
+    return None
+
+
+def extract_stalker_episode_relation_id(item):
+    if not isinstance(item, dict):
+        return None
+
+    for key in ("_stalker_relation_id", "id", "episode_id"):
+        value = item.get(key)
+        if value not in (None, ""):
+            return str(value)
+
+    return None
+
+
 def extract_stalker_category_context_id(item):
     if not isinstance(item, dict):
         return None
@@ -634,13 +658,13 @@ def get_stalker_vod_portal_url(client, account):
     return discovery.normalized_portal_url
 
 
-def build_stalker_page_signature(items):
+def build_stalker_page_signature(items, relation_id_extractor=extract_stalker_relation_id):
     if not isinstance(items, list):
         return ()
 
     return tuple(
         (
-            extract_stalker_relation_id(item) or "",
+            relation_id_extractor(item) or "",
             extract_display_name(item, ""),
         )
         for item in items
@@ -731,6 +755,83 @@ def iter_stalker_catalog_batches(client, account, categories_by_provider, conten
                 break
 
             yield page_batch
+
+
+def collect_stalker_paginated_items(
+    fetch_page,
+    relation_id_extractor,
+    content_label,
+    context_label,
+):
+    previous_signature = None
+    seen_relation_ids = set()
+    collected_items = []
+
+    for page in range(1, 501):
+        items = fetch_page(page)
+        if not items:
+            break
+
+        page_signature = build_stalker_page_signature(
+            items,
+            relation_id_extractor=relation_id_extractor,
+        )
+        if page > 1 and page_signature and page_signature == previous_signature:
+            logger.warning(
+                "Stopping Stalker %s pagination for %s at page %s because the provider repeated the previous page",
+                content_label,
+                context_label,
+                page,
+            )
+            break
+
+        previous_signature = page_signature
+        page_added = 0
+
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+
+            relation_id = relation_id_extractor(item)
+            if not relation_id:
+                logger.debug(
+                    "Skipping Stalker %s item without a stable relation id: %s",
+                    content_label,
+                    item,
+                )
+                continue
+
+            if relation_id in seen_relation_ids:
+                continue
+
+            normalized_item = dict(item)
+            normalized_item["_stalker_relation_id"] = relation_id
+            seen_relation_ids.add(relation_id)
+            collected_items.append(normalized_item)
+            page_added += 1
+
+        if not page_added:
+            logger.debug(
+                "Stopping Stalker %s pagination for %s at page %s because no new items were discovered",
+                content_label,
+                context_label,
+                page,
+            )
+            break
+
+    return collected_items
+
+
+def build_series_relation_custom_properties(existing_props, series_data):
+    relation_custom_properties = dict(existing_props or {})
+    relation_custom_properties["basic_data"] = series_data
+    relation_custom_properties["detailed_fetched"] = bool(
+        relation_custom_properties.get("detailed_fetched")
+    )
+    relation_custom_properties["episodes_fetched"] = bool(
+        relation_custom_properties.get("episodes_fetched")
+    )
+    return relation_custom_properties
 
 
 
@@ -1354,11 +1455,10 @@ def process_series_batch(account, batch, categories, relations, scan_start_time=
             relation = existing_relations[series_id]
             relation.series = series
             relation.category = category
-            relation.custom_properties = {
-                'basic_data': series_data,
-                'detailed_fetched': False,
-                'episodes_fetched': False
-            }
+            relation.custom_properties = build_series_relation_custom_properties(
+                relation.custom_properties,
+                series_data,
+            )
             relation.last_seen = scan_start_time or timezone.now()  # Mark as seen during this scan
             relations_to_update.append(relation)
         else:
@@ -1368,11 +1468,10 @@ def process_series_batch(account, batch, categories, relations, scan_start_time=
                 series=series,
                 category=category,
                 external_series_id=series_id,
-                custom_properties={
-                    'basic_data': series_data,
-                    'detailed_fetched': False,
-                    'episodes_fetched': False
-                },
+                custom_properties=build_series_relation_custom_properties(
+                    None,
+                    series_data,
+                ),
                 last_seen=scan_start_time or timezone.now()  # Mark as seen during this scan
             )
             relations_to_create.append(relation)
@@ -1625,66 +1724,608 @@ def parse_date(date_string):
             return None  # Return None if parsing fails
 
 
+def extract_stalker_vod_cmd(item):
+    if not isinstance(item, dict):
+        return ""
+
+    for key in ("cmd", "stream_cmd", "play_cmd", "play_url"):
+        value = item.get(key)
+        if value not in (None, ""):
+            text = str(value).strip()
+            if text:
+                return text
+
+    return ""
+
+
+def extract_int_from_value(value):
+    if value in (None, ""):
+        return None
+
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError, AttributeError):
+        return None
+
+
+def extract_number_from_text(text, patterns=None, allow_fallback=True):
+    normalized_text = str(text or "").strip()
+    if not normalized_text:
+        return None
+
+    if patterns:
+        for pattern in patterns:
+            match = re.search(pattern, normalized_text, re.IGNORECASE)
+            if match:
+                try:
+                    return int(match.group(1))
+                except (TypeError, ValueError, IndexError):
+                    continue
+
+    if allow_fallback:
+        fallback_match = re.search(r"(\d+)", normalized_text)
+        if fallback_match:
+            try:
+                return int(fallback_match.group(1))
+            except (TypeError, ValueError, IndexError):
+                return None
+
+    return None
+
+
+def extract_stalker_season_number(item, fallback=None):
+    if isinstance(item, dict):
+        for key in ("season_number", "season_num", "season", "number"):
+            value = extract_int_from_value(item.get(key))
+            if value is not None:
+                return value
+
+    display_name = extract_display_name(item, "")
+    value = extract_number_from_text(
+        display_name,
+        patterns=[
+            r"(?:season|saison|stagione|temporada|series)\s*0*(\d+)",
+            r"\bs\s*0*(\d+)\b",
+        ],
+    )
+    if value is not None:
+        return value
+
+    if fallback is not None:
+        return int(fallback)
+
+    return 0
+
+
+def extract_stalker_season_query_candidates(item, fallback=None):
+    candidates = []
+
+    if isinstance(item, dict):
+        for key in ("season_id", "season_number", "season_num", "number", "id", "movie_id"):
+            value = item.get(key)
+            if value in (None, ""):
+                continue
+            text = str(value).strip()
+            if text and text not in candidates:
+                candidates.append(text)
+
+    parsed_number = extract_stalker_season_number(item, fallback=fallback)
+    if parsed_number:
+        parsed_text = str(parsed_number)
+        if parsed_text not in candidates:
+            candidates.insert(0, parsed_text)
+
+    return candidates
+
+
+def extract_stalker_episode_number(item, fallback=None):
+    if isinstance(item, dict):
+        for key in ("series_number", "episode_number", "episode_num", "number"):
+            value = extract_int_from_value(item.get(key))
+            if value is not None:
+                return value
+
+    display_name = extract_display_name(item, "")
+    value = extract_number_from_text(
+        display_name,
+        patterns=[
+            r"(?:episode|episodio|ep)\s*0*(\d+)",
+            r"\be\s*0*(\d+)\b",
+        ],
+        allow_fallback=False,
+    )
+    if value is not None:
+        return value
+
+    if fallback is not None:
+        return int(fallback)
+
+    return 0
+
+
+def extract_stalker_embedded_episode_numbers(item):
+    if not isinstance(item, dict):
+        return []
+
+    series_list = item.get("series")
+    if not isinstance(series_list, list):
+        return []
+
+    episode_numbers = []
+    for value in series_list:
+        parsed = extract_int_from_value(value)
+        if parsed is not None and parsed > 0 and parsed not in episode_numbers:
+            episode_numbers.append(parsed)
+
+    return episode_numbers
+
+
+def is_probable_stalker_episode_item(item):
+    if not isinstance(item, dict):
+        return False
+
+    embedded_episode_numbers = extract_stalker_embedded_episode_numbers(item)
+    display_name = extract_display_name(item, "")
+    if embedded_episode_numbers and re.search(
+        r"(?:season|saison|stagione|temporada|series)\s*0*\d+",
+        display_name,
+        re.IGNORECASE,
+    ):
+        return False
+
+    for key in ("episode_id", "series_number", "episode_number"):
+        if item.get(key) not in (None, ""):
+            return True
+
+    if extract_stalker_vod_cmd(item) and not embedded_episode_numbers:
+        return True
+
+    return bool(
+        re.search(r"(?:episode|episodio|ep)\s*0*\d+", display_name, re.IGNORECASE)
+    )
+
+
+def looks_like_stalker_season_list(items):
+    inspected_items = 0
+    season_like_items = 0
+
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+
+        inspected_items += 1
+        if is_probable_stalker_episode_item(item):
+            return False
+
+        display_name = extract_display_name(item, "")
+        if re.search(
+            r"(?:season|saison|stagione|temporada|series)\s*0*\d+",
+            display_name,
+            re.IGNORECASE,
+        ):
+            season_like_items += 1
+
+    return inspected_items > 0 and season_like_items == inspected_items
+
+
+def extract_stalker_container_extension(item):
+    if isinstance(item, dict):
+        for key in ("container_extension", "extension", "ext"):
+            value = item.get(key)
+            if value not in (None, ""):
+                text = str(value).strip().lstrip(".").lower()
+                if text:
+                    return text
+
+    cmd = extract_stalker_vod_cmd(item)
+    if cmd:
+        target = cmd.split()[-1].split("?", 1)[0].rstrip("/")
+        if "." in target:
+            extension = target.rsplit(".", 1)[-1].lower()
+            if extension and len(extension) <= 5:
+                return extension
+
+    return "mp4"
+
+
+def build_stalker_episode_info(item):
+    info = {}
+    if not isinstance(item, dict):
+        return info
+
+    existing_info = item.get("info")
+    if isinstance(existing_info, dict):
+        info.update(existing_info)
+
+    for key in (
+        "description",
+        "plot",
+        "overview",
+        "rating",
+        "air_date",
+        "releasedate",
+        "release_date",
+        "duration_secs",
+        "time",
+        "runtime",
+        "tmdb_id",
+        "imdb_id",
+        "movie_image",
+        "backdrop_path",
+        "crew",
+        "actors",
+        "cast",
+        "director",
+        "video",
+        "audio",
+        "bitrate",
+    ):
+        value = item.get(key)
+        if value not in (None, "", []):
+            info.setdefault(key, value)
+
+    cmd = extract_stalker_vod_cmd(item)
+    if cmd:
+        info.setdefault("cmd", cmd)
+
+    return info
+
+
+def build_stalker_embedded_episode_rows(
+    season_item,
+    season_relation_id,
+    season_number,
+    external_series_id,
+):
+    embedded_episode_numbers = extract_stalker_embedded_episode_numbers(season_item)
+    if not embedded_episode_numbers:
+        return []
+
+    season_info = build_stalker_episode_info(season_item)
+    season_cmd = extract_stalker_vod_cmd(season_item)
+    container_extension = extract_stalker_container_extension(season_item)
+    normalized_episodes = []
+
+    for episode_number in embedded_episode_numbers:
+        episode_id = f"{season_relation_id}:{episode_number}"
+        episode_info = dict(season_info)
+        episode_info["episode_number"] = episode_number
+        episode_info["series_number"] = episode_number
+        if season_cmd:
+            episode_info["cmd"] = season_cmd
+
+        normalized_episodes.append(
+            {
+                "id": episode_id,
+                "title": f"Episode {episode_number}",
+                "episode_num": episode_number,
+                "series_number": episode_number,
+                "container_extension": container_extension,
+                "info": episode_info,
+                "cmd": season_cmd,
+                "_stalker_series_id": external_series_id,
+                "_stalker_season_id": season_relation_id,
+                "_stalker_relation_id": episode_id,
+                "_stalker_placeholder_episode": True,
+            }
+        )
+
+    return normalized_episodes
+
+
+def build_stalker_series_detail_data(series_relation, season_items):
+    detail_data = dict((series_relation.custom_properties or {}).get("basic_data") or {})
+
+    for season_item in season_items:
+        if not isinstance(season_item, dict):
+            continue
+        for key, value in season_item.items():
+            if key.startswith("_"):
+                continue
+            if value in (None, "", []):
+                continue
+            if key not in detail_data or detail_data.get(key) in (None, "", []):
+                detail_data[key] = value
+
+    return detail_data
+
+
+def update_series_from_detail_payload(series, detail_data):
+    if not detail_data:
+        return
+
+    updated = False
+
+    if should_update_field(series.description, detail_data.get("plot")):
+        series.description = extract_string_from_array_or_string(detail_data.get("plot"))
+        updated = True
+    elif should_update_field(series.description, detail_data.get("description")):
+        series.description = extract_string_from_array_or_string(detail_data.get("description"))
+        updated = True
+
+    normalized_rating = normalize_rating(detail_data.get("rating"))
+    if normalized_rating and (not series.rating or not str(series.rating).strip()):
+        series.rating = normalized_rating
+        updated = True
+
+    if should_update_field(series.genre, detail_data.get("genre")):
+        series.genre = extract_string_from_array_or_string(detail_data.get("genre"))
+        updated = True
+
+    title_key = "title" if detail_data.get("title") else "name"
+    year = extract_year_from_data(detail_data, title_key=title_key)
+    if year and not series.year:
+        series.year = year
+        updated = True
+
+    custom_props = dict(series.custom_properties or {})
+
+    for key in (
+        "releaseDate",
+        "release_date",
+        "episode_run_time",
+        "status",
+        "type",
+        "country",
+        "language",
+        "age",
+    ):
+        new_value = detail_data.get(key)
+        existing_value = custom_props.get(key)
+        if new_value not in (None, "", []) and existing_value in (None, "", []):
+            custom_props[key] = new_value
+            updated = True
+
+    for key in ("cast", "director", "youtube_trailer"):
+        if should_update_field(custom_props.get(key), detail_data.get(key)):
+            custom_props[key] = extract_string_from_array_or_string(detail_data.get(key))
+            updated = True
+
+    backdrop = extract_string_from_array_or_string(detail_data.get("backdrop_path"))
+    if backdrop and not extract_string_from_array_or_string(custom_props.get("backdrop_path")):
+        custom_props["backdrop_path"] = [backdrop]
+        updated = True
+
+    if updated:
+        series.custom_properties = clean_custom_properties(custom_props)
+        series.save()
+
+
+def refresh_stalker_series_episodes(account, series_relation):
+    client = StalkerClient(
+        server_url=account.server_url,
+        mac=(account.custom_properties or {}).get("mac", ""),
+        username=account.username or "",
+        password=account.password or "",
+        user_agent=getattr(account.user_agent, "user_agent", None),
+        custom_properties=account.custom_properties or {},
+    )
+    portal_url = get_stalker_vod_portal_url(client, account)
+    client.prepare_authenticated_session(portal_url)
+    client.vod_portal_url = portal_url
+
+    updated_props = dict(account.custom_properties or {})
+    if updated_props.get("token") != client.token:
+        updated_props["token"] = client.token
+        account.custom_properties = updated_props
+        account.save(update_fields=["custom_properties"])
+
+    season_items = collect_stalker_paginated_items(
+        lambda page: client.get_series_seasons(
+            portal_url,
+            series_relation.external_series_id,
+            page=page,
+        ),
+        relation_id_extractor=extract_stalker_season_relation_id,
+        content_label="series seasons",
+        context_label=f"series {series_relation.external_series_id}",
+    )
+
+    detail_data = build_stalker_series_detail_data(series_relation, season_items)
+    episodes_data = {}
+
+    for season_index, season_item in enumerate(season_items, start=1):
+        season_id = extract_stalker_season_relation_id(season_item)
+        if not season_id:
+            continue
+
+        season_number = extract_stalker_season_number(season_item, fallback=season_index)
+        embedded_episode_rows = build_stalker_embedded_episode_rows(
+            season_item,
+            season_relation_id=season_id,
+            season_number=season_number,
+            external_series_id=series_relation.external_series_id,
+        )
+        season_query_candidates = extract_stalker_season_query_candidates(
+            season_item,
+            fallback=season_number,
+        )
+        episode_items = []
+        episode_query_season_id = season_id
+
+        for season_query_id in season_query_candidates:
+            candidate_items = collect_stalker_paginated_items(
+                lambda page, season_query_id=season_query_id: client.get_series_episodes(
+                    portal_url,
+                    series_relation.external_series_id,
+                    season_query_id,
+                    page=page,
+                ),
+                relation_id_extractor=extract_stalker_episode_relation_id,
+                content_label="series episodes",
+                context_label=(
+                    f"series {series_relation.external_series_id} season {season_query_id}"
+                ),
+            )
+
+            if candidate_items and looks_like_stalker_season_list(candidate_items):
+                logger.warning(
+                    "Stalker series %s season query %s returned season rows instead of episodes; trying the next season id candidate",
+                    series_relation.external_series_id,
+                    season_query_id,
+                )
+                continue
+
+            episode_items = candidate_items
+            episode_query_season_id = season_query_id
+            break
+
+        if not episode_items and embedded_episode_rows:
+            logger.info(
+                "Stalker series %s season %s is using embedded episode numbers from the season payload",
+                series_relation.external_series_id,
+                season_id,
+            )
+            episode_items = embedded_episode_rows
+            episode_query_season_id = season_id
+
+        normalized_episodes = []
+        for episode_index, episode_item in enumerate(episode_items, start=1):
+            episode_id = extract_stalker_episode_relation_id(episode_item)
+            if not episode_id:
+                continue
+
+            episode_number = extract_stalker_episode_number(
+                episode_item,
+                fallback=episode_index,
+            )
+            normalized_episode = dict(episode_item)
+            normalized_episode["id"] = episode_id
+            normalized_episode["title"] = extract_display_name(
+                episode_item,
+                f"Episode {episode_number}",
+            )
+            normalized_episode["episode_num"] = episode_number
+            normalized_episode["container_extension"] = extract_stalker_container_extension(
+                episode_item
+            )
+            normalized_episode["info"] = build_stalker_episode_info(episode_item)
+            normalized_episode["_stalker_series_id"] = series_relation.external_series_id
+            normalized_episode["_stalker_season_id"] = episode_query_season_id
+            normalized_episode["_stalker_relation_id"] = episode_id
+            normalized_episodes.append(normalized_episode)
+
+        episodes_data.setdefault(str(season_number), []).extend(normalized_episodes)
+
+    return detail_data, episodes_data
+
+
+def build_episode_relation_custom_properties(
+    account,
+    episode_data,
+    season_number,
+    series_relation=None,
+):
+    relation_custom_properties = {
+        "info": episode_data,
+        "season_number": season_number,
+    }
+
+    if account.account_type == M3UAccount.Types.STALKER:
+        relation_custom_properties["provider_type"] = "stalker"
+        relation_custom_properties["stalker_episode_id"] = extract_stalker_episode_relation_id(
+            episode_data
+        )
+
+        season_id = episode_data.get("_stalker_season_id")
+        if season_id not in (None, ""):
+            relation_custom_properties["stalker_season_id"] = str(season_id)
+
+        if series_relation is not None:
+            relation_custom_properties["stalker_series_id"] = str(
+                series_relation.external_series_id
+            )
+
+        cmd = extract_stalker_vod_cmd(episode_data)
+        if cmd:
+            relation_custom_properties["cmd"] = cmd
+
+    return relation_custom_properties
+
+
+def stalker_episode_import_looks_stale(series_relation):
+    if (
+        not series_relation
+        or not getattr(series_relation, "m3u_account", None)
+        or series_relation.m3u_account.account_type != M3UAccount.Types.STALKER
+    ):
+        return False
+
+    episode_relations = list(
+        M3UEpisodeRelation.objects.filter(series_relation=series_relation)
+        .select_related("episode")
+        .order_by("id")[:10]
+    )
+
+    for relation in episode_relations:
+        custom_props = relation.custom_properties or {}
+        stalker_episode_id = str(
+            custom_props.get("stalker_episode_id") or relation.stream_id or ""
+        ).strip()
+        stalker_season_id = str(
+            custom_props.get("stalker_season_id") or ""
+        ).strip()
+        episode_name = str(getattr(relation.episode, "name", "") or "").strip().lower()
+
+        if stalker_episode_id and stalker_season_id and stalker_episode_id == stalker_season_id:
+            return True
+
+        if episode_name.startswith("season "):
+            return True
+
+    return False
+
+
 # Episode processing and other advanced features
 
 def refresh_series_episodes(account, series, external_series_id, episodes_data=None):
     """Refresh episodes for a series - only called on-demand"""
     try:
-        if not episodes_data:
-            # Fetch detailed series info including episodes
-            with XtreamCodesClient(
-                account.server_url,
-                account.username,
-                account.password,
-                account.get_user_agent().user_agent
-            ) as client:
-                series_info = client.get_series_info(external_series_id)
-                if series_info:
-                    # Update series with detailed info
-                    info = series_info.get('info', {})
-                    if info:
-                        # Only update fields if new value is non-empty and either no existing value or existing value is empty
-                        updated = False
-                        if should_update_field(series.description, info.get('plot')):
-                            series.description = extract_string_from_array_or_string(info.get('plot'))
-                            updated = True
-                        normalized_rating = normalize_rating(info.get('rating'))
-                        if normalized_rating and (not series.rating or not str(series.rating).strip()):
-                            series.rating = normalized_rating
-                            updated = True
-                        if should_update_field(series.genre, info.get('genre')):
-                            series.genre = extract_string_from_array_or_string(info.get('genre'))
-                            updated = True
-
-                        year = extract_year_from_data(info)
-                        if year and not series.year:
-                            series.year = year
-                            updated = True
-
-                        if updated:
-                            series.save()
-
-                    episodes_data = series_info.get('episodes', {})
-                else:
-                    episodes_data = {}
-
-        # Fetch the series relation once — used both to pass into batch_process_episodes
-        # (so episode relations get the FK set) and to update metadata afterwards.
         series_relation = M3USeriesRelation.objects.filter(
             m3u_account=account,
             external_series_id=external_series_id
         ).first()
+        detail_data = None
+
+        if not episodes_data:
+            if account.account_type == M3UAccount.Types.STALKER:
+                if not series_relation:
+                    raise ValueError(
+                        f"Missing Stalker series relation for external_series_id={external_series_id}"
+                    )
+                detail_data, episodes_data = refresh_stalker_series_episodes(
+                    account,
+                    series_relation,
+                )
+                update_series_from_detail_payload(series, detail_data)
+            else:
+                # Fetch detailed series info including episodes
+                with XtreamCodesClient(
+                    account.server_url,
+                    account.username,
+                    account.password,
+                    account.get_user_agent().user_agent
+                ) as client:
+                    series_info = client.get_series_info(external_series_id)
+                    if series_info:
+                        detail_data = series_info.get('info', {})
+                        update_series_from_detail_payload(series, detail_data)
+                        episodes_data = series_info.get('episodes', {})
+                    else:
+                        episodes_data = {}
 
         # Process all episodes in batch
         batch_process_episodes(account, series, episodes_data, series_relation=series_relation)
 
         if series_relation:
-            custom_props = series_relation.custom_properties or {}
+            custom_props = dict(series_relation.custom_properties or {})
+            if detail_data:
+                custom_props['detail_data'] = detail_data
             custom_props['episodes_fetched'] = True
             custom_props['detailed_fetched'] = True
             series_relation.custom_properties = custom_props
             series_relation.last_episode_refresh = timezone.now()
-            series_relation.save()
+            series_relation.save(update_fields=['custom_properties', 'last_episode_refresh'])
 
     except Exception as e:
         logger.error(f"Error refreshing episodes for series {series.name}: {str(e)}")
@@ -1706,12 +2347,19 @@ def batch_process_episodes(account, series, episodes_data, scan_start_time=None,
     if not episodes_data:
         return
 
+    is_stalker = account.account_type == M3UAccount.Types.STALKER
+
     # Flatten episodes data
     all_episodes_data = []
     for season_num, season_episodes in episodes_data.items():
         for episode_data in season_episodes:
-            episode_data['_season_number'] = int(season_num)
-            all_episodes_data.append(episode_data)
+            normalized_episode = dict(episode_data)
+            normalized_episode['_season_number'] = int(season_num)
+            all_episodes_data.append(normalized_episode)
+            if is_stalker and "episode_num" not in normalized_episode:
+                normalized_episode["episode_num"] = extract_stalker_episode_number(
+                    normalized_episode
+                )
 
     if not all_episodes_data:
         return
@@ -1724,9 +2372,19 @@ def batch_process_episodes(account, series, episodes_data, scan_start_time=None,
     episode_ids = []
     for episode_data in all_episodes_data:
         season_num = episode_data['_season_number']
-        episode_num = episode_data.get('episode_num', 0)
+        episode_num = (
+            extract_stalker_episode_number(episode_data)
+            if is_stalker
+            else episode_data.get('episode_num', 0)
+        )
         episode_keys.add((series.id, season_num, episode_num))
-        episode_ids.append(str(episode_data.get('id')))
+        episode_id = (
+            extract_stalker_episode_relation_id(episode_data)
+            if is_stalker
+            else episode_data.get('id')
+        )
+        if episode_id not in (None, ""):
+            episode_ids.append(str(episode_id))
 
     # Pre-fetch existing episodes
     existing_episodes = {}
@@ -1754,19 +2412,37 @@ def batch_process_episodes(account, series, episodes_data, scan_start_time=None,
 
     for episode_data in all_episodes_data:
         try:
-            episode_id = str(episode_data.get('id'))
-            episode_name = episode_data.get('title', 'Unknown Episode')
+            if is_stalker:
+                stable_episode_id = extract_stalker_episode_relation_id(episode_data)
+            else:
+                stable_episode_id = episode_data.get('id')
+
+            if stable_episode_id in (None, ""):
+                logger.debug("Skipping episode without a stable relation key: %s", episode_data)
+                continue
+
+            episode_id = str(stable_episode_id)
             # Ensure season and episode numbers are integers (API may return strings)
             try:
                 season_number = int(episode_data['_season_number'])
             except (ValueError, TypeError) as e:
-                logger.warning(f"Invalid season_number '{episode_data.get('_season_number')}' for episode '{episode_name}': {e}")
+                logger.warning(f"Invalid season_number '{episode_data.get('_season_number')}' for episode '{episode_data.get('title', 'Unknown Episode')}': {e}")
                 season_number = 0
             try:
-                episode_number = int(episode_data.get('episode_num', 0))
+                raw_episode_number = (
+                    extract_stalker_episode_number(episode_data)
+                    if is_stalker
+                    else episode_data.get('episode_num', 0)
+                )
+                episode_number = int(raw_episode_number)
             except (ValueError, TypeError) as e:
-                logger.warning(f"Invalid episode_num '{episode_data.get('episode_num')}' for episode '{episode_name}': {e}")
+                logger.warning(f"Invalid episode_num '{episode_data.get('episode_num')}' for episode '{episode_data.get('title', 'Unknown Episode')}': {e}")
                 episode_number = 0
+            episode_name = (
+                extract_display_name(episode_data, f'Episode {episode_number or 0}')
+                if is_stalker
+                else episode_data.get('title', 'Unknown Episode')
+            )
             info = episode_data.get('info', {})
 
             # Extract episode metadata
@@ -1857,10 +2533,12 @@ def batch_process_episodes(account, series, episodes_data, scan_start_time=None,
                 relation.episode = episode
                 relation.series_relation = series_relation
                 relation.container_extension = episode_data.get('container_extension', 'mp4')
-                relation.custom_properties = {
-                    'info': episode_data,
-                    'season_number': season_number,
-                }
+                relation.custom_properties = build_episode_relation_custom_properties(
+                    account,
+                    episode_data,
+                    season_number,
+                    series_relation=series_relation,
+                )
                 relation.last_seen = scan_start_time or timezone.now()  # Mark as seen during this scan
                 relations_to_update.append(relation)
             else:
@@ -1871,10 +2549,12 @@ def batch_process_episodes(account, series, episodes_data, scan_start_time=None,
                     series_relation=series_relation,
                     stream_id=episode_id,
                     container_extension=episode_data.get('container_extension', 'mp4'),
-                    custom_properties={
-                        'info': episode_data,
-                        'season_number': season_number,
-                    },
+                    custom_properties=build_episode_relation_custom_properties(
+                        account,
+                        episode_data,
+                        season_number,
+                        series_relation=series_relation,
+                    ),
                     last_seen=scan_start_time or timezone.now()  # Mark as seen during this scan
                 )
                 relations_to_create.append(relation)
