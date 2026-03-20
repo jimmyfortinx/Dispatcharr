@@ -61,14 +61,47 @@ def refresh_vod_content(account_id):
                 # Refresh series with batch processing (pass scan start time)
                 refresh_series(client, account, series_categories, relations, scan_start_time=start_time)
         else:
-            movie_categories, series_categories = refresh_categories(account.id)
+            client = StalkerClient(
+                server_url=account.server_url,
+                mac=(account.custom_properties or {}).get("mac", ""),
+                username=account.username or "",
+                password=account.password or "",
+                user_agent=getattr(account.user_agent, "user_agent", None),
+                custom_properties=account.custom_properties or {},
+            )
+            movie_categories, series_categories = refresh_categories(account.id, client=client)
+
+            logger.debug("Fetching relations for Stalker VOD category filtering")
+            relations = {
+                rel.category_id: rel
+                for rel in M3UVODCategoryRelation.objects.filter(m3u_account=account)
+                .select_related("category", "m3u_account")
+            }
+
+            refresh_movies(
+                client,
+                account,
+                movie_categories,
+                relations,
+                scan_start_time=start_time,
+            )
+            refresh_series(
+                client,
+                account,
+                series_categories,
+                relations,
+                scan_start_time=start_time,
+            )
 
         end_time = timezone.now()
         duration = (end_time - start_time).total_seconds()
 
         logger.info(f"Batch VOD refresh completed for account {account.name} in {duration:.2f} seconds")
 
-        if account.account_type == M3UAccount.Types.XC:
+        if account.account_type in (
+            M3UAccount.Types.XC,
+            M3UAccount.Types.STALKER,
+        ):
             # Cleanup orphaned VOD content after refresh (scoped to this account only)
             logger.info(f"Starting cleanup of orphaned VOD content for account {account.name}")
             cleanup_result = cleanup_orphaned_vod_content(account_id=account_id, scan_start_time=start_time)
@@ -79,7 +112,7 @@ def refresh_vod_content(account_id):
             movie_count = len(movie_categories)
             series_count = len(series_categories)
             completion_message = (
-                f"Stalker VOD category refresh completed in {duration:.2f} seconds "
+                f"Stalker VOD refresh completed in {duration:.2f} seconds "
                 f"({movie_count} movie categories, {series_count} series categories)"
             )
         else:
@@ -131,6 +164,7 @@ def refresh_categories(account_id, client=None):
     logger.info("Fetching movie categories from provider...")
     if account.account_type == M3UAccount.Types.STALKER:
         discovery = client.discover_vod_categories()
+        client.vod_portal_url = discovery.normalized_portal_url
         categories_data = discovery.movie_categories
 
         updated_props = dict(account.custom_properties or {})
@@ -206,9 +240,42 @@ def refresh_movies(client, account, categories_by_provider, relations, scan_star
     # Add to categories_by_provider with a special key for items without category
     categories_by_provider['__uncategorized__'] = uncategorized_category
 
-    # Get all movies in a single API call
-    logger.info("Fetching all movies from provider...")
-    all_movies_data = client.get_vod_streams()  # No category_id = get all movies
+    if account.account_type == M3UAccount.Types.STALKER:
+        logger.info("Fetching Stalker movies from provider...")
+        total_movies = 0
+        total_chunks = 0
+
+        for chunk in iter_stalker_catalog_batches(
+            client,
+            account,
+            categories_by_provider,
+            content_type="movie",
+        ):
+            total_chunks += 1
+            total_movies += len(chunk)
+            logger.info(
+                "Processing Stalker movie chunk %s (%s movies)",
+                total_chunks,
+                len(chunk),
+            )
+            process_movie_batch(
+                account,
+                chunk,
+                categories_by_provider,
+                relations,
+                scan_start_time,
+            )
+
+        logger.info(
+            "Completed processing all %s Stalker movies in %s chunks",
+            total_movies,
+            total_chunks,
+        )
+        return
+    else:
+        # Get all movies in a single API call
+        logger.info("Fetching all movies from provider...")
+        all_movies_data = client.get_vod_streams()  # No category_id = get all movies
 
     # Process movies in chunks using the simple approach
     chunk_size = 1000
@@ -260,9 +327,42 @@ def refresh_series(client, account, categories_by_provider, relations, scan_star
     # Add to categories_by_provider with a special key for items without category
     categories_by_provider['__uncategorized__'] = uncategorized_category
 
-    # Get all series in a single API call
-    logger.info("Fetching all series from provider...")
-    all_series_data = client.get_series()  # No category_id = get all series
+    if account.account_type == M3UAccount.Types.STALKER:
+        logger.info("Fetching Stalker series from provider...")
+        total_series = 0
+        total_chunks = 0
+
+        for chunk in iter_stalker_catalog_batches(
+            client,
+            account,
+            categories_by_provider,
+            content_type="series",
+        ):
+            total_chunks += 1
+            total_series += len(chunk)
+            logger.info(
+                "Processing Stalker series chunk %s (%s series)",
+                total_chunks,
+                len(chunk),
+            )
+            process_series_batch(
+                account,
+                chunk,
+                categories_by_provider,
+                relations,
+                scan_start_time,
+            )
+
+        logger.info(
+            "Completed processing all %s Stalker series in %s chunks",
+            total_series,
+            total_chunks,
+        )
+        return
+    else:
+        # Get all series in a single API call
+        logger.info("Fetching all series from provider...")
+        all_series_data = client.get_series()  # No category_id = get all series
 
     # Process series in chunks using the simple approach
     chunk_size = 1000
@@ -470,6 +570,169 @@ def normalize_category_batch(categories_data, category_type, account_type):
     return normalized
 
 
+def extract_display_name(item, fallback="Unknown"):
+    if not isinstance(item, dict):
+        return fallback
+
+    for key in ("name", "title"):
+        value = item.get(key)
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            return text
+
+    return fallback
+
+
+def extract_stalker_relation_id(item):
+    if not isinstance(item, dict):
+        return None
+
+    for key in ("_stalker_relation_id", "id", "movie_id", "series_id"):
+        value = item.get(key)
+        if value not in (None, ""):
+            return str(value)
+
+    return None
+
+
+def extract_stalker_category_context_id(item):
+    if not isinstance(item, dict):
+        return None
+
+    for key in ("category_id", "_requested_category_id", "_provider_category_id"):
+        value = item.get(key)
+        if value not in (None, ""):
+            return str(value)
+
+    return None
+
+
+def extract_stalker_logo_url(item):
+    if not isinstance(item, dict):
+        return ""
+
+    for key in ("screenshot_uri", "cover", "logo", "stream_icon"):
+        value = extract_string_from_array_or_string(item.get(key))
+        if value:
+            return value
+
+    return ""
+
+
+def get_stalker_vod_portal_url(client, account):
+    portal_url = getattr(client, "vod_portal_url", None)
+    if portal_url:
+        return portal_url
+
+    if str(account.server_url or "").rstrip("/").endswith(("/server/load.php", "/portal.php")):
+        return account.server_url
+
+    discovery = client.discover_vod_categories()
+    client.vod_portal_url = discovery.normalized_portal_url
+    return discovery.normalized_portal_url
+
+
+def build_stalker_page_signature(items):
+    if not isinstance(items, list):
+        return ()
+
+    return tuple(
+        (
+            extract_stalker_relation_id(item) or "",
+            extract_display_name(item, ""),
+        )
+        for item in items
+        if isinstance(item, dict)
+    )
+
+
+def get_stalker_category_requests(categories_by_provider):
+    provider_category_ids = [
+        str(category_id)
+        for category_id in categories_by_provider.keys()
+        if category_id != "__uncategorized__"
+    ]
+
+    if "*" in provider_category_ids:
+        return ["*"]
+
+    if not provider_category_ids:
+        return [None]
+
+    return provider_category_ids
+
+
+def iter_stalker_catalog_batches(client, account, categories_by_provider, content_type):
+    portal_url = get_stalker_vod_portal_url(client, account)
+    fetch_page = client.get_vod_movies if content_type == "movie" else client.get_vod_series
+    provider_category_ids = get_stalker_category_requests(categories_by_provider)
+    seen_relation_ids = set()
+
+    logger.info(
+        "Fetching Stalker %s across %s category contexts",
+        content_type,
+        len(provider_category_ids),
+    )
+
+    for requested_category_id in provider_category_ids:
+        previous_signature = None
+
+        for page in range(1, 501):
+            items = fetch_page(portal_url, category_id=requested_category_id, page=page)
+            if not items:
+                break
+
+            page_signature = build_stalker_page_signature(items)
+            if page > 1 and page_signature and page_signature == previous_signature:
+                logger.warning(
+                    "Stopping Stalker %s pagination for category %s at page %s because the provider repeated the previous page",
+                    content_type,
+                    requested_category_id,
+                    page,
+                )
+                break
+
+            previous_signature = page_signature
+            page_batch = []
+
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+
+                normalized_item = dict(item)
+                if requested_category_id not in (None, ""):
+                    normalized_item.setdefault("_requested_category_id", str(requested_category_id))
+
+                relation_id = extract_stalker_relation_id(normalized_item)
+                if not relation_id:
+                    logger.debug(
+                        "Skipping Stalker %s item without a stable relation id: %s",
+                        content_type,
+                        normalized_item,
+                    )
+                    continue
+
+                if relation_id in seen_relation_ids:
+                    continue
+
+                normalized_item["_stalker_relation_id"] = relation_id
+                seen_relation_ids.add(relation_id)
+                page_batch.append(normalized_item)
+
+            if not page_batch:
+                logger.debug(
+                    "Stopping Stalker %s pagination for category %s at page %s because no new items were discovered",
+                    content_type,
+                    requested_category_id,
+                    page,
+                )
+                break
+
+            yield page_batch
+
+
 
 @shared_task
 def process_movie_batch(account, batch, categories, relations, scan_start_time=None):
@@ -485,13 +748,25 @@ def process_movie_batch(account, batch, categories, relations, scan_start_time=N
     # Process each movie in the batch
     for movie_data in batch:
         try:
-            stream_id = str(movie_data.get('stream_id'))
-            name = movie_data.get('name', 'Unknown')
+            is_stalker = account.account_type == M3UAccount.Types.STALKER
+            if is_stalker:
+                stream_id = extract_stalker_relation_id(movie_data)
+                name = extract_display_name(movie_data)
+            else:
+                stream_id = str(movie_data.get('stream_id'))
+                name = movie_data.get('name', 'Unknown')
+
+            if not stream_id:
+                logger.debug("Skipping movie without a stable relation key: %s", movie_data)
+                continue
 
             # Get category with proper error handling
             category = None
 
-            provider_cat_id = str(movie_data.get('category_id', '')) if movie_data.get('category_id') else None
+            if is_stalker:
+                provider_cat_id = extract_stalker_category_context_id(movie_data)
+            else:
+                provider_cat_id = str(movie_data.get('category_id', '')) if movie_data.get('category_id') else None
             movie_data['_provider_category_id'] = provider_cat_id
             movie_data['_category_id'] = None
 
@@ -518,7 +793,8 @@ def process_movie_batch(account, batch, categories, relations, scan_start_time=N
                         continue
 
             # Extract metadata
-            year = extract_year_from_data(movie_data, 'name')
+            title_key = 'name' if movie_data.get('name') else 'title'
+            year = extract_year_from_data(movie_data, title_key)
             tmdb_id = movie_data.get('tmdb_id') or movie_data.get('tmdb')
             imdb_id = movie_data.get('imdb_id') or movie_data.get('imdb')
 
@@ -547,7 +823,15 @@ def process_movie_batch(account, batch, categories, relations, scan_start_time=N
             duration_secs = extract_duration_from_data(movie_data)
             trailer_raw = movie_data.get('trailer') or movie_data.get('youtube_trailer') or ''
             trailer = extract_string_from_array_or_string(trailer_raw) if trailer_raw else None
-            logo_url = movie_data.get('stream_icon') or ''
+            logo_url = extract_stalker_logo_url(movie_data) if is_stalker else (movie_data.get('stream_icon') or '')
+
+            custom_properties = {}
+            if trailer:
+                custom_properties['trailer'] = trailer
+            for key in ('releaseDate', 'release_date', 'added'):
+                value = movie_data.get(key)
+                if value not in (None, '', []):
+                    custom_properties[key] = value
 
             movie_props = {
                 'name': name,
@@ -558,7 +842,7 @@ def process_movie_batch(account, batch, categories, relations, scan_start_time=N
                 'rating': rating,
                 'genre': genre,
                 'duration_secs': duration_secs,
-                'custom_properties': {'trailer': trailer} if trailer else None,
+                'custom_properties': custom_properties or None,
             }
 
             movie_keys[movie_key] = {
@@ -823,13 +1107,25 @@ def process_series_batch(account, batch, categories, relations, scan_start_time=
     # Process each series in the batch
     for series_data in batch:
         try:
-            series_id = str(series_data.get('series_id'))
-            name = series_data.get('name', 'Unknown')
+            is_stalker = account.account_type == M3UAccount.Types.STALKER
+            if is_stalker:
+                series_id = extract_stalker_relation_id(series_data)
+                name = extract_display_name(series_data)
+            else:
+                series_id = str(series_data.get('series_id'))
+                name = series_data.get('name', 'Unknown')
+
+            if not series_id:
+                logger.debug("Skipping series without a stable relation key: %s", series_data)
+                continue
 
             # Get category with proper error handling
             category = None
 
-            provider_cat_id = str(series_data.get('category_id', '')) if series_data.get('category_id') else None
+            if is_stalker:
+                provider_cat_id = extract_stalker_category_context_id(series_data)
+            else:
+                provider_cat_id = str(series_data.get('category_id', '')) if series_data.get('category_id') else None
             series_data['_provider_category_id'] = provider_cat_id
             series_data['_category_id'] = None
 
@@ -855,9 +1151,8 @@ def process_series_batch(account, batch, categories, relations, scan_start_time=
                         continue
 
             # Extract metadata
-            year = extract_year(series_data.get('releaseDate', ''))
-            if not year and series_data.get('release_date'):
-                year = extract_year(series_data.get('release_date'))
+            title_key = 'name' if series_data.get('name') else 'title'
+            year = extract_year_from_data(series_data, title_key)
 
             tmdb_id = series_data.get('tmdb') or series_data.get('tmdb_id')
             imdb_id = series_data.get('imdb') or series_data.get('imdb_id')
@@ -881,16 +1176,16 @@ def process_series_batch(account, batch, categories, relations, scan_start_time=
                 continue
 
             # Prepare series properties
-            description = series_data.get('plot', '')
+            description = series_data.get('description') or series_data.get('plot') or ''
             rating = normalize_rating(series_data.get('rating'))
             genre = series_data.get('genre', '')
-            logo_url = series_data.get('cover') or ''
+            logo_url = extract_stalker_logo_url(series_data) if is_stalker else (series_data.get('cover') or '')
 
             # Extract additional metadata for custom_properties
             additional_metadata = {}
             for key in ['backdrop_path', 'poster_path', 'original_name', 'first_air_date', 'last_air_date',
                        'episode_run_time', 'status', 'type', 'cast', 'director', 'country', 'language',
-                       'releaseDate', 'youtube_trailer', 'category_id', 'age', 'seasons']:
+                       'releaseDate', 'release_date', 'youtube_trailer', 'category_id', 'age', 'seasons', 'added']:
                 value = series_data.get(key)
                 if value:
                     # For string-like fields that might be arrays, extract clean strings
@@ -1175,9 +1470,14 @@ def extract_duration_from_data(movie_data):
     # Try to extract duration from various possible fields
     if movie_data.get('duration_secs'):
         duration_secs = int(movie_data.get('duration_secs'))
-    elif movie_data.get('duration'):
+    elif movie_data.get('duration') or movie_data.get('time') or movie_data.get('runtime'):
         # Handle duration that might be in different formats
-        duration_str = str(movie_data.get('duration'))
+        duration_value = (
+            movie_data.get('duration')
+            or movie_data.get('time')
+            or movie_data.get('runtime')
+        )
+        duration_str = str(duration_value)
         if duration_str.isdigit():
             duration_secs = int(duration_str) * 60  # Assume minutes if just a number
         else:

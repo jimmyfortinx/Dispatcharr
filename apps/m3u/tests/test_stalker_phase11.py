@@ -1,4 +1,4 @@
-from unittest.mock import patch
+from unittest.mock import ANY, patch
 
 from django.contrib.auth import get_user_model
 from django.test import TestCase
@@ -156,27 +156,31 @@ class StalkerPhase11CategoryDiscoveryTests(TestCase):
         )
 
     @patch("apps.m3u.tasks.send_m3u_update")
+    @patch("apps.vod.tasks.cleanup_orphaned_vod_content")
     @patch("apps.vod.tasks.refresh_series")
     @patch("apps.vod.tasks.refresh_movies")
     @patch("apps.vod.tasks.refresh_categories")
-    def test_refresh_vod_content_for_stalker_stops_after_category_sync(
+    def test_refresh_vod_content_for_stalker_runs_catalog_import_after_category_sync(
         self,
         mock_refresh_categories,
         mock_refresh_movies,
         mock_refresh_series,
+        mock_cleanup_orphaned_vod_content,
         mock_send_m3u_update,
     ):
         mock_refresh_categories.return_value = (
             {"10": object(), "11": object()},
             {"20": object()},
         )
+        mock_cleanup_orphaned_vod_content.return_value = "cleanup complete"
 
         result = refresh_vod_content(self.account.id)
 
-        self.assertIn("Stalker VOD category refresh completed", result)
-        mock_refresh_categories.assert_called_once_with(self.account.id)
-        mock_refresh_movies.assert_not_called()
-        mock_refresh_series.assert_not_called()
+        self.assertIn("Stalker VOD refresh completed", result)
+        mock_refresh_categories.assert_called_once_with(self.account.id, client=ANY)
+        mock_refresh_movies.assert_called_once()
+        mock_refresh_series.assert_called_once()
+        mock_cleanup_orphaned_vod_content.assert_called_once()
 
         success_update = mock_send_m3u_update.call_args_list[-1]
         self.assertEqual(success_update.args[0], self.account.id)
