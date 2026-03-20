@@ -1,242 +1,326 @@
-name: CI Pipeline
+name: Dev Pipeline
 
 on:
   push:
     branches: [dev]
     paths-ignore:
-      - '**.md'
+      - "**.md"
   pull_request:
     branches: [dev]
   workflow_dispatch:
+  workflow_call:
+    inputs:
+      ref:
+        description: "Git ref to build and test"
+        required: false
+        default: ""
+        type: string
+      publish:
+        description: "Publish GHCR images"
+        required: false
+        default: true
+        type: boolean
+      rebuild_base:
+        description: "Force a base image rebuild"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
-  contents: write
+  contents: read
   packages: write
+
+concurrency:
+  group: dev-pipeline-${{ inputs.ref != '' && inputs.ref || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   prepare:
     runs-on: ubuntu-24.04
-    # compute a single timestamp, version, and repo metadata for the entire workflow
     outputs:
+      checkout_ref: ${{ steps.meta.outputs.checkout_ref }}
+      ref_name: ${{ steps.meta.outputs.ref_name }}
       repo_owner: ${{ steps.meta.outputs.repo_owner }}
       repo_name: ${{ steps.meta.outputs.repo_name }}
       branch_tag: ${{ steps.meta.outputs.branch_tag }}
+      base_tag: ${{ steps.meta.outputs.base_tag }}
+      should_publish: ${{ steps.meta.outputs.should_publish }}
+      should_build_base: ${{ steps.meta.outputs.should_build_base }}
       version: ${{ steps.version.outputs.version }}
       timestamp: ${{ steps.timestamp.outputs.timestamp }}
-
+      sha_short: ${{ steps.sha.outputs.sha_short }}
+      commit_sha: ${{ steps.sha.outputs.commit_sha }}
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
+          ref: ${{ inputs.ref != '' && inputs.ref || github.ref }}
 
-      - name: Generate timestamp for build
-        id: timestamp
-        run: |
-          TIMESTAMP=$(date -u +'%Y%m%d%H%M%S')
-          echo "timestamp=${TIMESTAMP}" >> $GITHUB_OUTPUT
-
-      - name: Extract version info
-        id: version
-        run: |
-          VERSION=$(python -c "import version; print(version.__version__)")
-          echo "version=${VERSION}" >> $GITHUB_OUTPUT
-
-      - name: Set repository and image metadata
+      - name: Resolve pipeline metadata
         id: meta
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_REF: ${{ inputs.ref }}
+          INPUT_PUBLISH: ${{ inputs.publish }}
+          INPUT_REBUILD_BASE: ${{ inputs.rebuild_base }}
+          GITHUB_REF_VALUE: ${{ github.ref }}
+          GITHUB_REF_NAME_VALUE: ${{ github.ref_name }}
+          GITHUB_HEAD_REF_VALUE: ${{ github.head_ref }}
+          GITHUB_REPOSITORY_OWNER_VALUE: ${{ github.repository_owner }}
+          GITHUB_REPOSITORY_VALUE: ${{ github.repository }}
+          BEFORE_SHA: ${{ github.event.before }}
+          CURRENT_SHA: ${{ github.sha }}
         run: |
-          REPO_OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
-          echo "repo_owner=${REPO_OWNER}" >> $GITHUB_OUTPUT
+          set -euo pipefail
 
-          REPO_NAME=$(echo "${{ github.repository }}" | cut -d '/' -f 2 | tr '[:upper:]' '[:lower:]')
-          echo "repo_name=${REPO_NAME}" >> $GITHUB_OUTPUT
-
-          if [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
-            echo "branch_tag=latest" >> $GITHUB_OUTPUT
-            echo "is_main=true" >> $GITHUB_OUTPUT
-          elif [[ "${{ github.ref }}" == "refs/heads/dev" ]]; then
-            echo "branch_tag=dev" >> $GITHUB_OUTPUT
-            echo "is_main=false" >> $GITHUB_OUTPUT
-          else
-            BRANCH=$(echo "${{ github.ref }}" | sed 's/refs\/heads\///' | sed 's/[^a-zA-Z0-9]/-/g')
-            echo "branch_tag=${BRANCH}" >> $GITHUB_OUTPUT
-            echo "is_main=false" >> $GITHUB_OUTPUT
+          CHECKOUT_REF="${INPUT_REF:-}"
+          if [ -z "$CHECKOUT_REF" ]; then
+            CHECKOUT_REF="$GITHUB_REF_VALUE"
           fi
 
-          if [[ "${{ github.event.pull_request.head.repo.fork }}" == "true" ]]; then
-            echo "is_fork=true" >> $GITHUB_OUTPUT
-          else
-            echo "is_fork=false" >> $GITHUB_OUTPUT
+          REF_NAME="${GITHUB_REF_NAME_VALUE}"
+          if [ -n "${INPUT_REF:-}" ] && [[ "$INPUT_REF" == refs/heads/* ]]; then
+            REF_NAME="${INPUT_REF#refs/heads/}"
+          elif [ "$EVENT_NAME" = "pull_request" ] && [ -n "${GITHUB_HEAD_REF_VALUE:-}" ]; then
+            REF_NAME="$GITHUB_HEAD_REF_VALUE"
           fi
 
-  docker:
+          SAFE_REF=$(echo "$REF_NAME" | tr '/_' '--' | tr -cd '[:alnum:]-')
+          if [ -z "$SAFE_REF" ]; then
+            SAFE_REF="dev"
+          fi
+
+          if [ "$REF_NAME" = "dev" ]; then
+            BRANCH_TAG="dev"
+            BASE_TAG="base-dev"
+          else
+            BRANCH_TAG="$SAFE_REF"
+            BASE_TAG="base-$SAFE_REF"
+          fi
+
+          SHOULD_PUBLISH="false"
+          if [ "$EVENT_NAME" != "pull_request" ] && [ "$REF_NAME" = "dev" ] && [ "${INPUT_PUBLISH:-true}" = "true" ]; then
+            SHOULD_PUBLISH="true"
+          fi
+
+          SHOULD_BUILD_BASE="false"
+          if [ "$SHOULD_PUBLISH" = "true" ] && [ "${INPUT_REBUILD_BASE:-false}" = "true" ]; then
+            SHOULD_BUILD_BASE="true"
+          elif [ "$SHOULD_PUBLISH" = "true" ] && [ "$EVENT_NAME" = "push" ] && [ -n "${BEFORE_SHA:-}" ] && [ "${BEFORE_SHA}" != "0000000000000000000000000000000000000000" ]; then
+            if git diff --name-only "$BEFORE_SHA" "$CURRENT_SHA" | rg -q '^(docker/DispatcharrBase|pyproject.toml|uv.lock|docker/Dockerfile|\.github/workflows/ci\.yml)$'; then
+              SHOULD_BUILD_BASE="true"
+            fi
+          fi
+
+          REPO_OWNER=$(echo "$GITHUB_REPOSITORY_OWNER_VALUE" | tr '[:upper:]' '[:lower:]')
+          REPO_NAME=$(echo "$GITHUB_REPOSITORY_VALUE" | cut -d '/' -f 2 | tr '[:upper:]' '[:lower:]')
+
+          echo "checkout_ref=${CHECKOUT_REF}" >> "$GITHUB_OUTPUT"
+          echo "ref_name=${REF_NAME}" >> "$GITHUB_OUTPUT"
+          echo "repo_owner=${REPO_OWNER}" >> "$GITHUB_OUTPUT"
+          echo "repo_name=${REPO_NAME}" >> "$GITHUB_OUTPUT"
+          echo "branch_tag=${BRANCH_TAG}" >> "$GITHUB_OUTPUT"
+          echo "base_tag=${BASE_TAG}" >> "$GITHUB_OUTPUT"
+          echo "should_publish=${SHOULD_PUBLISH}" >> "$GITHUB_OUTPUT"
+          echo "should_build_base=${SHOULD_BUILD_BASE}" >> "$GITHUB_OUTPUT"
+
+      - name: Generate timestamp
+        id: timestamp
+        run: echo "timestamp=$(date -u +'%Y%m%d%H%M%S')" >> "$GITHUB_OUTPUT"
+
+      - name: Extract version
+        id: version
+        run: echo "version=$(python3 -c 'import version; print(version.__version__)')" >> "$GITHUB_OUTPUT"
+
+      - name: Capture short SHA
+        id: sha
+        run: |
+          echo "sha_short=$(git rev-parse --short=12 HEAD)" >> "$GITHUB_OUTPUT"
+          echo "commit_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+  backend-tests:
     needs: [prepare]
-    strategy:
-      fail-fast: false
-      matrix:
-        platform: [amd64, arm64]
-        include:
-          - platform: amd64
-            runner: ubuntu-24.04
-          - platform: arm64
-            runner: ubuntu-24.04-arm
-    runs-on: ${{ matrix.runner }}
-    # no per-job outputs here; shared metadata comes from the `prepare` job
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_DB: dispatcharr
+          POSTGRES_USER: dispatch
+          POSTGRES_PASSWORD: secret
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U dispatch -d dispatcharr"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DJANGO_SECRET_KEY: test-secret-key
+      POSTGRES_DB: dispatcharr
+      POSTGRES_USER: dispatch
+      POSTGRES_PASSWORD: secret
+      POSTGRES_HOST: 127.0.0.1
+      POSTGRES_PORT: 5432
+      REDIS_HOST: 127.0.0.1
+      REDIS_PORT: 6379
+      REDIS_DB: 0
+      DISPATCHARR_DEBUG: "False"
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
+          ref: ${{ needs.prepare.outputs.checkout_ref }}
 
-      - name: Configure Git
-        run: |
-          git config user.name "GitHub Actions"
-          git config user.email "actions@github.com"
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
 
-      - name: Check if commit is from GitHub Actions
-        id: check_actor
+      - name: Install system test dependencies
         run: |
-          if [[ "${{ github.actor }}" == "github-actions" ]]; then
-            echo "is_bot=true" >> $GITHUB_OUTPUT
-          else
-            echo "is_bot=false" >> $GITHUB_OUTPUT
-          fi
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y libvlc5 vlc-plugin-base
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Install Python dependencies
+        run: uv sync --frozen --python 3.13 --no-dev
+
+      - name: Run backend tests
+        run: uv run python manage.py test
+
+  frontend-tests:
+    needs: [prepare]
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: ./frontend
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ needs.prepare.outputs.checkout_ref }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: "npm"
+          cache-dependency-path: "./frontend/package-lock.json"
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Run frontend tests
+        run: npm test
+
+  publish-base:
+    needs: [prepare, backend-tests, frontend-tests]
+    if: needs.prepare.outputs.should_publish == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ needs.prepare.outputs.checkout_ref }}
+
+      - name: Set up QEMU
+        if: needs.prepare.outputs.should_build_base == 'true'
+        uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v2
+        if: needs.prepare.outputs.should_build_base == 'true'
+        uses: docker/setup-buildx-action@v3
 
-      - name: Login to GitHub Container Registry
-        uses: docker/login-action@v2
+      - name: Log in to GHCR
+        if: needs.prepare.outputs.should_build_base == 'true'
+        uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Login to Docker Hub
-        uses: docker/login-action@v2
-        with:
-          registry: docker.io
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-      - name: Extract metadata for Docker
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: |
-            ghcr.io/${{ needs.prepare.outputs.repo_owner }}/${{ needs.prepare.outputs.repo_name }}
-            docker.io/${{ secrets.DOCKERHUB_ORGANIZATION }}/${{ needs.prepare.outputs.repo_name }}
-          labels: |
-            org.opencontainers.image.title=${{ needs.prepare.outputs.repo_name }}
-            org.opencontainers.image.description=Your ultimate IPTV & stream Management companion.
-            org.opencontainers.image.url=https://github.com/${{ github.repository }}
-            org.opencontainers.image.source=https://github.com/${{ github.repository }}
-            org.opencontainers.image.version=${{ needs.prepare.outputs.version }}-${{ needs.prepare.outputs.timestamp }}
-            org.opencontainers.image.created=${{ needs.prepare.outputs.timestamp }}
-            org.opencontainers.image.revision=${{ github.sha }}
-            org.opencontainers.image.licenses=See repository
-            org.opencontainers.image.documentation=https://dispatcharr.github.io/Dispatcharr-Docs/
-            org.opencontainers.image.vendor=${{ needs.prepare.outputs.repo_owner }}
-            org.opencontainers.image.authors=${{ github.actor }}
-            maintainer=${{ github.actor }}
-            build_version=Dispatcharr version: ${{ needs.prepare.outputs.version }}-${{ needs.prepare.outputs.timestamp }}
-
-      - name: Build and push Docker image
-        uses: docker/build-push-action@v4
+      - name: Build and publish base image
+        if: needs.prepare.outputs.should_build_base == 'true'
+        uses: docker/build-push-action@v6
         with:
           context: .
-          push: ${{ github.event_name != 'pull_request' }}
-          # Build only the platform for this matrix job to avoid running amd64
-          # stages under qemu on an arm64 runner (and vice-versa). This makes
-          # the matrix runner's platform the one built by buildx.
-          platforms: linux/${{ matrix.platform }}
-          # push arch-specific tags from each matrix job (they will be combined
-          # into a multi-arch manifest in a follow-up job)
+          file: ./docker/DispatcharrBase
+          platforms: linux/amd64,linux/arm64
+          push: true
+          cache-from: type=gha,scope=dispatcharr-base
+          cache-to: type=gha,mode=max,scope=dispatcharr-base
           tags: |
-            ghcr.io/${{ needs.prepare.outputs.repo_owner }}/${{ needs.prepare.outputs.repo_name }}:${{ needs.prepare.outputs.branch_tag }}-${{ matrix.platform }}
-            ghcr.io/${{ needs.prepare.outputs.repo_owner }}/${{ needs.prepare.outputs.repo_name }}:${{ needs.prepare.outputs.version }}-${{ needs.prepare.outputs.timestamp }}-${{ matrix.platform }}
-            docker.io/${{ secrets.DOCKERHUB_ORGANIZATION }}/${{ needs.prepare.outputs.repo_name }}:${{ needs.prepare.outputs.branch_tag }}-${{ matrix.platform }}
-            docker.io/${{ secrets.DOCKERHUB_ORGANIZATION }}/${{ needs.prepare.outputs.repo_name }}:${{ needs.prepare.outputs.version }}-${{ needs.prepare.outputs.timestamp }}-${{ matrix.platform }}
-          labels: ${{ steps.meta.outputs.labels }}
+            ghcr.io/${{ needs.prepare.outputs.repo_owner }}/${{ needs.prepare.outputs.repo_name }}:${{ needs.prepare.outputs.base_tag }}
+            ghcr.io/${{ needs.prepare.outputs.repo_owner }}/${{ needs.prepare.outputs.repo_name }}:${{ needs.prepare.outputs.base_tag }}-${{ needs.prepare.outputs.timestamp }}
+          labels: |
+            org.opencontainers.image.title=${{ needs.prepare.outputs.repo_name }}
+            org.opencontainers.image.description=Dispatcharr base image for fork development builds.
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ needs.prepare.outputs.commit_sha }}
+            org.opencontainers.image.version=${{ needs.prepare.outputs.base_tag }}-${{ needs.prepare.outputs.timestamp }}
+
+      - name: Skip base image rebuild
+        if: needs.prepare.outputs.should_build_base != 'true'
+        run: echo "Base image rebuild not required for this run."
+
+  publish-app:
+    needs: [prepare, backend-tests, frontend-tests, publish-base]
+    if: needs.prepare.outputs.should_publish == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ needs.prepare.outputs.checkout_ref }}
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and publish application image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./docker/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          cache-from: type=gha,scope=dispatcharr-app
+          cache-to: type=gha,mode=max,scope=dispatcharr-app
           build-args: |
             REPO_OWNER=${{ needs.prepare.outputs.repo_owner }}
             REPO_NAME=${{ needs.prepare.outputs.repo_name }}
-            BASE_TAG=base
-            BRANCH=${{ github.ref_name }}
+            BASE_TAG=${{ needs.prepare.outputs.base_tag }}
+            BRANCH=${{ needs.prepare.outputs.ref_name }}
             REPO_URL=https://github.com/${{ github.repository }}
             TIMESTAMP=${{ needs.prepare.outputs.timestamp }}
-          file: ./docker/Dockerfile
-
-  create-manifest:
-    # wait for prepare and all matrix builds to finish
-    needs: [prepare, docker]
-    runs-on: ubuntu-24.04
-    if: ${{ github.event_name != 'pull_request' }}
-    steps:
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v2
-
-      - name: Login to GitHub Container Registry
-        uses: docker/login-action@v2
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Login to Docker Hub
-        uses: docker/login-action@v2
-        with:
-          registry: docker.io
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-      - name: Create multi-arch manifest tags
-        run: |
-          set -euo pipefail
-          OWNER=${{ needs.prepare.outputs.repo_owner }}
-          REPO=${{ needs.prepare.outputs.repo_name }}
-          BRANCH_TAG=${{ needs.prepare.outputs.branch_tag }}
-          VERSION=${{ needs.prepare.outputs.version }}
-          TIMESTAMP=${{ needs.prepare.outputs.timestamp }}
-
-          echo "Creating multi-arch manifest for ${OWNER}/${REPO}"
-
-          # ghcr.io: both the branch tag (e.g. dev) and the version+timestamp tag
-          # point to the same manifest by using multiple --tag flags in one call,
-          # which prevents orphaned untagged images on each new build
-          docker buildx imagetools create \
-            --annotation "index:org.opencontainers.image.title=${{ needs.prepare.outputs.repo_name }}" \
-            --annotation "index:org.opencontainers.image.description=Your ultimate IPTV & stream Management companion." \
-            --annotation "index:org.opencontainers.image.url=https://github.com/${{ github.repository }}" \
-            --annotation "index:org.opencontainers.image.source=https://github.com/${{ github.repository }}" \
-            --annotation "index:org.opencontainers.image.version=${VERSION}-${TIMESTAMP}" \
-            --annotation "index:org.opencontainers.image.created=${TIMESTAMP}" \
-            --annotation "index:org.opencontainers.image.revision=${{ github.sha }}" \
-            --annotation "index:org.opencontainers.image.licenses=See repository" \
-            --annotation "index:org.opencontainers.image.documentation=https://dispatcharr.github.io/Dispatcharr-Docs/" \
-            --annotation "index:org.opencontainers.image.vendor=${OWNER}" \
-            --annotation "index:org.opencontainers.image.authors=${{ github.actor }}" \
-            --annotation "index:maintainer=${{ github.actor }}" \
-            --annotation "index:build_version=Dispatcharr version: ${VERSION}-${TIMESTAMP}" \
-            --tag ghcr.io/${OWNER}/${REPO}:${BRANCH_TAG} \
-            --tag ghcr.io/${OWNER}/${REPO}:${VERSION}-${TIMESTAMP} \
-            ghcr.io/${OWNER}/${REPO}:${BRANCH_TAG}-amd64 ghcr.io/${OWNER}/${REPO}:${BRANCH_TAG}-arm64
-
-          # Docker Hub: same single call with both tags
-          docker buildx imagetools create \
-            --annotation "index:org.opencontainers.image.title=${{ needs.prepare.outputs.repo_name }}" \
-            --annotation "index:org.opencontainers.image.description=Your ultimate IPTV & stream Management companion." \
-            --annotation "index:org.opencontainers.image.url=https://github.com/${{ github.repository }}" \
-            --annotation "index:org.opencontainers.image.source=https://github.com/${{ github.repository }}" \
-            --annotation "index:org.opencontainers.image.version=${VERSION}-${TIMESTAMP}" \
-            --annotation "index:org.opencontainers.image.created=${TIMESTAMP}" \
-            --annotation "index:org.opencontainers.image.revision=${{ github.sha }}" \
-            --annotation "index:org.opencontainers.image.licenses=See repository" \
-            --annotation "index:org.opencontainers.image.documentation=https://dispatcharr.github.io/Dispatcharr-Docs/" \
-            --annotation "index:org.opencontainers.image.vendor=${OWNER}" \
-            --annotation "index:org.opencontainers.image.authors=${{ github.actor }}" \
-            --annotation "index:maintainer=${{ github.actor }}" \
-            --annotation "index:build_version=Dispatcharr version: ${VERSION}-${TIMESTAMP}" \
-            --tag docker.io/${{ secrets.DOCKERHUB_ORGANIZATION }}/${REPO}:${BRANCH_TAG} \
-            --tag docker.io/${{ secrets.DOCKERHUB_ORGANIZATION }}/${REPO}:${VERSION}-${TIMESTAMP} \
-            docker.io/${{ secrets.DOCKERHUB_ORGANIZATION }}/${REPO}:${BRANCH_TAG}-amd64 docker.io/${{ secrets.DOCKERHUB_ORGANIZATION }}/${REPO}:${BRANCH_TAG}-arm64
+          tags: |
+            ghcr.io/${{ needs.prepare.outputs.repo_owner }}/${{ needs.prepare.outputs.repo_name }}:${{ needs.prepare.outputs.branch_tag }}
+            ghcr.io/${{ needs.prepare.outputs.repo_owner }}/${{ needs.prepare.outputs.repo_name }}:${{ needs.prepare.outputs.version }}-${{ needs.prepare.outputs.timestamp }}
+            ghcr.io/${{ needs.prepare.outputs.repo_owner }}/${{ needs.prepare.outputs.repo_name }}:sha-${{ needs.prepare.outputs.sha_short }}
+          labels: |
+            org.opencontainers.image.title=${{ needs.prepare.outputs.repo_name }}
+            org.opencontainers.image.description=Dispatcharr fork development image.
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ needs.prepare.outputs.commit_sha }}
+            org.opencontainers.image.version=${{ needs.prepare.outputs.version }}-${{ needs.prepare.outputs.timestamp }}

@@ -27,6 +27,7 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 # --- Create Python virtual environment and install dependencies ---
 WORKDIR /tmp/build
 COPY pyproject.toml /tmp/build/
+COPY uv.lock /tmp/build/
 COPY version.py /tmp/build/
 COPY README.md /tmp/build/
 RUN uv sync --python 3.13 --no-cache --no-install-project --no-dev && \

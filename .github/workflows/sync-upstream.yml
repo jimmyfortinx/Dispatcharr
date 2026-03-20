@@ -1,0 +1,84 @@
+name: Sync Upstream Main
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 */6 * * *"
+
+permissions:
+  contents: write
+  packages: write
+
+concurrency:
+  group: sync-upstream-main
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-24.04
+    outputs:
+      dev_updated: ${{ steps.sync.outputs.dev_updated }}
+      rebuild_base: ${{ steps.sync.outputs.rebuild_base }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure Git
+        run: |
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+
+      - name: Fetch origin and upstream branches
+        run: |
+          set -euo pipefail
+          git remote add upstream https://github.com/Dispatcharr/Dispatcharr.git 2>/dev/null || true
+          git fetch --no-tags origin main dev
+          git fetch --no-tags upstream main
+
+      - name: Sync main and merge into dev
+        id: sync
+        run: |
+          set -euo pipefail
+
+          ORIGIN_MAIN_SHA=$(git rev-parse origin/main)
+          UPSTREAM_MAIN_SHA=$(git rev-parse upstream/main)
+          ORIGIN_DEV_SHA=$(git rev-parse origin/dev)
+
+          echo "dev_updated=false" >> "$GITHUB_OUTPUT"
+          echo "rebuild_base=false" >> "$GITHUB_OUTPUT"
+
+          if [ "$ORIGIN_MAIN_SHA" != "$UPSTREAM_MAIN_SHA" ]; then
+            if ! git merge-base --is-ancestor origin/main upstream/main; then
+              echo "origin/main has diverged from upstream/main; refusing to overwrite it." >&2
+              exit 1
+            fi
+            git push origin upstream/main:refs/heads/main
+          fi
+
+          if git merge-base --is-ancestor upstream/main origin/dev; then
+            echo "origin/dev already contains upstream/main; nothing to merge."
+            exit 0
+          fi
+
+          git checkout -B dev-sync origin/dev
+          git merge --no-ff --no-edit upstream/main
+
+          NEW_DEV_SHA=$(git rev-parse HEAD)
+          if git diff --name-only "$ORIGIN_DEV_SHA" "$NEW_DEV_SHA" | rg -q '^(docker/DispatcharrBase|pyproject.toml|uv.lock|docker/Dockerfile|\.github/workflows/ci\.yml)$'; then
+            echo "rebuild_base=true" >> "$GITHUB_OUTPUT"
+          fi
+
+          git push origin HEAD:refs/heads/dev
+          echo "dev_updated=true" >> "$GITHUB_OUTPUT"
+
+  pipeline:
+    needs: [sync]
+    if: needs.sync.outputs.dev_updated == 'true'
+    uses: ./.github/workflows/ci.yml
+    with:
+      ref: refs/heads/dev
+      publish: true
+      rebuild_base: ${{ needs.sync.outputs.rebuild_base == 'true' }}
+    secrets: inherit
