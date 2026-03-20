@@ -158,7 +158,29 @@ class StalkerPhase10ClientTests(TestCase):
             with_auth=True,
         )
 
-    def test_get_series_seasons_uses_movie_season_episode_query_shape(self):
+    def test_get_series_categories_uses_series_endpoint(self):
+        with patch.object(
+            self.client,
+            "_request",
+            return_value={"js": [{"id": "4", "title": "FRENCH SERIE"}]},
+        ) as mock_request:
+            categories = self.client.get_series_categories(
+                "http://portal.example.com/stalker_portal/server/load.php"
+            )
+
+        self.assertEqual(categories[0]["id"], "4")
+        mock_request.assert_called_once_with(
+            "GET",
+            "http://portal.example.com/stalker_portal/server/load.php",
+            query={
+                "type": "series",
+                "action": "get_categories",
+                "JsHttpRequest": "1-xml",
+            },
+            with_auth=True,
+        )
+
+    def test_get_series_seasons_uses_series_season_episode_query_shape(self):
         with patch.object(
             self.client,
             "_request",
@@ -174,7 +196,7 @@ class StalkerPhase10ClientTests(TestCase):
             "GET",
             "http://portal.example.com/stalker_portal/server/load.php",
             query={
-                "type": "vod",
+                "type": "series",
                 "action": "get_ordered_list",
                 "JsHttpRequest": "1-xml",
                 "p": 1,

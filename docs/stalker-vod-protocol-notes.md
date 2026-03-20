@@ -23,11 +23,11 @@ These are raw sample slices from the portal, not imported Dispatcharr models.
 The client now keeps a dedicated VOD surface, separate from live TV methods.
 
 - Movie categories: `GET <portal>?type=vod&action=get_categories&JsHttpRequest=1-xml`
-- Series categories: same request for now; some portals expose both trees through the shared VOD surface
+- Series categories: `GET <portal>?type=series&action=get_categories&JsHttpRequest=1-xml`
 - Movie list: `GET <portal>?type=vod&action=get_ordered_list&category=<category_id>&p=<page>&JsHttpRequest=1-xml`
-- Series list: same ordered-list surface, with a series category
-- Series detail / seasons: `GET <portal>?type=vod&action=get_ordered_list&movie_id=<series_id>&season_id=0&episode_id=0&p=<page>&JsHttpRequest=1-xml`
-- Episodes for a season: `GET <portal>?type=vod&action=get_ordered_list&movie_id=<series_id>&season_id=<season_id>&episode_id=0&p=<page>&JsHttpRequest=1-xml`
+- Series list: `GET <portal>?type=series&action=get_ordered_list&category=<category_id>&p=<page>&JsHttpRequest=1-xml`
+- Series detail / seasons: `GET <portal>?type=series&action=get_ordered_list&movie_id=<series_id>&season_id=0&episode_id=0&p=<page>&JsHttpRequest=1-xml`
+- Episodes for a season: `GET <portal>?type=series&action=get_ordered_list&movie_id=<series_id>&season_id=<season_id>&episode_id=0&p=<page>&JsHttpRequest=1-xml`
 - VOD playback link: `GET <portal>?action=create_link&type=vod&cmd=<escaped_cmd>&JsHttpRequest=1-xml`
 
 ## Normalized Mapping

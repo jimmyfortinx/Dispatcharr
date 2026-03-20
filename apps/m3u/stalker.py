@@ -67,6 +67,16 @@ class StalkerVodDiscoveryResult:
     used_authentication: bool
 
 
+@dataclass
+class StalkerVodCategoryDiscoveryResult:
+    normalized_portal_url: str
+    profile_name: str
+    movie_categories: list
+    series_categories: list
+    token: str
+    used_authentication: bool
+
+
 class StalkerClient:
     def __init__(
         self,
@@ -224,6 +234,22 @@ class StalkerClient:
         detail = errors[-1] if errors else "No portal endpoints could be tested."
         raise StalkerError(detail)
 
+    def discover_vod_categories(self):
+        errors = []
+        for candidate in self.normalize_portal_candidates(self.server_url):
+            try:
+                return self._discover_vod_categories_candidate(candidate)
+            except StalkerError as exc:
+                errors.append(f"{candidate}: {exc}")
+                logger.info(
+                    "Stalker VOD category discovery attempt failed for %s: %s",
+                    candidate,
+                    exc,
+                )
+
+        detail = errors[-1] if errors else "No portal endpoints could be tested."
+        raise StalkerError(detail)
+
     def _discover_candidate(self, portal_url):
         self.handshake(portal_url)
         used_authentication = False
@@ -368,6 +394,41 @@ class StalkerClient:
             normalized_portal_url=portal_url,
             profile_name=str(profile_name).strip() or self.mac,
             samples=samples,
+            token=self.token,
+            used_authentication=used_authentication,
+        )
+
+    def _discover_vod_categories_candidate(self, portal_url):
+        self.handshake(portal_url)
+        used_authentication = False
+        if self.username or self.password:
+            self.authenticate(portal_url)
+            used_authentication = True
+        elif self._should_use_device_id_auth():
+            self.authenticate_with_device_ids(portal_url)
+        profile = self.get_profile(portal_url)
+
+        profile_name = (
+            profile.get("name")
+            or profile.get("fname")
+            or profile.get("login")
+            or self.username
+            or self.mac
+        )
+
+        movie_categories = self.get_vod_categories(portal_url)
+        series_categories = self.get_series_categories(portal_url)
+
+        if not isinstance(movie_categories, list):
+            raise StalkerError("Portal returned an invalid movie categories response.")
+        if not isinstance(series_categories, list):
+            raise StalkerError("Portal returned an invalid series categories response.")
+
+        return StalkerVodCategoryDiscoveryResult(
+            normalized_portal_url=portal_url,
+            profile_name=str(profile_name).strip() or self.mac,
+            movie_categories=movie_categories,
+            series_categories=series_categories,
             token=self.token,
             used_authentication=used_authentication,
         )
@@ -580,11 +641,17 @@ class StalkerClient:
         return channels
 
     def get_vod_categories(self, portal_url):
+        return self._get_categories(portal_url, provider_type="vod")
+
+    def get_series_categories(self, portal_url):
+        return self._get_categories(portal_url, provider_type="series")
+
+    def _get_categories(self, portal_url, provider_type):
         payload = self._request(
             "GET",
             portal_url,
             query={
-                "type": "vod",
+                "type": provider_type,
                 "action": "get_categories",
                 "JsHttpRequest": "1-xml",
             },
@@ -600,15 +667,12 @@ class StalkerClient:
             )
         return categories
 
-    def get_series_categories(self, portal_url):
-        # Many portals expose both movie and series trees through the shared VOD surface.
-        return self.get_vod_categories(portal_url)
-
     def get_vod_movies(self, portal_url, category_id=None, page=1):
         return self._get_vod_ordered_list(
             portal_url,
             category_id=category_id,
             page=page,
+            provider_type="vod",
         )
 
     def get_vod_series(self, portal_url, category_id=None, page=1):
@@ -616,6 +680,7 @@ class StalkerClient:
             portal_url,
             category_id=category_id,
             page=page,
+            provider_type="series",
         )
 
     def get_series_seasons(self, portal_url, series_id, page=1):
@@ -625,6 +690,7 @@ class StalkerClient:
             movie_id=series_id,
             season_id="0",
             episode_id="0",
+            provider_type="series",
         )
 
     def get_series_episodes(self, portal_url, series_id, season_id, page=1):
@@ -634,6 +700,7 @@ class StalkerClient:
             movie_id=series_id,
             season_id=season_id,
             episode_id="0",
+            provider_type="series",
         )
 
     def create_vod_link(self, portal_url, cmd):
@@ -661,9 +728,10 @@ class StalkerClient:
         movie_id=None,
         season_id=None,
         episode_id=None,
+        provider_type="vod",
     ):
         query = {
-            "type": "vod",
+            "type": provider_type,
             "action": "get_ordered_list",
             "JsHttpRequest": "1-xml",
             "p": page,

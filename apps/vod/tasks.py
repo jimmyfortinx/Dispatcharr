@@ -4,6 +4,7 @@ from django.db import transaction, IntegrityError
 from django.db.models import Q
 from apps.m3u.models import M3UAccount
 from core.xtream_codes import Client as XtreamCodesClient
+from apps.m3u.stalker import StalkerClient
 from .models import (
     VODCategory, Series, Movie, Episode, VODLogo,
     M3USeriesRelation, M3UMovieRelation, M3UEpisodeRelation, M3UVODCategoryRelation
@@ -25,9 +26,12 @@ def refresh_vod_content(account_id):
     try:
         account = M3UAccount.objects.get(id=account_id, is_active=True)
 
-        if account.account_type != M3UAccount.Types.XC:
-            logger.warning(f"VOD refresh called for non-XC account {account_id}")
-            return "VOD refresh only available for XtreamCodes accounts"
+        if account.account_type not in (
+            M3UAccount.Types.XC,
+            M3UAccount.Types.STALKER,
+        ):
+            logger.warning(f"VOD refresh called for unsupported account {account_id}")
+            return "VOD refresh only available for XtreamCodes and Stalker accounts"
 
         logger.info(f"Starting batch VOD refresh for account {account.name}")
         start_time = timezone.now()
@@ -35,42 +39,56 @@ def refresh_vod_content(account_id):
         # Send start notification
         send_m3u_update(account_id, "vod_refresh", 0, status="processing")
 
-        with XtreamCodesClient(
-            account.server_url,
-            account.username,
-            account.password,
-            account.get_user_agent().user_agent
-        ) as client:
+        if account.account_type == M3UAccount.Types.XC:
+            with XtreamCodesClient(
+                account.server_url,
+                account.username,
+                account.password,
+                account.get_user_agent().user_agent
+            ) as client:
 
-            movie_categories, series_categories = refresh_categories(account.id, client)
+                movie_categories, series_categories = refresh_categories(account.id, client)
 
-            logger.debug("Fetching relations for filtering category filtering")
-            relations = { rel.category_id: rel for rel in M3UVODCategoryRelation.objects
-                .filter(m3u_account=account)
-                .select_related("category", "m3u_account")
-            }
+                logger.debug("Fetching relations for filtering category filtering")
+                relations = { rel.category_id: rel for rel in M3UVODCategoryRelation.objects
+                    .filter(m3u_account=account)
+                    .select_related("category", "m3u_account")
+                }
 
-            # Refresh movies with batch processing (pass scan start time)
-            refresh_movies(client, account, movie_categories, relations, scan_start_time=start_time)
+                # Refresh movies with batch processing (pass scan start time)
+                refresh_movies(client, account, movie_categories, relations, scan_start_time=start_time)
 
-            # Refresh series with batch processing (pass scan start time)
-            refresh_series(client, account, series_categories, relations, scan_start_time=start_time)
+                # Refresh series with batch processing (pass scan start time)
+                refresh_series(client, account, series_categories, relations, scan_start_time=start_time)
+        else:
+            movie_categories, series_categories = refresh_categories(account.id)
 
         end_time = timezone.now()
         duration = (end_time - start_time).total_seconds()
 
         logger.info(f"Batch VOD refresh completed for account {account.name} in {duration:.2f} seconds")
 
-        # Cleanup orphaned VOD content after refresh (scoped to this account only)
-        logger.info(f"Starting cleanup of orphaned VOD content for account {account.name}")
-        cleanup_result = cleanup_orphaned_vod_content(account_id=account_id, scan_start_time=start_time)
-        logger.info(f"VOD cleanup completed: {cleanup_result}")
+        if account.account_type == M3UAccount.Types.XC:
+            # Cleanup orphaned VOD content after refresh (scoped to this account only)
+            logger.info(f"Starting cleanup of orphaned VOD content for account {account.name}")
+            cleanup_result = cleanup_orphaned_vod_content(account_id=account_id, scan_start_time=start_time)
+            logger.info(f"VOD cleanup completed: {cleanup_result}")
 
         # Send completion notification
-        send_m3u_update(account_id, "vod_refresh", 100, status="success",
-                       message=f"VOD refresh completed in {duration:.2f} seconds")
+        if account.account_type == M3UAccount.Types.STALKER:
+            movie_count = len(movie_categories)
+            series_count = len(series_categories)
+            completion_message = (
+                f"Stalker VOD category refresh completed in {duration:.2f} seconds "
+                f"({movie_count} movie categories, {series_count} series categories)"
+            )
+        else:
+            completion_message = f"VOD refresh completed in {duration:.2f} seconds"
 
-        return f"Batch VOD refresh completed for account {account.name} in {duration:.2f} seconds"
+        send_m3u_update(account_id, "vod_refresh", 100, status="success",
+                       message=completion_message)
+
+        return completion_message
 
     except Exception as e:
         import traceback
@@ -87,38 +105,66 @@ def refresh_categories(account_id, client=None):
     account = M3UAccount.objects.get(id=account_id, is_active=True)
 
     if not client:
-        client = XtreamCodesClient(
-            account.server_url,
-            account.username,
-            account.password,
-            account.get_user_agent().user_agent
-        )
+        if account.account_type == M3UAccount.Types.XC:
+            client = XtreamCodesClient(
+                account.server_url,
+                account.username,
+                account.password,
+                account.get_user_agent().user_agent
+            )
+        elif account.account_type == M3UAccount.Types.STALKER:
+            client = StalkerClient(
+                server_url=account.server_url,
+                mac=(account.custom_properties or {}).get("mac", ""),
+                username=account.username or "",
+                password=account.password or "",
+                user_agent=getattr(account.user_agent, "user_agent", None),
+                custom_properties=account.custom_properties or {},
+            )
+        else:
+            raise ValueError(
+                f"Unsupported VOD category refresh account type: {account.account_type}"
+            )
     logger.info(f"Refreshing movie categories for account {account.name}")
 
     # First, get the category list to properly map category IDs and names
     logger.info("Fetching movie categories from provider...")
-    categories_data = client.get_vod_categories()
+    if account.account_type == M3UAccount.Types.STALKER:
+        discovery = client.discover_vod_categories()
+        categories_data = discovery.movie_categories
+
+        updated_props = dict(account.custom_properties or {})
+        updated_props["token"] = discovery.token
+        if updated_props != (account.custom_properties or {}):
+            account.custom_properties = updated_props
+            account.save(update_fields=["custom_properties"])
+    else:
+        categories_data = client.get_vod_categories()
+
     category_map = batch_create_categories(categories_data, 'movie', account)
 
     # Create a mapping from provider category IDs to our category objects
     movies_category_id_map = {}
     for cat_data in categories_data:
-        cat_name = cat_data.get('category_name', 'Unknown')
-        provider_cat_id = cat_data.get('category_id')
+        cat_name = extract_category_name(cat_data, account.account_type)
+        provider_cat_id = extract_provider_category_id(cat_data, account.account_type)
         our_category = category_map.get(cat_name)
         if provider_cat_id and our_category:
             movies_category_id_map[str(provider_cat_id)] = our_category
 
     # Get the category list to properly map category IDs and names
     logger.info("Fetching series categories from provider...")
-    categories_data = client.get_series_categories()
+    if account.account_type == M3UAccount.Types.STALKER:
+        categories_data = discovery.series_categories
+    else:
+        categories_data = client.get_series_categories()
     category_map = batch_create_categories(categories_data, 'series', account)
 
     # Create a mapping from provider category IDs to our category objects
     series_category_id_map = {}
     for cat_data in categories_data:
-        cat_name = cat_data.get('category_name', 'Unknown')
-        provider_cat_id = cat_data.get('category_id')
+        cat_name = extract_category_name(cat_data, account.account_type)
+        provider_cat_id = extract_provider_category_id(cat_data, account.account_type)
         our_category = category_map.get(cat_name)
         if provider_cat_id and our_category:
             series_category_id_map[str(provider_cat_id)] = our_category
@@ -235,9 +281,12 @@ def refresh_series(client, account, categories_by_provider, relations, scan_star
 
 def batch_create_categories(categories_data, category_type, account):
     """Create categories in batch and return a mapping"""
-    category_names = [cat.get('category_name', 'Unknown') for cat in categories_data]
-
-    relations_to_create = []
+    normalized_categories = normalize_category_batch(
+        categories_data,
+        category_type,
+        account.account_type,
+    )
+    category_names = list(normalized_categories.keys())
 
     # Get existing categories
     logger.debug(f"Starting VOD {category_type} category refresh")
@@ -257,6 +306,14 @@ def batch_create_categories(categories_data, category_type, account):
     else:  # series
         auto_enable_new = account_custom_props.get("auto_enable_new_groups_series", True)
 
+    existing_relations = {
+        rel.category.name: rel
+        for rel in M3UVODCategoryRelation.objects.filter(
+            m3u_account=account,
+            category__category_type=category_type,
+        ).select_related("category")
+    }
+
     # Create missing categories in batch
     new_categories = []
 
@@ -264,44 +321,48 @@ def batch_create_categories(categories_data, category_type, account):
         if name not in existing_categories:
             # Always create new categories
             new_categories.append(VODCategory(name=name, category_type=category_type))
-        else:
-            # Existing category - create relationship with enabled based on auto_enable setting
-            # (category exists globally but is new to this account)
-            relations_to_create.append(M3UVODCategoryRelation(
-                category=existing_categories[name],
-                m3u_account=account,
-                custom_properties={},
-                enabled=auto_enable_new,
-            ))
 
     logger.debug(f"{len(new_categories)} new categories found")
-    logger.debug(f"{len(relations_to_create)} existing categories found for account")
 
     if new_categories:
         logger.debug("Creating new categories...")
         created_categories = list(VODCategory.bulk_create_and_fetch(new_categories, ignore_conflicts=True))
 
-        # Create relations for newly created categories with enabled based on auto_enable setting
-        for cat in created_categories:
-            if not auto_enable_new:
-                logger.info(f"New {category_type} category '{cat.name}' created but DISABLED - auto_enable_new_groups is disabled for account {account.id}")
-
-            relations_to_create.append(
-                M3UVODCategoryRelation(
-                    category=cat,
-                    m3u_account=account,
-                    custom_properties={},
-                    enabled=auto_enable_new,
-                )
-            )
-
         # Convert to dictionary for easy lookup
         newly_created = {cat.name: cat for cat in created_categories}
         existing_categories.update(newly_created)
 
-    # Create missing relations
+    relations_to_upsert = []
+    for name, metadata in normalized_categories.items():
+        category = existing_categories[name]
+        existing_relation = existing_relations.get(name)
+        relation_custom_properties = dict(existing_relation.custom_properties or {}) if existing_relation else {}
+        relation_custom_properties.update(metadata["relation_custom_properties"])
+
+        if not existing_relation and not auto_enable_new:
+            logger.info(
+                f"New {category_type} category '{category.name}' created but DISABLED - "
+                f"auto_enable_new_groups is disabled for account {account.id}"
+            )
+
+        relations_to_upsert.append(
+            M3UVODCategoryRelation(
+                category=category,
+                m3u_account=account,
+                custom_properties=relation_custom_properties,
+                enabled=existing_relation.enabled if existing_relation else auto_enable_new,
+            )
+        )
+
+    # Create missing relations and refresh provider metadata on existing ones
     logger.debug("Updating category account relations...")
-    M3UVODCategoryRelation.objects.bulk_create(relations_to_create, ignore_conflicts=True)
+    if relations_to_upsert:
+        M3UVODCategoryRelation.objects.bulk_create(
+            relations_to_upsert,
+            update_conflicts=True,
+            unique_fields=["m3u_account", "category"],
+            update_fields=["custom_properties"],
+        )
 
     # Delete orphaned category relationships (categories no longer in the M3U source)
     # Exclude "Uncategorized" from cleanup as it's a special category we manage
@@ -358,6 +419,55 @@ def batch_create_categories(categories_data, category_type, account):
 
 
     return existing_categories
+
+
+def extract_category_name(category_data, account_type):
+    if account_type == M3UAccount.Types.STALKER:
+        return (
+            category_data.get("title")
+            or category_data.get("name")
+            or category_data.get("alias")
+            or "Unknown"
+        )
+
+    return (
+        category_data.get("category_name")
+        or category_data.get("name")
+        or category_data.get("title")
+        or "Unknown"
+    )
+
+
+def extract_provider_category_id(category_data, account_type):
+    if account_type == M3UAccount.Types.STALKER:
+        provider_id = category_data.get("id") or category_data.get("category_id")
+    else:
+        provider_id = category_data.get("category_id") or category_data.get("id")
+
+    if provider_id in (None, ""):
+        return None
+
+    return str(provider_id)
+
+
+def normalize_category_batch(categories_data, category_type, account_type):
+    normalized = {}
+
+    for category_data in categories_data:
+        name = str(extract_category_name(category_data, account_type)).strip() or "Unknown"
+        relation_custom_properties = {}
+
+        if account_type == M3UAccount.Types.STALKER:
+            provider_id = extract_provider_category_id(category_data, account_type)
+            relation_custom_properties["stalker_category_type"] = category_type
+            if provider_id:
+                relation_custom_properties["stalker_category_id"] = provider_id
+
+        normalized[name] = {
+            "relation_custom_properties": relation_custom_properties,
+        }
+
+    return normalized
 
 
 

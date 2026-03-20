@@ -168,7 +168,10 @@ class M3UAccountViewSet(viewsets.ModelViewSet):
         if not old_vod_enabled and new_vod_enabled:
             ensure_default_vod_category_relations(instance)
 
-            if instance.account_type == M3UAccount.Types.XC:
+            if instance.account_type in (
+                M3UAccount.Types.XC,
+                M3UAccount.Types.STALKER,
+            ):
                 from apps.vod.tasks import refresh_vod_content
 
                 refresh_vod_content.delay(instance.id)
@@ -252,12 +255,20 @@ class M3UAccountViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=["post"], url_path="refresh-vod")
     def refresh_vod(self, request, pk=None):
-        """Trigger VOD content refresh for XtreamCodes accounts"""
+        """Trigger VOD content refresh for VOD-capable provider accounts"""
         account = self.get_object()
 
-        if account.account_type != M3UAccount.Types.XC:
+        if account.account_type not in (
+            M3UAccount.Types.XC,
+            M3UAccount.Types.STALKER,
+        ):
             return Response(
-                {"error": "VOD refresh is only available for XtreamCodes accounts"},
+                {
+                    "error": (
+                        "VOD refresh is only available for XtreamCodes and "
+                        "Stalker accounts"
+                    )
+                },
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
@@ -359,6 +370,18 @@ class M3UAccountViewSet(viewsets.ModelViewSet):
                         channel_group_id__in=group_ids,
                     )
                 }
+                category_ids = [
+                    setting["id"]
+                    for setting in category_settings
+                    if setting.get("id")
+                ]
+                existing_category_relations = {
+                    relation.category_id: relation
+                    for relation in M3UVODCategoryRelation.objects.filter(
+                        m3u_account=account,
+                        category_id__in=category_ids,
+                    )
+                }
 
                 def merge_group_custom_properties(setting):
                     incoming = setting.get("custom_properties")
@@ -406,12 +429,26 @@ class M3UAccountViewSet(viewsets.ModelViewSet):
                         ],
                     )
 
+                def merge_category_custom_properties(setting):
+                    incoming = setting.get("custom_properties")
+                    if incoming is None:
+                        incoming = {}
+
+                    existing_relation = existing_category_relations.get(setting["id"])
+                    if existing_relation is None:
+                        return incoming
+
+                    existing = existing_relation.custom_properties or {}
+                    merged = dict(existing)
+                    merged.update(incoming)
+                    return merged
+
                 category_objects = [
                     M3UVODCategoryRelation(
                         category_id=setting["id"],
                         m3u_account=account,
                         enabled=setting.get("enabled", True),
-                        custom_properties=setting.get("custom_properties", {}),
+                        custom_properties=merge_category_custom_properties(setting),
                     )
                     for setting in category_settings
                     if setting.get("id")

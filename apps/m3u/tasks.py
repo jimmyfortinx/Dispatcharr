@@ -3515,8 +3515,11 @@ def _refresh_single_m3u_account_impl(account_id):
             message=account.last_message,
         )
 
-        # Trigger VOD refresh if enabled and account is XtreamCodes type
-        if vod_enabled and account.account_type == M3UAccount.Types.XC:
+        # Trigger provider-aware VOD refresh after live refresh completes.
+        if vod_enabled and account.account_type in (
+            M3UAccount.Types.XC,
+            M3UAccount.Types.STALKER,
+        ):
             logger.info(f"VOD is enabled for account {account_id}, triggering VOD refresh")
             try:
                 from apps.vod.tasks import refresh_vod_content
