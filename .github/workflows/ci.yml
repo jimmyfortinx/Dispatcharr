@@ -20,11 +20,6 @@ on:
         required: false
         default: true
         type: boolean
-      rebuild_base:
-        description: "Force a base image rebuild"
-        required: false
-        default: false
-        type: boolean
 
 permissions:
   contents: read
@@ -43,9 +38,8 @@ jobs:
       repo_owner: ${{ steps.meta.outputs.repo_owner }}
       repo_name: ${{ steps.meta.outputs.repo_name }}
       branch_tag: ${{ steps.meta.outputs.branch_tag }}
-      base_tag: ${{ steps.meta.outputs.base_tag }}
       should_publish: ${{ steps.meta.outputs.should_publish }}
-      should_build_base: ${{ steps.meta.outputs.should_build_base }}
+      base_image: ${{ steps.meta.outputs.base_image }}
       version: ${{ steps.version.outputs.version }}
       timestamp: ${{ steps.timestamp.outputs.timestamp }}
       sha_short: ${{ steps.sha.outputs.sha_short }}
@@ -62,14 +56,11 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           INPUT_REF: ${{ inputs.ref }}
           INPUT_PUBLISH: ${{ inputs.publish }}
-          INPUT_REBUILD_BASE: ${{ inputs.rebuild_base }}
           GITHUB_REF_VALUE: ${{ github.ref }}
           GITHUB_REF_NAME_VALUE: ${{ github.ref_name }}
           GITHUB_HEAD_REF_VALUE: ${{ github.head_ref }}
           GITHUB_REPOSITORY_OWNER_VALUE: ${{ github.repository_owner }}
           GITHUB_REPOSITORY_VALUE: ${{ github.repository }}
-          BEFORE_SHA: ${{ github.event.before }}
-          CURRENT_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
 
@@ -92,10 +83,8 @@ jobs:
 
           if [ "$REF_NAME" = "dev" ]; then
             BRANCH_TAG="dev"
-            BASE_TAG="base-dev"
           else
             BRANCH_TAG="$SAFE_REF"
-            BASE_TAG="base-$SAFE_REF"
           fi
 
           SHOULD_PUBLISH="false"
@@ -103,26 +92,17 @@ jobs:
             SHOULD_PUBLISH="true"
           fi
 
-          SHOULD_BUILD_BASE="false"
-          if [ "$SHOULD_PUBLISH" = "true" ] && [ "${INPUT_REBUILD_BASE:-false}" = "true" ]; then
-            SHOULD_BUILD_BASE="true"
-          elif [ "$SHOULD_PUBLISH" = "true" ] && [ "$EVENT_NAME" = "push" ] && [ -n "${BEFORE_SHA:-}" ] && [ "${BEFORE_SHA}" != "0000000000000000000000000000000000000000" ]; then
-            if git diff --name-only "$BEFORE_SHA" "$CURRENT_SHA" | rg -q '^(docker/DispatcharrBase|pyproject.toml|uv.lock|docker/Dockerfile|\.github/workflows/ci\.yml)$'; then
-              SHOULD_BUILD_BASE="true"
-            fi
-          fi
-
           REPO_OWNER=$(echo "$GITHUB_REPOSITORY_OWNER_VALUE" | tr '[:upper:]' '[:lower:]')
           REPO_NAME=$(echo "$GITHUB_REPOSITORY_VALUE" | cut -d '/' -f 2 | tr '[:upper:]' '[:lower:]')
+          BASE_IMAGE="ghcr.io/dispatcharr/dispatcharr:base"
 
           echo "checkout_ref=${CHECKOUT_REF}" >> "$GITHUB_OUTPUT"
           echo "ref_name=${REF_NAME}" >> "$GITHUB_OUTPUT"
           echo "repo_owner=${REPO_OWNER}" >> "$GITHUB_OUTPUT"
           echo "repo_name=${REPO_NAME}" >> "$GITHUB_OUTPUT"
           echo "branch_tag=${BRANCH_TAG}" >> "$GITHUB_OUTPUT"
-          echo "base_tag=${BASE_TAG}" >> "$GITHUB_OUTPUT"
           echo "should_publish=${SHOULD_PUBLISH}" >> "$GITHUB_OUTPUT"
-          echo "should_build_base=${SHOULD_BUILD_BASE}" >> "$GITHUB_OUTPUT"
+          echo "base_image=${BASE_IMAGE}" >> "$GITHUB_OUTPUT"
 
       - name: Generate timestamp
         id: timestamp
@@ -225,73 +205,8 @@ jobs:
       - name: Run frontend tests
         run: npm test
 
-  publish-base:
-    needs: [prepare, backend-tests, frontend-tests]
-    if: needs.prepare.outputs.should_publish == 'true'
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          ref: ${{ needs.prepare.outputs.checkout_ref }}
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Log in to GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Check whether base image rebuild is required
-        id: base_state
-        env:
-          SHOULD_BUILD_BASE: ${{ needs.prepare.outputs.should_build_base }}
-          BASE_IMAGE: ghcr.io/${{ needs.prepare.outputs.repo_owner }}/${{ needs.prepare.outputs.repo_name }}:${{ needs.prepare.outputs.base_tag }}
-        run: |
-          set -euo pipefail
-
-          REBUILD="false"
-          if [ "$SHOULD_BUILD_BASE" = "true" ]; then
-            REBUILD="true"
-          elif ! docker buildx imagetools inspect "$BASE_IMAGE" >/dev/null 2>&1; then
-            REBUILD="true"
-          fi
-
-          echo "rebuild=${REBUILD}" >> "$GITHUB_OUTPUT"
-
-      - name: Set up QEMU
-        if: steps.base_state.outputs.rebuild == 'true'
-        uses: docker/setup-qemu-action@v3
-
-      - name: Build and publish base image
-        if: steps.base_state.outputs.rebuild == 'true'
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: ./docker/DispatcharrBase
-          platforms: linux/amd64,linux/arm64
-          push: true
-          cache-from: type=gha,scope=dispatcharr-base
-          cache-to: type=gha,mode=max,scope=dispatcharr-base
-          tags: |
-            ghcr.io/${{ needs.prepare.outputs.repo_owner }}/${{ needs.prepare.outputs.repo_name }}:${{ needs.prepare.outputs.base_tag }}
-            ghcr.io/${{ needs.prepare.outputs.repo_owner }}/${{ needs.prepare.outputs.repo_name }}:${{ needs.prepare.outputs.base_tag }}-${{ needs.prepare.outputs.timestamp }}
-          labels: |
-            org.opencontainers.image.title=${{ needs.prepare.outputs.repo_name }}
-            org.opencontainers.image.description=Dispatcharr base image for fork development builds.
-            org.opencontainers.image.source=https://github.com/${{ github.repository }}
-            org.opencontainers.image.revision=${{ needs.prepare.outputs.commit_sha }}
-            org.opencontainers.image.version=${{ needs.prepare.outputs.base_tag }}-${{ needs.prepare.outputs.timestamp }}
-
-      - name: Skip base image rebuild
-        if: steps.base_state.outputs.rebuild != 'true'
-        run: echo "Base image rebuild not required for this run."
-
   publish-app:
-    needs: [prepare, backend-tests, frontend-tests, publish-base]
+    needs: [prepare, backend-tests, frontend-tests]
     if: needs.prepare.outputs.should_publish == 'true'
     runs-on: ubuntu-24.04
     steps:
@@ -323,9 +238,7 @@ jobs:
           cache-from: type=gha,scope=dispatcharr-app
           cache-to: type=gha,mode=max,scope=dispatcharr-app
           build-args: |
-            REPO_OWNER=${{ needs.prepare.outputs.repo_owner }}
-            REPO_NAME=${{ needs.prepare.outputs.repo_name }}
-            BASE_TAG=${{ needs.prepare.outputs.base_tag }}
+            BASE_IMAGE=${{ needs.prepare.outputs.base_image }}
             BRANCH=${{ needs.prepare.outputs.ref_name }}
             REPO_URL=https://github.com/${{ github.repository }}
             TIMESTAMP=${{ needs.prepare.outputs.timestamp }}
