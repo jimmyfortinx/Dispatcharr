@@ -1,8 +1,8 @@
 services:
   dispatcharr:
-    # build:
-    #   context: ..
-    #   dockerfile: docker/Dockerfile.dev
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
     image: ghcr.io/dispatcharr/dispatcharr:base
     container_name: dispatcharr_dev
     restart: unless-stopped

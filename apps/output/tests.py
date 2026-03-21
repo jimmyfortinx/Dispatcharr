@@ -1,7 +1,22 @@
-from django.test import TestCase, Client
+from django.test import TestCase, Client, RequestFactory
 from django.urls import reverse
 from apps.channels.models import Channel, ChannelGroup
 from apps.epg.models import EPGData, EPGSource
+from apps.m3u.models import M3UAccount
+from apps.vod.models import (
+    Movie,
+    Series,
+    VODCategory,
+    M3UMovieRelation,
+    M3USeriesRelation,
+    M3UVODCategoryRelation,
+)
+from apps.output.views import (
+    xc_get_vod_categories,
+    xc_get_vod_streams,
+    xc_get_series_categories,
+    xc_get_series,
+)
 import xml.etree.ElementTree as ET
 
 class OutputM3UTest(TestCase):
@@ -143,3 +158,127 @@ class OutputEPGXMLEscapingTest(TestCase):
             self.assertGreater(len(programmes), 0)
         except ET.ParseError as e:
             self.fail(f"Generated EPG with programme elements is not valid XML: {e}")
+
+
+class OutputXtreamVodVisibilityTest(TestCase):
+    def setUp(self):
+        self.factory = RequestFactory()
+        self.account = M3UAccount.objects.create(
+            name="vod-account",
+            account_type=M3UAccount.Types.XC,
+            is_active=True,
+        )
+
+        self.enabled_movie_category = VODCategory.objects.create(
+            name="Enabled Movies",
+            category_type="movie",
+        )
+        self.disabled_movie_category = VODCategory.objects.create(
+            name="Disabled Movies",
+            category_type="movie",
+        )
+        self.enabled_series_category = VODCategory.objects.create(
+            name="Enabled Series",
+            category_type="series",
+        )
+        self.disabled_series_category = VODCategory.objects.create(
+            name="Disabled Series",
+            category_type="series",
+        )
+
+        M3UVODCategoryRelation.objects.create(
+            m3u_account=self.account,
+            category=self.enabled_movie_category,
+            enabled=True,
+        )
+        M3UVODCategoryRelation.objects.create(
+            m3u_account=self.account,
+            category=self.disabled_movie_category,
+            enabled=False,
+        )
+        M3UVODCategoryRelation.objects.create(
+            m3u_account=self.account,
+            category=self.enabled_series_category,
+            enabled=True,
+        )
+        M3UVODCategoryRelation.objects.create(
+            m3u_account=self.account,
+            category=self.disabled_series_category,
+            enabled=False,
+        )
+
+        self.enabled_movie = Movie.objects.create(name="Enabled Movie")
+        self.disabled_movie = Movie.objects.create(name="Disabled Movie")
+        M3UMovieRelation.objects.create(
+            m3u_account=self.account,
+            movie=self.enabled_movie,
+            category=self.enabled_movie_category,
+            stream_id="enabled-movie",
+        )
+        M3UMovieRelation.objects.create(
+            m3u_account=self.account,
+            movie=self.disabled_movie,
+            category=self.disabled_movie_category,
+            stream_id="disabled-movie",
+        )
+
+        self.enabled_series = Series.objects.create(name="Enabled Series Title")
+        self.disabled_series = Series.objects.create(name="Disabled Series Title")
+        M3USeriesRelation.objects.create(
+            m3u_account=self.account,
+            series=self.enabled_series,
+            category=self.enabled_series_category,
+            external_series_id="enabled-series",
+        )
+        M3USeriesRelation.objects.create(
+            m3u_account=self.account,
+            series=self.disabled_series,
+            category=self.disabled_series_category,
+            external_series_id="disabled-series",
+        )
+
+    def test_xc_get_vod_categories_only_returns_enabled_categories(self):
+        response = xc_get_vod_categories(user=None)
+        category_names = {row["category_name"] for row in response}
+
+        self.assertIn("Enabled Movies", category_names)
+        self.assertNotIn("Disabled Movies", category_names)
+
+    def test_xc_get_vod_streams_excludes_disabled_category_content(self):
+        request = self.factory.get("/player_api.php")
+
+        response = xc_get_vod_streams(request, user=None)
+        movie_names = {row["name"] for row in response}
+
+        self.assertIn("Enabled Movie", movie_names)
+        self.assertNotIn("Disabled Movie", movie_names)
+
+        filtered_response = xc_get_vod_streams(
+            request,
+            user=None,
+            category_id=self.disabled_movie_category.id,
+        )
+        self.assertEqual(filtered_response, [])
+
+    def test_xc_get_series_categories_only_returns_enabled_categories(self):
+        response = xc_get_series_categories(user=None)
+        category_names = {row["category_name"] for row in response}
+
+        self.assertIn("Enabled Series", category_names)
+        self.assertNotIn("Disabled Series", category_names)
+
+    def test_xc_get_series_excludes_disabled_category_content(self):
+        request = self.factory.get("/player_api.php")
+
+        response = xc_get_series(request, user=None)
+        series_names = {row["name"] for row in response}
+
+        self.assertIn("Enabled Series Title", series_names)
+        self.assertNotIn("Disabled Series Title", series_names)
+
+        filtered_response = xc_get_series(
+            request,
+            user=None,
+            category_id=self.disabled_series_category.id,
+        )
+        self.assertEqual(filtered_response, [])
