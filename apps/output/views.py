@@ -18,6 +18,7 @@ from tzlocal import get_localzone
 from urllib.parse import urlparse
 import base64
 import logging
+from django.db.models import Exists, OuterRef
 from django.db.models.functions import Lower
 import os
 from apps.m3u.utils import calculate_tuner_count
@@ -2412,14 +2413,27 @@ def xc_get_epg(request, user, short=False):
 
 def xc_get_vod_categories(user):
     """Get VOD categories for XtreamCodes API"""
-    from apps.vod.models import VODCategory, M3UMovieRelation
+    from apps.vod.models import VODCategory, M3UMovieRelation, M3UVODCategoryRelation
+
+    enabled_category_relations = M3UMovieRelation.objects.filter(
+        m3u_account__is_active=True,
+        category__isnull=False,
+    ).annotate(
+        category_enabled=Exists(
+            M3UVODCategoryRelation.objects.filter(
+                m3u_account_id=OuterRef("m3u_account_id"),
+                category_id=OuterRef("category_id"),
+                enabled=True,
+            )
+        )
+    ).filter(category_enabled=True)
 
     response = []
 
     # All authenticated users get access to VOD from all active M3U accounts
     categories = VODCategory.objects.filter(
         category_type='movie',
-        m3umovierelation__m3u_account__is_active=True
+        id__in=enabled_category_relations.values("category_id"),
     ).distinct().order_by(Lower("name"))
 
     for category in categories:
@@ -2434,37 +2448,39 @@ def xc_get_vod_categories(user):
 
 def xc_get_vod_streams(request, user, category_id=None):
     """Get VOD streams (movies) for XtreamCodes API"""
-    from apps.vod.models import Movie, M3UMovieRelation
-    from django.db.models import Prefetch
+    from apps.vod.models import M3UMovieRelation, M3UVODCategoryRelation
 
     streams = []
 
-    # All authenticated users get access to VOD from all active M3U accounts
-    filters = {"m3u_relations__m3u_account__is_active": True}
+    enabled_category_relations = M3UVODCategoryRelation.objects.filter(
+        m3u_account_id=OuterRef("m3u_account_id"),
+        category_id=OuterRef("category_id"),
+        enabled=True,
+    )
+
+    relations = M3UMovieRelation.objects.filter(
+        m3u_account__is_active=True,
+        category__isnull=False,
+    ).annotate(
+        category_enabled=Exists(enabled_category_relations)
+    ).filter(
+        category_enabled=True
+    )
 
     if category_id:
-        filters["m3u_relations__category_id"] = category_id
+        relations = relations.filter(category_id=category_id)
 
-    # Optimize with prefetch_related to eliminate N+1 queries
-    # This loads all relations in a single query instead of one per movie
-    movies = Movie.objects.filter(**filters).select_related('logo').prefetch_related(
-        Prefetch(
-            'm3u_relations',
-            queryset=M3UMovieRelation.objects.filter(
-                m3u_account__is_active=True
-            ).select_related('m3u_account', 'category').order_by('-m3u_account__priority', 'id'),
-            to_attr='active_relations'
-        )
-    ).distinct()
+    relations = relations.select_related(
+        'movie', 'movie__logo', 'm3u_account', 'category'
+    ).order_by('movie_id', '-m3u_account__priority', 'id')
 
-    for movie in movies:
-        # Get the first (highest priority) relation from prefetched data
-        # This avoids the N+1 query problem entirely
-        if hasattr(movie, 'active_relations') and movie.active_relations:
-            relation = movie.active_relations[0]
-        else:
-            # Fallback - should rarely be needed with proper prefetching
+    seen_movies = set()
+
+    for relation in relations:
+        movie = relation.movie
+        if movie.id in seen_movies:
             continue
+        seen_movies.add(movie.id)
 
         streams.append({
             "num": movie.id,
@@ -2498,14 +2514,27 @@ def xc_get_vod_streams(request, user, category_id=None):
 
 def xc_get_series_categories(user):
     """Get series categories for XtreamCodes API"""
-    from apps.vod.models import VODCategory, M3USeriesRelation
+    from apps.vod.models import VODCategory, M3USeriesRelation, M3UVODCategoryRelation
+
+    enabled_category_relations = M3USeriesRelation.objects.filter(
+        m3u_account__is_active=True,
+        category__isnull=False,
+    ).annotate(
+        category_enabled=Exists(
+            M3UVODCategoryRelation.objects.filter(
+                m3u_account_id=OuterRef("m3u_account_id"),
+                category_id=OuterRef("category_id"),
+                enabled=True,
+            )
+        )
+    ).filter(category_enabled=True)
 
     response = []
 
     # All authenticated users get access to series from all active M3U accounts
     categories = VODCategory.objects.filter(
         category_type='series',
-        m3useriesrelation__m3u_account__is_active=True
+        id__in=enabled_category_relations.values("category_id"),
     ).distinct().order_by(Lower("name"))
 
     for category in categories:
@@ -2520,18 +2549,27 @@ def xc_get_series_categories(user):
 
 def xc_get_series(request, user, category_id=None):
     """Get series list for XtreamCodes API"""
-    from apps.vod.models import M3USeriesRelation
+    from apps.vod.models import M3USeriesRelation, M3UVODCategoryRelation
 
     series_list = []
 
-    # All authenticated users get access to series from all active M3U accounts
-    filters = {"m3u_account__is_active": True}
+    series_relations = M3USeriesRelation.objects.filter(
+        m3u_account__is_active=True,
+        category__isnull=False,
+    ).annotate(
+        category_enabled=Exists(
+            M3UVODCategoryRelation.objects.filter(
+                m3u_account_id=OuterRef("m3u_account_id"),
+                category_id=OuterRef("category_id"),
+                enabled=True,
+            )
+        )
+    ).filter(category_enabled=True)
 
     if category_id:
-        filters["category_id"] = category_id
+        series_relations = series_relations.filter(category_id=category_id)
 
-    # Get series relations instead of series directly
-    series_relations = M3USeriesRelation.objects.filter(**filters).select_related(
+    series_relations = series_relations.select_related(
         'series', 'series__logo', 'category', 'm3u_account'
     )
 
