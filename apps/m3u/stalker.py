@@ -775,11 +775,38 @@ class StalkerClient:
         self.prepare_authenticated_session(portal_url)
         self.watchdog_update(portal_url)
 
+    def _should_refresh_channel_cmd(self, exc):
+        message = str(exc).lower()
+        refresh_markers = (
+            "empty playback link",
+            "invalid playback link",
+            "create_link response",
+        )
+        return any(marker in message for marker in refresh_markers)
+
     def _resolve_playback_url_once(self, portal_url, channel_metadata):
         self.prepare_playback_session(portal_url)
+        cached_cmd = str(channel_metadata.get("cmd") or "").strip()
+        cached_cmd_error = None
+
+        if cached_cmd:
+            try:
+                return self.create_link(portal_url, cached_cmd)
+            except StalkerError as exc:
+                cached_cmd_error = exc
+                if not self._should_refresh_channel_cmd(exc):
+                    raise
+                logger.info(
+                    "Refreshing Stalker live cmd after cached create_link failure for %s: %s",
+                    portal_url,
+                    exc,
+                )
+
         fresh_cmd = self.get_fresh_channel_cmd(portal_url, channel_metadata)
         if not fresh_cmd:
             raise StalkerError("Stalker stream is missing a usable live command.")
+        if cached_cmd_error is not None and fresh_cmd == cached_cmd:
+            raise cached_cmd_error
         return self.create_link(portal_url, fresh_cmd)
 
     def _resolve_vod_playback_url_once(self, portal_url, cmd, series=None):

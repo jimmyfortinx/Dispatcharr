@@ -4,7 +4,12 @@ from django.test import TestCase
 
 from apps.channels.models import Stream
 from apps.m3u.models import M3UAccount, M3UAccountProfile
-from apps.m3u.stalker import StalkerClient, StalkerError, DEFAULT_USER_AGENT
+from apps.m3u.stalker import (
+    DEFAULT_USER_AGENT,
+    StalkerClient,
+    StalkerError,
+    StalkerRecoverableError,
+)
 from apps.proxy.ts_proxy.url_utils import generate_stream_url, resolve_live_stream_url
 from core.models import PROXY_PROFILE_NAME, StreamProfile, UserAgent
 
@@ -85,7 +90,10 @@ class StalkerPhase5PreviewTests(TestCase):
             client.token = "NEW-TOKEN"
             return "http://resolved.example.com/live/world-news"
 
-        with patch.object(Stream, "get_stream", return_value=(self.stream.id, self.account_profile.id, None)), patch.object(
+        with patch.object(Stream, "get_stream", return_value=(self.stream.id, self.account_profile.id, None)), patch(
+            "apps.proxy.ts_proxy.url_utils.M3UAccountProfile.objects.get",
+            return_value=self.account_profile,
+        ), patch.object(
             Stream, "get_stream_profile", return_value=self.proxy_profile
         ), patch(
             "apps.proxy.ts_proxy.url_utils.StalkerClient.resolve_playback_url",
@@ -161,13 +169,10 @@ class StalkerPhase5PreviewTests(TestCase):
         mock_watchdog.assert_called_once_with(
             "http://portal.example.com/stalker_portal/portal.php"
         )
-        mock_get_fresh_cmd.assert_called_once_with(
-            "http://portal.example.com/stalker_portal/portal.php",
-            {"stalker_channel_id": "5001", "cmd": "stale"},
-        )
+        mock_get_fresh_cmd.assert_not_called()
         mock_create_link.assert_called_once_with(
             "http://portal.example.com/stalker_portal/portal.php",
-            "ffmpeg http://upstream.example.com/live.php?stream=176913&extension=ts",
+            "stale",
         )
 
     def test_resolve_playback_url_uses_device_id_auth_when_ids_are_configured(self):
@@ -187,10 +192,10 @@ class StalkerPhase5PreviewTests(TestCase):
         ), patch.object(
             client, "get_fresh_channel_cmd",
             return_value="ffmpeg http://upstream.example.com/live.php?stream=176913&extension=ts",
-        ), patch.object(
+        ) as mock_get_fresh_cmd, patch.object(
             client, "create_link",
             return_value="http://resolved.example.com/live.ts",
-        ):
+        ) as mock_create_link:
             client.resolve_playback_url(
                 "http://portal.example.com/stalker_portal/portal.php",
                 {"stalker_channel_id": "5001", "cmd": "stale"},
@@ -199,6 +204,43 @@ class StalkerPhase5PreviewTests(TestCase):
         mock_device_auth.assert_called_once_with(
             "http://portal.example.com/stalker_portal/portal.php"
         )
+        mock_get_fresh_cmd.assert_not_called()
+        mock_create_link.assert_called_once_with(
+            "http://portal.example.com/stalker_portal/portal.php",
+            "stale",
+        )
+
+    def test_resolve_playback_url_refreshes_channel_cmd_after_cached_link_failure(self):
+        client = StalkerClient(
+            server_url="http://portal.example.com/stalker_portal/portal.php",
+            mac="00:1A:79:00:00:40",
+        )
+
+        with patch.object(client, "handshake"), patch.object(
+            client, "watchdog_update", return_value={}
+        ), patch.object(
+            client,
+            "get_fresh_channel_cmd",
+            return_value="ffmpeg http://fresh.example.com/live.php?stream=176913&extension=ts",
+        ) as mock_get_fresh_cmd, patch.object(
+            client,
+            "create_link",
+            side_effect=[
+                StalkerRecoverableError("Portal returned an empty playback link."),
+                "http://resolved.example.com/live.ts",
+            ],
+        ) as mock_create_link:
+            resolved = client.resolve_playback_url(
+                "http://portal.example.com/stalker_portal/portal.php",
+                {"stalker_channel_id": "5001", "cmd": "stale"},
+            )
+
+        self.assertEqual(resolved, "http://resolved.example.com/live.ts")
+        mock_get_fresh_cmd.assert_called_once_with(
+            "http://portal.example.com/stalker_portal/portal.php",
+            {"stalker_channel_id": "5001", "cmd": "stale"},
+        )
+        self.assertEqual(mock_create_link.call_count, 2)
 
     def test_create_link_logs_unusable_resolved_url_payload(self):
         client = StalkerClient(
