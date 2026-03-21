@@ -64,7 +64,7 @@ class StalkerPhase6ResolverHardeningTests(TestCase):
             client,
             "create_link",
             side_effect=[
-                StalkerRecoverableError("Portal returned an empty playback link."),
+                StalkerRecoverableError("Portal session expired."),
                 "http://resolved.example.com/live/world-news",
             ],
         ) as mock_create_link:
@@ -79,7 +79,7 @@ class StalkerPhase6ResolverHardeningTests(TestCase):
         )
         self.assertEqual(client.token, "NEW-TOKEN")
         self.assertEqual(mock_prepare.call_count, 2)
-        self.assertEqual(mock_get_fresh_cmd.call_count, 2)
+        mock_get_fresh_cmd.assert_not_called()
         self.assertEqual(mock_create_link.call_count, 2)
 
     def test_resolve_live_stream_url_persists_refreshed_token_after_session_recovery(self):
@@ -104,11 +104,6 @@ class StalkerPhase6ResolverHardeningTests(TestCase):
             "prepare_playback_session",
             autospec=True,
             side_effect=fake_prepare,
-        ), patch.object(
-            StalkerClient,
-            "get_fresh_channel_cmd",
-            autospec=True,
-            return_value="ffmpeg http://upstream.example.com/live/world-news",
         ), patch.object(
             StalkerClient,
             "create_link",
@@ -155,5 +150,45 @@ class StalkerPhase6ResolverHardeningTests(TestCase):
                 )
 
         mock_prepare.assert_called_once()
-        mock_get_fresh_cmd.assert_called_once()
+        mock_get_fresh_cmd.assert_not_called()
         mock_create_link.assert_called_once()
+
+    def test_resolve_playback_url_refreshes_cmd_before_retrying_session(self):
+        client = StalkerClient(
+            server_url=self.account.server_url,
+            mac="00:1A:79:00:00:40",
+            username=self.account.username,
+            password=self.account.password,
+            custom_properties={"token": "OLD-TOKEN"},
+        )
+
+        with patch.object(
+            client,
+            "prepare_playback_session",
+        ) as mock_prepare, patch.object(
+            client,
+            "get_fresh_channel_cmd",
+            return_value="ffmpeg http://upstream.example.com/live/world-news-fresh",
+        ) as mock_get_fresh_cmd, patch.object(
+            client,
+            "create_link",
+            side_effect=[
+                StalkerRecoverableError("Portal returned an empty playback link."),
+                "http://resolved.example.com/live/world-news",
+            ],
+        ) as mock_create_link:
+            resolved = client.resolve_playback_url(
+                "http://portal.example.com/stalker_portal/server/load.php",
+                self.stream.custom_properties,
+            )
+
+        self.assertEqual(
+            resolved,
+            "http://resolved.example.com/live/world-news",
+        )
+        mock_prepare.assert_called_once()
+        mock_get_fresh_cmd.assert_called_once_with(
+            "http://portal.example.com/stalker_portal/server/load.php",
+            self.stream.custom_properties,
+        )
+        self.assertEqual(mock_create_link.call_count, 2)

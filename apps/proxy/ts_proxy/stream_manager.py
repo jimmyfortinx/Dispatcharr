@@ -1580,9 +1580,9 @@ class StreamManager:
                         except Exception as e:
                             logger.error(f"Error reading buffer index from Redis: {e}")
 
-                        initial_chunks_needed = ConfigHelper.initial_behind_chunks()
+                        ready_chunks_needed = ConfigHelper.connection_ready_chunks()
 
-                        if current_buffer_index < initial_chunks_needed:
+                        if current_buffer_index < ready_chunks_needed:
                             # Not enough buffer yet - set to connecting state if not already
                             if current_state != ChannelState.CONNECTING:
                                 update_data = {
@@ -1590,7 +1590,7 @@ class StreamManager:
                                     ChannelMetadataField.STATE_CHANGED_AT: current_time
                                 }
                                 redis_client.hset(metadata_key, mapping=update_data)
-                                logger.info(f"Channel {channel_id} connected but waiting for buffer to fill: {current_buffer_index}/{initial_chunks_needed} chunks")
+                                logger.info(f"Channel {channel_id} connected but waiting for first buffer chunks: {current_buffer_index}/{ready_chunks_needed}")
 
                             # Schedule a retry to check buffer status again
                             timer = threading.Timer(0.5, self._check_buffer_and_set_state)
@@ -1609,7 +1609,7 @@ class StreamManager:
 
                         # Get configured grace period or default
                         grace_period = ConfigHelper.channel_init_grace_period()
-                        logger.info(f"STREAM MANAGER: Updated channel {channel_id} state: {current_state or 'None'} -> {ChannelState.WAITING_FOR_CLIENTS} with {current_buffer_index} buffer chunks")
+                        logger.info(f"STREAM MANAGER: Updated channel {channel_id} state: {current_state or 'None'} -> {ChannelState.WAITING_FOR_CLIENTS} with {current_buffer_index} buffered chunks")
                         logger.info(f"Started initial connection grace period ({grace_period}s) for channel {channel_id}")
                     else:
                         logger.debug(f"Not changing state: channel {channel_id} already in {current_state} state")
@@ -1641,15 +1641,15 @@ class StreamManager:
                 except Exception as e:
                     logger.error(f"Error reading buffer index from Redis: {e}")
 
-                initial_chunks_needed = ConfigHelper.initial_behind_chunks()  # Use ConfigHelper for consistency
+                ready_chunks_needed = ConfigHelper.connection_ready_chunks()
 
-                if current_buffer_index >= initial_chunks_needed:
+                if current_buffer_index >= ready_chunks_needed:
                     # We now have enough buffer, call _set_waiting_for_clients again
-                    logger.info(f"Buffer threshold reached for channel {channel_id}: {current_buffer_index}/{initial_chunks_needed} chunks")
+                    logger.info(f"Connection-ready buffer threshold reached for channel {channel_id}: {current_buffer_index}/{ready_chunks_needed} chunks")
                     self._set_waiting_for_clients()
                 else:
                     # Still waiting, log progress and schedule another check
-                    logger.debug(f"Buffer filling for channel {channel_id}: {current_buffer_index}/{initial_chunks_needed} chunks")
+                    logger.debug(f"Buffer filling for channel {channel_id}: {current_buffer_index}/{ready_chunks_needed} chunks")
 
                     # Schedule another check - NOW WITH STOPPING CHECK
                     if self.running and not getattr(self, 'stopping', False):

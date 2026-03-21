@@ -42,6 +42,11 @@ class ConfigHelper:
         return ConfigHelper.get('INITIAL_BEHIND_CHUNKS', 4)
 
     @staticmethod
+    def connection_ready_chunks():
+        """Get minimum buffered chunks required before the first client can start."""
+        return ConfigHelper.get('CONNECTION_READY_CHUNKS', 1)
+
+    @staticmethod
     def new_client_behind_seconds():
         """Get number of seconds behind live to start new clients.
         0 means start at live (buffer head).

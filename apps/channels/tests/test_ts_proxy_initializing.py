@@ -7,7 +7,7 @@ Covers:
 """
 import time
 import threading
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, patch
 
 from django.test import TestCase
 
@@ -229,3 +229,42 @@ class PreActiveStateTests(TestCase):
 
     def test_pre_active_is_frozenset(self):
         self.assertIsInstance(ChannelState.PRE_ACTIVE, frozenset)
+
+
+class ConnectionReadyThresholdTests(TestCase):
+    def test_waiting_for_clients_uses_connection_ready_chunks(self):
+        sm = _make_stream_manager()
+        redis = sm.buffer.redis_client
+        metadata_key = RedisKeys.channel_metadata(CHANNEL_ID)
+        buffer_index_key = RedisKeys.buffer_index(CHANNEL_ID)
+
+        redis.hgetall.return_value = {
+            ChannelMetadataField.STATE.encode("utf-8"): ChannelState.CONNECTING.encode("utf-8")
+        }
+
+        def get_side_effect(key):
+            if key == buffer_index_key:
+                return b"1"
+            return None
+
+        redis.get.side_effect = get_side_effect
+
+        with patch(
+            "apps.proxy.ts_proxy.stream_manager.ConfigHelper.connection_ready_chunks",
+            return_value=1,
+        ), patch(
+            "apps.proxy.ts_proxy.stream_manager.ConfigHelper.initial_behind_chunks",
+            return_value=4,
+        ):
+            result = sm._set_waiting_for_clients()
+
+        self.assertIsNone(result)
+        redis.hset.assert_called_with(
+            metadata_key,
+            mapping={
+                ChannelMetadataField.STATE: ChannelState.WAITING_FOR_CLIENTS,
+                ChannelMetadataField.CONNECTION_READY_TIME: ANY,
+                ChannelMetadataField.STATE_CHANGED_AT: ANY,
+                ChannelMetadataField.BUFFER_CHUNKS: "1",
+            },
+        )

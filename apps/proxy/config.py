@@ -80,6 +80,7 @@ class TSConfig(BaseConfig):
     """Configuration settings for TS proxy"""
 
     # Buffer settings
+    CONNECTION_READY_CHUNKS = 1  # Minimum buffered chunks required before the first client starts
     INITIAL_BEHIND_CHUNKS = 4  # How many chunks behind to start a client (4 chunks = ~1MB)
     CHUNK_BATCH_SIZE = 5       # How many chunks to fetch in one batch
     NEW_CLIENT_BEHIND_SECONDS = 5  # Start new clients this many seconds behind live (0 = start at live)
@@ -153,6 +154,5 @@ class TSConfig(BaseConfig):
     @property
     def CHANNEL_INIT_GRACE_PERIOD(self):
         return self.get_channel_init_grace_period()
-
 
 
