@@ -2609,16 +2609,28 @@ def xc_get_series(request, user, category_id=None):
 
 def xc_get_series_info(request, user, series_id):
     """Get detailed series information including episodes"""
-    from apps.vod.models import M3USeriesRelation, M3UEpisodeRelation
+    from apps.vod.models import M3USeriesRelation, M3UEpisodeRelation, M3UVODCategoryRelation
 
     if not series_id:
         raise Http404()
 
     # All authenticated users get access to series from all active M3U accounts
     filters = {"id": series_id, "m3u_account__is_active": True}
+    enabled_category_relations = M3UVODCategoryRelation.objects.filter(
+        m3u_account_id=OuterRef("m3u_account_id"),
+        category_id=OuterRef("category_id"),
+        enabled=True,
+    )
 
     try:
-        series_relation = M3USeriesRelation.objects.select_related('series', 'series__logo').get(**filters)
+        series_relation = M3USeriesRelation.objects.select_related(
+            'series', 'series__logo'
+        ).annotate(
+            category_enabled=Exists(enabled_category_relations)
+        ).get(
+            category_enabled=True,
+            **filters,
+        )
         series = series_relation.series
     except M3USeriesRelation.DoesNotExist:
         raise Http404()
@@ -2824,7 +2836,7 @@ def xc_get_series_info(request, user, series_id):
 
 def xc_get_vod_info(request, user, vod_id):
     """Get detailed VOD (movie) information"""
-    from apps.vod.models import M3UMovieRelation
+    from apps.vod.models import M3UMovieRelation, M3UVODCategoryRelation
     from django.utils import timezone
     from datetime import timedelta
 
@@ -2833,10 +2845,22 @@ def xc_get_vod_info(request, user, vod_id):
 
     # All authenticated users get access to VOD from all active M3U accounts
     filters = {"movie_id": vod_id, "m3u_account__is_active": True}
+    enabled_category_relations = M3UVODCategoryRelation.objects.filter(
+        m3u_account_id=OuterRef("m3u_account_id"),
+        category_id=OuterRef("category_id"),
+        enabled=True,
+    )
 
     try:
         # Order by account priority to get the best relation when multiple exist
-        movie_relation = M3UMovieRelation.objects.select_related('movie', 'movie__logo').filter(**filters).order_by('-m3u_account__priority', 'id').first()
+        movie_relation = M3UMovieRelation.objects.select_related(
+            'movie', 'movie__logo'
+        ).annotate(
+            category_enabled=Exists(enabled_category_relations)
+        ).filter(
+            category_enabled=True,
+            **filters,
+        ).order_by('-m3u_account__priority', 'id').first()
         if not movie_relation:
             raise Http404()
         movie = movie_relation.movie

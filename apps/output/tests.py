@@ -1,4 +1,6 @@
 from django.test import TestCase, Client, RequestFactory
+from django.http import Http404
+from django.utils import timezone
 from django.urls import reverse
 from apps.channels.models import Channel, ChannelGroup
 from apps.epg.models import EPGData, EPGSource
@@ -16,6 +18,8 @@ from apps.output.views import (
     xc_get_vod_streams,
     xc_get_series_categories,
     xc_get_series,
+    xc_get_series_info,
+    xc_get_vod_info,
 )
 import xml.etree.ElementTree as ET
 
@@ -209,32 +213,44 @@ class OutputXtreamVodVisibilityTest(TestCase):
 
         self.enabled_movie = Movie.objects.create(name="Enabled Movie")
         self.disabled_movie = Movie.objects.create(name="Disabled Movie")
-        M3UMovieRelation.objects.create(
+        self.enabled_movie_relation = M3UMovieRelation.objects.create(
             m3u_account=self.account,
             movie=self.enabled_movie,
             category=self.enabled_movie_category,
             stream_id="enabled-movie",
+            last_advanced_refresh=timezone.now(),
         )
-        M3UMovieRelation.objects.create(
+        self.disabled_movie_relation = M3UMovieRelation.objects.create(
             m3u_account=self.account,
             movie=self.disabled_movie,
             category=self.disabled_movie_category,
             stream_id="disabled-movie",
+            last_advanced_refresh=timezone.now(),
         )
 
         self.enabled_series = Series.objects.create(name="Enabled Series Title")
         self.disabled_series = Series.objects.create(name="Disabled Series Title")
-        M3USeriesRelation.objects.create(
+        self.enabled_series_relation = M3USeriesRelation.objects.create(
             m3u_account=self.account,
             series=self.enabled_series,
             category=self.enabled_series_category,
             external_series_id="enabled-series",
+            last_episode_refresh=timezone.now(),
+            custom_properties={
+                "episodes_fetched": True,
+                "detailed_fetched": True,
+            },
         )
-        M3USeriesRelation.objects.create(
+        self.disabled_series_relation = M3USeriesRelation.objects.create(
             m3u_account=self.account,
             series=self.disabled_series,
             category=self.disabled_series_category,
             external_series_id="disabled-series",
+            last_episode_refresh=timezone.now(),
+            custom_properties={
+                "episodes_fetched": True,
+                "detailed_fetched": True,
+            },
         )
 
     def test_xc_get_vod_categories_only_returns_enabled_categories(self):
@@ -282,3 +298,23 @@ class OutputXtreamVodVisibilityTest(TestCase):
             category_id=self.disabled_series_category.id,
         )
         self.assertEqual(filtered_response, [])
+
+    def test_xc_get_series_info_rejects_disabled_category_relation(self):
+        request = self.factory.get("/player_api.php")
+
+        with self.assertRaises(Http404):
+            xc_get_series_info(
+                request,
+                user=None,
+                series_id=self.disabled_series_relation.id,
+            )
+
+    def test_xc_get_vod_info_rejects_disabled_category_relation(self):
+        request = self.factory.get("/player_api.php")
+
+        with self.assertRaises(Http404):
+            xc_get_vod_info(
+                request,
+                user=None,
+                vod_id=self.disabled_movie.id,
+            )
