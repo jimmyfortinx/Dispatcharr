@@ -7,7 +7,7 @@ from rest_framework.permissions import AllowAny
 from django_filters.rest_framework import DjangoFilterBackend
 from django.shortcuts import get_object_or_404
 from django.http import StreamingHttpResponse, HttpResponse, FileResponse
-from django.db.models import Q
+from django.db.models import Exists, OuterRef, Q
 import django_filters
 import logging
 import os
@@ -32,6 +32,7 @@ from .serializers import (
     M3UEpisodeRelationSerializer
 )
 from .tasks import (
+    get_enabled_series_relations_queryset,
     refresh_series_episodes,
     refresh_movie_advanced_data,
     stalker_episode_import_looks_stale,
@@ -294,9 +295,15 @@ class SeriesViewSet(viewsets.ReadOnlyModelViewSet):
             return [Authenticated()]
 
     def get_queryset(self):
-        # Only return series that have active M3U relations
+        enabled_series_relations = get_enabled_series_relations_queryset(
+            M3USeriesRelation.objects.filter(
+                series_id=OuterRef("pk"),
+                m3u_account__is_active=True,
+            )
+        )
+
         return Series.objects.filter(
-            m3u_relations__m3u_account__is_active=True
+            Exists(enabled_series_relations)
         ).distinct().select_related('logo').prefetch_related('episodes', 'm3u_relations__m3u_account')
 
     @action(detail=True, methods=['get'], url_path='providers')
@@ -307,6 +314,7 @@ class SeriesViewSet(viewsets.ReadOnlyModelViewSet):
             series=series,
             m3u_account__is_active=True
         ).select_related('m3u_account', 'category')
+        relations = get_enabled_series_relations_queryset(relations)
 
         serializer = M3USeriesRelationSerializer(
             _dedupe_relations_by_account(relations),
@@ -349,7 +357,8 @@ class SeriesViewSet(viewsets.ReadOnlyModelViewSet):
         relation = M3USeriesRelation.objects.filter(
             series=series,
             m3u_account__is_active=True
-        ).select_related('m3u_account').order_by('-m3u_account__priority', 'id').first()
+        ).select_related('m3u_account', 'category').order_by('-m3u_account__priority', 'id')
+        relation = get_enabled_series_relations_queryset(relation).first()
 
         if not relation:
             return Response(
