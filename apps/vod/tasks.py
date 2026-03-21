@@ -1,7 +1,7 @@
 from celery import shared_task, current_app, group
 from django.utils import timezone
 from django.db import transaction, IntegrityError
-from django.db.models import Q
+from django.db.models import Exists, OuterRef, Q
 from apps.m3u.models import M3UAccount
 from core.xtream_codes import Client as XtreamCodesClient
 from apps.m3u.stalker import StalkerClient
@@ -850,6 +850,18 @@ def build_series_relation_custom_properties(existing_props, series_data):
         relation_custom_properties.get("episodes_fetched")
     )
     return relation_custom_properties
+
+
+def get_enabled_series_relations_queryset(queryset):
+    enabled_category_relations = M3UVODCategoryRelation.objects.filter(
+        m3u_account_id=OuterRef("m3u_account_id"),
+        category_id=OuterRef("category_id"),
+        enabled=True,
+    )
+
+    return queryset.annotate(
+        category_enabled=Exists(enabled_category_relations)
+    ).filter(Q(category_id__isnull=True) | Q(category_enabled=True))
 
 
 
@@ -2309,6 +2321,16 @@ def refresh_series_episodes(account, series, external_series_id, episodes_data=N
             m3u_account=account,
             external_series_id=external_series_id
         ).first()
+        if series_relation and not get_enabled_series_relations_queryset(
+            M3USeriesRelation.objects.filter(pk=series_relation.pk)
+        ).exists():
+            logger.info(
+                "Skipping episode refresh for series %s on account %s because category %s is disabled",
+                series.name,
+                account.id,
+                series_relation.category_id,
+            )
+            return
         detail_data = None
 
         if not episodes_data:
@@ -2681,16 +2703,21 @@ def batch_refresh_series_episodes(account_id, series_ids=None):
 
         # Determine which series to refresh
         if series_ids:
-            series_relations = M3USeriesRelation.objects.filter(
-                m3u_account=account,
-                series__id__in=series_ids
+            series_relations = get_enabled_series_relations_queryset(
+                M3USeriesRelation.objects.filter(
+                    m3u_account=account,
+                    series__id__in=series_ids
+                )
             ).select_related('series')
+            
         else:
             # Refresh series that haven't been refreshed in the last 24 hours
             cutoff_time = timezone.now() - timezone.timedelta(hours=24)
-            series_relations = M3USeriesRelation.objects.filter(
-                m3u_account=account,
-                last_episode_refresh__lt=cutoff_time
+            series_relations = get_enabled_series_relations_queryset(
+                M3USeriesRelation.objects.filter(
+                    m3u_account=account,
+                    last_episode_refresh__lt=cutoff_time
+                )
             ).select_related('series')
 
         logger.info(f"Batch refreshing episodes for {series_relations.count()} series")

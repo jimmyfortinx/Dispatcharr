@@ -116,6 +116,39 @@ class StalkerPhase13SeriesImportTests(StalkerPhase13Base):
     @patch("apps.vod.tasks.StalkerClient.get_series_episodes")
     @patch("apps.vod.tasks.StalkerClient.get_series_seasons")
     @patch("apps.vod.tasks.StalkerClient.prepare_authenticated_session")
+    def test_refresh_series_episodes_skips_disabled_category_relation(
+        self,
+        mock_prepare_authenticated_session,
+        mock_get_series_seasons,
+        mock_get_series_episodes,
+    ):
+        category = VODCategory.objects.create(name="Drama", category_type="series")
+        M3UVODCategoryRelation.objects.create(
+            m3u_account=self.account,
+            category=category,
+            enabled=False,
+        )
+        self.series_relation.category = category
+        self.series_relation.save(update_fields=["category"])
+
+        refresh_series_episodes(
+            self.account,
+            self.series,
+            self.external_series_id,
+        )
+
+        self.series_relation.refresh_from_db()
+
+        self.assertFalse(self.series_relation.custom_properties["detailed_fetched"])
+        self.assertFalse(self.series_relation.custom_properties["episodes_fetched"])
+        self.assertEqual(Episode.objects.filter(series=self.series).count(), 0)
+        mock_prepare_authenticated_session.assert_not_called()
+        mock_get_series_seasons.assert_not_called()
+        mock_get_series_episodes.assert_not_called()
+
+    @patch("apps.vod.tasks.StalkerClient.get_series_episodes")
+    @patch("apps.vod.tasks.StalkerClient.get_series_seasons")
+    @patch("apps.vod.tasks.StalkerClient.prepare_authenticated_session")
     def test_refresh_series_episodes_imports_stalker_episode_rows_idempotently(
         self,
         mock_prepare_authenticated_session,
@@ -487,6 +520,33 @@ class StalkerPhase13ProviderInfoApiTests(StalkerPhase13Base):
         self.assertEqual(payload["episodes"]["1"][0]["container_extension"], "mkv")
         self.assertEqual(payload["episodes"]["2"][0]["title"], "Episode 1")
         mock_prepare_authenticated_session.assert_called()
+
+    @patch("apps.vod.tasks.StalkerClient.get_series_episodes")
+    @patch("apps.vod.tasks.StalkerClient.get_series_seasons")
+    @patch("apps.vod.tasks.StalkerClient.prepare_authenticated_session")
+    def test_provider_info_endpoint_rejects_disabled_category_relation(
+        self,
+        mock_prepare_authenticated_session,
+        mock_get_series_seasons,
+        mock_get_series_episodes,
+    ):
+        category = VODCategory.objects.create(name="Disabled Drama", category_type="series")
+        M3UVODCategoryRelation.objects.create(
+            m3u_account=self.account,
+            category=category,
+            enabled=False,
+        )
+        self.series_relation.category = category
+        self.series_relation.save(update_fields=["category"])
+
+        response = self.client.get(
+            f"/api/vod/series/{self.series.id}/provider-info/?include_episodes=true"
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+        mock_prepare_authenticated_session.assert_not_called()
+        mock_get_series_seasons.assert_not_called()
+        mock_get_series_episodes.assert_not_called()
 
 
 class VODProvidersApiTests(TestCase):
