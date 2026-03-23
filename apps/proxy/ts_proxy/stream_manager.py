@@ -48,6 +48,11 @@ class StreamManager:
         self.buffering_timeout = ConfigHelper.buffering_timeout()
         self.buffering_speed = ConfigHelper.buffering_speed()
         self.buffering_start_time = None
+        self.buffering_recovery_attempts = 0
+        self.max_buffering_recovery_attempts = ConfigHelper.get(
+            'MAX_BUFFERING_RECOVERY_ATTEMPTS', 1
+        )
+        self.buffering_recovery_in_progress = False
         # Store worker_id for ownership checks
         self.worker_id = worker_id
 
@@ -298,6 +303,8 @@ class StreamManager:
                             if connection_duration > stable_connection_threshold:
                                 logger.info(f"Stream was stable for {connection_duration:.1f} seconds, resetting switch attempts counter for channel: {self.channel_id}")
                                 stream_switch_attempts = 0
+                                self.buffering_recovery_attempts = 0
+                                self.buffering_recovery_in_progress = False
 
                         # Connection failed or ended - decide what to do next
                         if self.stop_requested or not self.running:
@@ -548,6 +555,7 @@ class StreamManager:
 
             self.socket = self.transcode_process.stdout  # Read from std output
             self.connected = True
+            self.buffering_recovery_in_progress = False
 
             # Set connection start time for stability tracking
             self.connection_start_time = time.time()
@@ -804,6 +812,34 @@ class StreamManager:
                         if buffering_duration > self.buffering_timeout:
                             # Buffering timeout reached, log error and try next stream
                             logger.error(f"Buffering timeout reached for channel {self.channel_id} after {buffering_duration:.1f} seconds")
+                            recovery_attempts = getattr(self, 'buffering_recovery_attempts', 0)
+                            max_recovery_attempts = getattr(
+                                self, 'max_buffering_recovery_attempts', 1
+                            )
+                            recovery_in_progress = getattr(
+                                self, 'buffering_recovery_in_progress', False
+                            )
+
+                            if (
+                                self.current_stream_id
+                                and not self.url_switching
+                                and not recovery_in_progress
+                                and recovery_attempts < max_recovery_attempts
+                            ):
+                                self.buffering_recovery_attempts = recovery_attempts + 1
+                                self.buffering_recovery_in_progress = True
+                                self.buffering = False
+                                self.buffering_start_time = None
+                                logger.warning(
+                                    f"Attempting current-stream reconnect before failover for channel "
+                                    f"{self.channel_id} after buffering timeout "
+                                    f"({self.buffering_recovery_attempts}/{max_recovery_attempts})"
+                                )
+                                self._refresh_runtime_stream_url(reason="buffering_timeout")
+                                self._close_socket()
+                                self.connected = False
+                                return
+
                             # Send next stream request
                             if self._try_next_stream():
                                 logger.info(f"Switched to next stream for channel {self.channel_id} after buffering timeout")
@@ -856,6 +892,8 @@ class StreamManager:
                     logger.info(f"Buffering ended for channel {self.channel_id} - speed: {ffmpeg_speed}x")
                     self.buffering = False
                     self.buffering_start_time = None
+                    self.buffering_recovery_attempts = 0
+                    self.buffering_recovery_in_progress = False
                     # Set channel state to active if speed is good
                     if hasattr(self.buffer, 'redis_client') and self.buffer.redis_client:
                         metadata_key = RedisKeys.channel_metadata(self.channel_id)
@@ -931,6 +969,7 @@ class StreamManager:
             self.socket = os.fdopen(pipe_fd, 'rb', buffering=0)
             self.connected = True
             self.healthy = True
+            self.buffering_recovery_in_progress = False
 
             logger.info(f"Successfully started HTTP streamer thread for channel {self.channel_id}")
 
@@ -1132,6 +1171,8 @@ class StreamManager:
 
             # Reset retry counter to allow immediate reconnect
             self.retry_count = 0
+            self.buffering_recovery_attempts = 0
+            self.buffering_recovery_in_progress = False
 
             # Also reset buffer position to prevent stale data after URL change
             if hasattr(self.buffer, 'reset_buffer_position'):
@@ -1446,10 +1487,15 @@ class StreamManager:
             # Join stderr reader thread to ensure it's fully terminated
             if hasattr(self, 'stderr_reader_thread') and self.stderr_reader_thread and self.stderr_reader_thread.is_alive():
                 try:
-                    logger.debug(f"Waiting for stderr reader thread to terminate for channel {self.channel_id}")
-                    self.stderr_reader_thread.join(timeout=2.0)
-                    if self.stderr_reader_thread.is_alive():
-                        logger.warning(f"Stderr reader thread did not terminate within timeout for channel {self.channel_id}")
+                    if self.stderr_reader_thread is threading.current_thread():
+                        logger.debug(
+                            f"Skipping join of current stderr reader thread for channel {self.channel_id}"
+                        )
+                    else:
+                        logger.debug(f"Waiting for stderr reader thread to terminate for channel {self.channel_id}")
+                        self.stderr_reader_thread.join(timeout=2.0)
+                        if self.stderr_reader_thread.is_alive():
+                            logger.warning(f"Stderr reader thread did not terminate within timeout for channel {self.channel_id}")
                 except Exception as e:
                     logger.debug(f"Error joining stderr reader thread for channel {self.channel_id}: {e}")
                 finally:

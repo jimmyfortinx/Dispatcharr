@@ -303,3 +303,61 @@ class TsProxyStalkerReconnectTests(TestCase):
             metadata_mapping[ChannelMetadataField.M3U_PROFILE],
             str(self.account_profile.id),
         )
+
+    def test_buffering_timeout_reconnects_current_stream_before_failover(self):
+        manager = StreamManager.__new__(StreamManager)
+        manager.channel_id = "channel-1"
+        manager.current_stream_id = self.stream.id
+        manager.buffering_speed = 1.0
+        manager.buffering_timeout = 15
+        manager.buffering = True
+        manager.buffering_start_time = 100.0
+        manager.buffering_recovery_attempts = 0
+        manager.max_buffering_recovery_attempts = 1
+        manager.buffering_recovery_in_progress = False
+        manager.url_switching = False
+        manager.connected = True
+        manager.buffer = MagicMock()
+        manager.buffer.redis_client = MagicMock()
+        manager._refresh_runtime_stream_url = MagicMock(return_value=True)
+        manager._close_socket = MagicMock()
+        manager._try_next_stream = MagicMock(return_value=True)
+
+        with patch("apps.proxy.ts_proxy.stream_manager.time.time", return_value=116.0):
+            manager._parse_ffmpeg_stats("frame= 120 fps=30 speed=0.99x")
+
+        manager._refresh_runtime_stream_url.assert_called_once_with(
+            reason="buffering_timeout"
+        )
+        manager._close_socket.assert_called_once()
+        manager._try_next_stream.assert_not_called()
+        self.assertEqual(manager.buffering_recovery_attempts, 1)
+        self.assertTrue(manager.buffering_recovery_in_progress)
+        self.assertFalse(manager.buffering)
+        self.assertIsNone(manager.buffering_start_time)
+
+    def test_buffering_timeout_fails_over_after_current_stream_recovery_budget_is_used(self):
+        manager = StreamManager.__new__(StreamManager)
+        manager.channel_id = "channel-1"
+        manager.current_stream_id = self.stream.id
+        manager.buffering_speed = 1.0
+        manager.buffering_timeout = 15
+        manager.buffering = True
+        manager.buffering_start_time = 100.0
+        manager.buffering_recovery_attempts = 1
+        manager.max_buffering_recovery_attempts = 1
+        manager.buffering_recovery_in_progress = False
+        manager.url_switching = False
+        manager.connected = True
+        manager.buffer = MagicMock()
+        manager.buffer.redis_client = MagicMock()
+        manager._refresh_runtime_stream_url = MagicMock(return_value=True)
+        manager._close_socket = MagicMock()
+        manager._try_next_stream = MagicMock(return_value=False)
+
+        with patch("apps.proxy.ts_proxy.stream_manager.time.time", return_value=116.0):
+            manager._parse_ffmpeg_stats("frame= 120 fps=30 speed=0.99x")
+
+        manager._refresh_runtime_stream_url.assert_not_called()
+        manager._close_socket.assert_not_called()
+        manager._try_next_stream.assert_called_once()
