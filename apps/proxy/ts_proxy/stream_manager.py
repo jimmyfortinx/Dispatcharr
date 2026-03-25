@@ -53,10 +53,6 @@ class StreamManager:
             'MAX_BUFFERING_RECOVERY_ATTEMPTS', 1
         )
         self.buffering_recovery_in_progress = False
-        self.same_stream_recovery_attempts = 0
-        self.max_same_stream_recovery_attempts = (
-            ConfigHelper.max_same_stream_recovery_attempts()
-        )
         # Store worker_id for ownership checks
         self.worker_id = worker_id
 
@@ -232,12 +228,6 @@ class StreamManager:
                     logger.info(f"Health monitor requested stream switch for channel {self.channel_id}")
                     self.needs_stream_switch = False
 
-                    if self._attempt_same_stream_recovery(reason="health_stream_switch"):
-                        logger.info(
-                            f"Health-requested same-stream recovery prepared for channel {self.channel_id}"
-                        )
-                        continue  # Go back to main loop with the refreshed runtime context
-
                     if self._try_next_stream():
                         logger.info(f"Health-requested stream switch successful for channel {self.channel_id}")
                         stream_switch_attempts += 1
@@ -312,7 +302,6 @@ class StreamManager:
                             if connection_duration > stable_connection_threshold:
                                 logger.info(f"Stream was stable for {connection_duration:.1f} seconds, resetting switch attempts counter for channel: {self.channel_id}")
                                 stream_switch_attempts = 0
-                                self.same_stream_recovery_attempts = 0
                                 self.buffering_recovery_attempts = 0
                                 self.buffering_recovery_in_progress = False
 
@@ -379,12 +368,6 @@ class StreamManager:
 
                 # If URL failed and we're still running, try switching to another stream
                 if url_failed and self.running:
-                    if self._attempt_same_stream_recovery(reason="max_retries_exceeded"):
-                        logger.info(
-                            f"Prepared same-stream recovery after retry exhaustion for channel: {self.channel_id}"
-                        )
-                        continue
-
                     logger.info(f"URL {self.url} failed after {self.retry_count} attempts, trying next stream for channel: {self.channel_id}")
 
                     # Try to switch to next stream
@@ -1215,7 +1198,6 @@ class StreamManager:
 
             # Reset retry counter to allow immediate reconnect
             self.retry_count = 0
-            self.same_stream_recovery_attempts = 0
             self.buffering_recovery_attempts = 0
             self.buffering_recovery_in_progress = False
 
@@ -1253,10 +1235,10 @@ class StreamManager:
         """Check if connection retry is allowed"""
         return self.retry_count < self.max_retries
 
-    def _load_current_runtime_stream_info(self, reason="reconnect"):
-        """Load current-stream runtime info, including refreshed provider URLs."""
+    def _refresh_runtime_stream_url(self, reason="reconnect"):
+        """Refresh the current stream URL when the provider uses short-lived URLs."""
         if not self.current_stream_id:
-            return None
+            return False
 
         stream_info = get_stream_info_for_switch(self.channel_id, self.current_stream_id)
         if not stream_info or 'error' in stream_info or not stream_info.get('url'):
@@ -1264,12 +1246,8 @@ class StreamManager:
                 f"Could not refresh runtime stream URL for channel {self.channel_id} during {reason}: "
                 f"{stream_info.get('error', 'missing URL') if stream_info else 'no stream info'}"
             )
-            return None
+            return False
 
-        return stream_info
-
-    def _apply_runtime_stream_info(self, stream_info, reason="reconnect"):
-        """Apply refreshed runtime stream details to the current manager and Redis metadata."""
         refreshed = stream_info['url'] != self.url
         old_url = self.url
         self.url = stream_info['url']
@@ -1303,90 +1281,6 @@ class StreamManager:
             )
 
         return refreshed
-
-    def _current_stream_prefers_same_provider_recovery(self):
-        """Stalker streams benefit from a full same-provider recovery before failover."""
-        if not self.current_stream_id:
-            return False
-
-        try:
-            stream = Stream.objects.select_related("m3u_account").get(
-                pk=self.current_stream_id
-            )
-        except Stream.DoesNotExist:
-            logger.warning(
-                f"Current stream {self.current_stream_id} no longer exists for channel {self.channel_id}"
-            )
-            return False
-        except Exception as e:
-            logger.debug(
-                f"Could not inspect current stream {self.current_stream_id} for channel {self.channel_id}: {e}"
-            )
-            return False
-
-        provider_type = str(
-            (stream.custom_properties or {}).get("provider_type") or ""
-        ).strip().lower()
-        if provider_type == "stalker":
-            return True
-
-        return (
-            bool(stream.m3u_account)
-            and stream.m3u_account.account_type == M3UAccount.Types.STALKER
-        )
-
-    def _attempt_same_stream_recovery(self, reason="reconnect"):
-        """Prepare a full same-provider recovery cycle before switching providers."""
-        if self.url_switching or not self.current_stream_id:
-            return False
-
-        if not self._current_stream_prefers_same_provider_recovery():
-            return False
-
-        recovery_attempts = getattr(self, "same_stream_recovery_attempts", 0)
-        max_attempts = getattr(self, "max_same_stream_recovery_attempts", 1)
-        if recovery_attempts >= max_attempts:
-            logger.info(
-                f"Same-stream recovery budget exhausted for channel {self.channel_id} "
-                f"({recovery_attempts}/{max_attempts})"
-            )
-            return False
-
-        stream_info = self._load_current_runtime_stream_info(reason=reason)
-        if not stream_info:
-            return False
-
-        self.same_stream_recovery_attempts = recovery_attempts + 1
-        logger.warning(
-            f"Preparing same-provider recovery for channel {self.channel_id} "
-            f"({self.same_stream_recovery_attempts}/{max_attempts}) during {reason}"
-        )
-
-        self._apply_runtime_stream_info(stream_info, reason=reason)
-        self._close_socket()
-        if not self._wait_for_existing_processes_to_close():
-            logger.warning(
-                f"Some processes may still be running during same-provider recovery "
-                f"for channel {self.channel_id}"
-            )
-
-        self.connected = False
-        self.retry_count = 0
-        self.buffering = False
-        self.buffering_start_time = None
-        self.buffering_recovery_in_progress = False
-        self.needs_reconnect = False
-        self.needs_stream_switch = False
-        self.last_data_time = time.time()
-        return True
-
-    def _refresh_runtime_stream_url(self, reason="reconnect"):
-        """Refresh the current stream URL when the provider uses short-lived URLs."""
-        stream_info = self._load_current_runtime_stream_info(reason=reason)
-        if not stream_info:
-            return False
-
-        return self._apply_runtime_stream_info(stream_info, reason=reason)
 
     def _monitor_health(self):
         """Monitor stream health and set flags for the main loop to handle recovery"""
