@@ -81,6 +81,11 @@ class ConfigHelper:
         return ConfigHelper.get('MAX_RETRIES', 3)
 
     @staticmethod
+    def max_same_stream_recovery_attempts():
+        """Get maximum same-stream recovery cycles before failing over."""
+        return ConfigHelper.get('MAX_SAME_STREAM_RECOVERY_ATTEMPTS', 1)
+
+    @staticmethod
     def max_stream_switches():
         """Get maximum number of stream switch attempts"""
         return ConfigHelper.get('MAX_STREAM_SWITCHES', 10)

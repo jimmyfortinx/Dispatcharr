@@ -12,7 +12,7 @@ class BaseConfig:
     MAX_STREAM_SWITCHES = 10  # Maximum number of stream switch attempts before giving up
     BUFFER_CHUNK_SIZE = 188 * 1361  # ~256KB
     BUFFERING_TIMEOUT = 15  # Seconds to wait for buffering before switching streams
-    BUFFER_SPEED = 1 # What speed to condsider the stream buffering, 1x is normal speed, 2x is double speed, etc.
+    BUFFER_SPEED = 0.95 # Speeds just under realtime are often stable enough; avoid thrashing at ~0.99x.
 
     # Cache for proxy settings (class-level, shared across all instances)
     _proxy_settings_cache = None
@@ -39,9 +39,9 @@ class BaseConfig:
             # Return defaults if database query fails
             return {
                 "buffering_timeout": 15,
-                "buffering_speed": 1.0,
+                "buffering_speed": 0.95,
                 "redis_chunk_ttl": 60,
-                "channel_shutdown_delay": 0,
+                "channel_shutdown_delay": 5,
                 "channel_init_grace_period": 5,
                 "new_client_behind_seconds": 5,
             }
@@ -106,6 +106,7 @@ class TSConfig(BaseConfig):
     # Stream health and recovery settings
     MAX_HEALTH_RECOVERY_ATTEMPTS = 2     # Maximum times to attempt recovery for a single stream
     MAX_RECONNECT_ATTEMPTS = 3           # Maximum reconnects to try before switching streams
+    MAX_SAME_STREAM_RECOVERY_ATTEMPTS = 1  # Full same-provider recovery cycles before switching streams
     MIN_STABLE_TIME_BEFORE_RECONNECT = 30  # Minimum seconds a stream must be stable to try reconnect
     FAILOVER_GRACE_PERIOD = 20           # Extra time (seconds) to allow for stream switching before disconnecting clients
     URL_SWITCH_TIMEOUT = 20   # Max time allowed for a stream switch operation
@@ -118,7 +119,10 @@ class TSConfig(BaseConfig):
     def get_channel_shutdown_delay(cls):
         """Get channel shutdown delay from database or default"""
         settings = cls.get_proxy_settings()
-        return settings.get("channel_shutdown_delay", 0)
+        configured = settings.get("channel_shutdown_delay", 5)
+        if configured == 0:
+            return max(settings.get("channel_init_grace_period", 5), 5)
+        return configured
 
     @classmethod
     def get_buffering_timeout(cls):
@@ -130,7 +134,10 @@ class TSConfig(BaseConfig):
     def get_buffering_speed(cls):
         """Get buffering speed threshold from database or default"""
         settings = cls.get_proxy_settings()
-        return settings.get("buffering_speed", 1.0)
+        configured = settings.get("buffering_speed", 0.95)
+        if configured == 1.0:
+            return 0.95
+        return configured
 
     @classmethod
     def get_channel_init_grace_period(cls):
@@ -154,5 +161,3 @@ class TSConfig(BaseConfig):
     @property
     def CHANNEL_INIT_GRACE_PERIOD(self):
         return self.get_channel_init_grace_period()
-
-

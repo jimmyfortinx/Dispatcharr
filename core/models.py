@@ -336,9 +336,9 @@ class CoreSettings(models.Model):
         """Get proxy settings."""
         return cls._get_group(PROXY_SETTINGS_KEY, {
             "buffering_timeout": 15,
-            "buffering_speed": 1.0,
+            "buffering_speed": 0.95,
             "redis_chunk_ttl": 60,
-            "channel_shutdown_delay": 0,
+            "channel_shutdown_delay": 5,
             "channel_init_grace_period": 5,
             "new_client_behind_seconds": 5,
         })

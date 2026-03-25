@@ -696,6 +696,71 @@ class Channel(models.Model):
         )
         return True
 
+    def switch_stream_assignment(self, new_stream_id, new_profile_id):
+        """
+        Move the active channel stream assignment to a new stream/profile pair.
+
+        This keeps the canonical Redis keys aligned with the stream manager's
+        in-memory state so cleanup and reconnect logic operate on the live
+        upstream, not the stream that previously failed.
+        """
+        redis_client = RedisClient.get_client()
+
+        channel_stream_key = f"channel_stream:{self.id}"
+        old_stream_id_bytes = redis_client.get(channel_stream_key)
+        if not old_stream_id_bytes:
+            logger.debug("No active stream found for channel during stream switch")
+            return False
+
+        old_stream_id = int(old_stream_id_bytes)
+        old_profile_id_bytes = redis_client.get(f"stream_profile:{old_stream_id}")
+        old_profile_id = int(old_profile_id_bytes) if old_profile_id_bytes else None
+
+        pipe = redis_client.pipeline()
+
+        if old_stream_id != new_stream_id:
+            pipe.delete(f"stream_profile:{old_stream_id}")
+
+        pipe.set(channel_stream_key, new_stream_id)
+        pipe.set(f"stream_profile:{new_stream_id}", new_profile_id)
+
+        metadata_key = RedisKeys.channel_metadata(str(self.uuid))
+        pipe.hset(
+            metadata_key,
+            mapping={
+                ChannelMetadataField.STREAM_ID: str(new_stream_id),
+                ChannelMetadataField.M3U_PROFILE: str(new_profile_id),
+            },
+        )
+
+        if old_profile_id != new_profile_id:
+            if old_profile_id:
+                old_profile_connections_key = f"profile_connections:{old_profile_id}"
+                old_count = int(redis_client.get(old_profile_connections_key) or 0)
+                if old_count > 0:
+                    pipe.decr(old_profile_connections_key)
+
+            from apps.m3u.models import M3UAccountProfile
+
+            try:
+                new_profile = M3UAccountProfile.objects.get(pk=new_profile_id)
+            except M3UAccountProfile.DoesNotExist:
+                logger.warning(
+                    f"New M3U profile {new_profile_id} does not exist for channel {self.uuid}"
+                )
+                return False
+
+            if new_profile.max_streams != 0:
+                pipe.incr(f"profile_connections:{new_profile_id}")
+
+        pipe.execute()
+        logger.info(
+            f"Switched channel {self.uuid} assignment from stream {old_stream_id} "
+            f"(profile {old_profile_id}) to stream {new_stream_id} "
+            f"(profile {new_profile_id})"
+        )
+        return True
+
 
 class ChannelProfile(models.Model):
     name = models.CharField(max_length=100, unique=True)

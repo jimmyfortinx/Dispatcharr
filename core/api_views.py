@@ -179,9 +179,9 @@ class ProxySettingsViewSet(viewsets.ViewSet):
             # Create default settings
             settings_data = {
                 "buffering_timeout": 15,
-                "buffering_speed": 1.0,
+                "buffering_speed": 0.95,
                 "redis_chunk_ttl": 60,
-                "channel_shutdown_delay": 0,
+                "channel_shutdown_delay": 5,
                 "channel_init_grace_period": 5,
                 "new_client_behind_seconds": 5,
             }
@@ -623,4 +623,3 @@ class SystemNotificationViewSet(viewsets.ModelViewSet):
         return Response({
             'unread_count': unread_count
         })
-

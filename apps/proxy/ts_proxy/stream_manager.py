@@ -53,6 +53,10 @@ class StreamManager:
             'MAX_BUFFERING_RECOVERY_ATTEMPTS', 1
         )
         self.buffering_recovery_in_progress = False
+        self.same_stream_recovery_attempts = 0
+        self.max_same_stream_recovery_attempts = (
+            ConfigHelper.max_same_stream_recovery_attempts()
+        )
         # Store worker_id for ownership checks
         self.worker_id = worker_id
 
@@ -74,6 +78,7 @@ class StreamManager:
         # Add to your __init__ method
         self._buffer_check_timers = []
         self.stopping = False
+        self.stop_requested = False
 
         # Add tracking for tried streams and current stream
         self.current_stream_id = stream_id
@@ -187,8 +192,6 @@ class StreamManager:
 
     def run(self):
         """Main execution loop using HTTP streaming with improved connection handling and stream switching"""
-        # Add a stop flag to the class properties
-        self.stop_requested = False
         # Add tracking for stream switching attempts
         stream_switch_attempts = 0
         # Get max stream switches from config using the helper method
@@ -228,6 +231,12 @@ class StreamManager:
                 if hasattr(self, 'needs_stream_switch') and self.needs_stream_switch and not self.url_switching:
                     logger.info(f"Health monitor requested stream switch for channel {self.channel_id}")
                     self.needs_stream_switch = False
+
+                    if self._attempt_same_stream_recovery(reason="health_stream_switch"):
+                        logger.info(
+                            f"Health-requested same-stream recovery prepared for channel {self.channel_id}"
+                        )
+                        continue  # Go back to main loop with the refreshed runtime context
 
                     if self._try_next_stream():
                         logger.info(f"Health-requested stream switch successful for channel {self.channel_id}")
@@ -303,6 +312,7 @@ class StreamManager:
                             if connection_duration > stable_connection_threshold:
                                 logger.info(f"Stream was stable for {connection_duration:.1f} seconds, resetting switch attempts counter for channel: {self.channel_id}")
                                 stream_switch_attempts = 0
+                                self.same_stream_recovery_attempts = 0
                                 self.buffering_recovery_attempts = 0
                                 self.buffering_recovery_in_progress = False
 
@@ -369,6 +379,12 @@ class StreamManager:
 
                 # If URL failed and we're still running, try switching to another stream
                 if url_failed and self.running:
+                    if self._attempt_same_stream_recovery(reason="max_retries_exceeded"):
+                        logger.info(
+                            f"Prepared same-stream recovery after retry exhaustion for channel: {self.channel_id}"
+                        )
+                        continue
+
                     logger.info(f"URL {self.url} failed after {self.retry_count} attempts, trying next stream for channel: {self.channel_id}")
 
                     # Try to switch to next stream
@@ -412,10 +428,14 @@ class StreamManager:
             # Close all connections
             self._close_all_connections()
 
-            # Transition to ERROR so clients stop waiting. Ownership may have
-            # expired during retries, so fall back to a state guard when no
-            # owner exists — but never clobber a new owner's active stream.
-            if hasattr(self.buffer, 'redis_client') and self.buffer.redis_client:
+            # Transition to ERROR so clients stop waiting after genuine
+            # failures. Intentional owner-driven stops should keep their
+            # normal terminal state instead of looking like upstream errors.
+            if (
+                not self._transport_shutdown_expected()
+                and hasattr(self.buffer, 'redis_client')
+                and self.buffer.redis_client
+            ):
                 try:
                     metadata_key = RedisKeys.channel_metadata(self.channel_id)
                     owner_key = RedisKeys.channel_owner(self.channel_id)
@@ -664,7 +684,13 @@ class StreamManager:
                         buffer = b""
 
                 except Exception as e:
-                    logger.error(f"Error reading stderr byte: {e}")
+                    if self._transport_shutdown_expected():
+                        logger.debug(
+                            f"Ignoring stderr read error during expected shutdown "
+                            f"for channel {self.channel_id}: {e}"
+                        )
+                    else:
+                        logger.error(f"Error reading stderr byte: {e}")
                     break
 
             # Process any remaining buffer content
@@ -1030,6 +1056,17 @@ class StreamManager:
         # If we exit the loop, connection is closed or failed
         self.connected = False
 
+    def _transport_shutdown_expected(self):
+        """Return True when read errors are a normal side effect of shutdown."""
+        return any(
+            (
+                getattr(self, "stop_requested", False),
+                getattr(self, "stopping", False),
+                getattr(self, "reconnecting", False),
+                getattr(self, "url_switching", False),
+            )
+        )
+
     def _close_all_connections(self):
         """Close all connection resources"""
         if self.socket or self.transcode_process:
@@ -1110,8 +1147,8 @@ class StreamManager:
 
         logger.info(f"Switching stream URL from {self.url} to {new_url} for channel {self.channel_id}")
 
-        # Import both models for proper resource management
-        from apps.channels.models import Stream, Channel
+        # Import Channel lazily to avoid circular imports during module load.
+        from apps.channels.models import Channel
         from django.db import connection
 
         # Update stream profile if we're switching streams
@@ -1120,19 +1157,26 @@ class StreamManager:
                 # Get the channel by UUID
                 channel = Channel.objects.get(uuid=self.channel_id)
 
-                # Get stream to find its profile
-                #new_stream = Stream.objects.get(pk=stream_id)
-
-                # Use the new method to update the profile and manage connection counts
                 if m3u_profile_id:
-                    success = channel.update_stream_profile(m3u_profile_id)
+                    success = channel.switch_stream_assignment(
+                        stream_id,
+                        m3u_profile_id,
+                    )
                     if success:
-                        logger.debug(f"Updated m3u profile for channel {self.channel_id} to use profile from stream {stream_id}")
+                        logger.debug(
+                            f"Updated active stream assignment for channel "
+                            f"{self.channel_id} to stream {stream_id}"
+                        )
                     else:
-                        logger.warning(f"Failed to update stream profile for channel {self.channel_id}")
+                        logger.warning(
+                            f"Failed to update active stream assignment for "
+                            f"channel {self.channel_id}"
+                        )
+                        return False
 
             except Exception as e:
                 logger.error(f"Error updating stream profile for channel {self.channel_id}: {e}")
+                return False
 
             finally:
                 # Always close database connection after profile update
@@ -1171,6 +1215,7 @@ class StreamManager:
 
             # Reset retry counter to allow immediate reconnect
             self.retry_count = 0
+            self.same_stream_recovery_attempts = 0
             self.buffering_recovery_attempts = 0
             self.buffering_recovery_in_progress = False
 
@@ -1208,10 +1253,10 @@ class StreamManager:
         """Check if connection retry is allowed"""
         return self.retry_count < self.max_retries
 
-    def _refresh_runtime_stream_url(self, reason="reconnect"):
-        """Refresh the current stream URL when the provider uses short-lived URLs."""
+    def _load_current_runtime_stream_info(self, reason="reconnect"):
+        """Load current-stream runtime info, including refreshed provider URLs."""
         if not self.current_stream_id:
-            return False
+            return None
 
         stream_info = get_stream_info_for_switch(self.channel_id, self.current_stream_id)
         if not stream_info or 'error' in stream_info or not stream_info.get('url'):
@@ -1219,8 +1264,12 @@ class StreamManager:
                 f"Could not refresh runtime stream URL for channel {self.channel_id} during {reason}: "
                 f"{stream_info.get('error', 'missing URL') if stream_info else 'no stream info'}"
             )
-            return False
+            return None
 
+        return stream_info
+
+    def _apply_runtime_stream_info(self, stream_info, reason="reconnect"):
+        """Apply refreshed runtime stream details to the current manager and Redis metadata."""
         refreshed = stream_info['url'] != self.url
         old_url = self.url
         self.url = stream_info['url']
@@ -1254,6 +1303,90 @@ class StreamManager:
             )
 
         return refreshed
+
+    def _current_stream_prefers_same_provider_recovery(self):
+        """Stalker streams benefit from a full same-provider recovery before failover."""
+        if not self.current_stream_id:
+            return False
+
+        try:
+            stream = Stream.objects.select_related("m3u_account").get(
+                pk=self.current_stream_id
+            )
+        except Stream.DoesNotExist:
+            logger.warning(
+                f"Current stream {self.current_stream_id} no longer exists for channel {self.channel_id}"
+            )
+            return False
+        except Exception as e:
+            logger.debug(
+                f"Could not inspect current stream {self.current_stream_id} for channel {self.channel_id}: {e}"
+            )
+            return False
+
+        provider_type = str(
+            (stream.custom_properties or {}).get("provider_type") or ""
+        ).strip().lower()
+        if provider_type == "stalker":
+            return True
+
+        return (
+            bool(stream.m3u_account)
+            and stream.m3u_account.account_type == M3UAccount.Types.STALKER
+        )
+
+    def _attempt_same_stream_recovery(self, reason="reconnect"):
+        """Prepare a full same-provider recovery cycle before switching providers."""
+        if self.url_switching or not self.current_stream_id:
+            return False
+
+        if not self._current_stream_prefers_same_provider_recovery():
+            return False
+
+        recovery_attempts = getattr(self, "same_stream_recovery_attempts", 0)
+        max_attempts = getattr(self, "max_same_stream_recovery_attempts", 1)
+        if recovery_attempts >= max_attempts:
+            logger.info(
+                f"Same-stream recovery budget exhausted for channel {self.channel_id} "
+                f"({recovery_attempts}/{max_attempts})"
+            )
+            return False
+
+        stream_info = self._load_current_runtime_stream_info(reason=reason)
+        if not stream_info:
+            return False
+
+        self.same_stream_recovery_attempts = recovery_attempts + 1
+        logger.warning(
+            f"Preparing same-provider recovery for channel {self.channel_id} "
+            f"({self.same_stream_recovery_attempts}/{max_attempts}) during {reason}"
+        )
+
+        self._apply_runtime_stream_info(stream_info, reason=reason)
+        self._close_socket()
+        if not self._wait_for_existing_processes_to_close():
+            logger.warning(
+                f"Some processes may still be running during same-provider recovery "
+                f"for channel {self.channel_id}"
+            )
+
+        self.connected = False
+        self.retry_count = 0
+        self.buffering = False
+        self.buffering_start_time = None
+        self.buffering_recovery_in_progress = False
+        self.needs_reconnect = False
+        self.needs_stream_switch = False
+        self.last_data_time = time.time()
+        return True
+
+    def _refresh_runtime_stream_url(self, reason="reconnect"):
+        """Refresh the current stream URL when the provider uses short-lived URLs."""
+        stream_info = self._load_current_runtime_stream_info(reason=reason)
+        if not stream_info:
+            return False
+
+        return self._apply_runtime_stream_info(stream_info, reason=reason)
 
     def _monitor_health(self):
         """Monitor stream health and set flags for the main loop to handle recovery"""
@@ -1561,7 +1694,13 @@ class StreamManager:
 
             if not chunk:
                 # Connection closed by server
-                logger.warning(f"Server closed connection for channel {self.channel_id}")
+                if self._transport_shutdown_expected():
+                    logger.debug(
+                        f"Transport closed during expected shutdown for "
+                        f"channel {self.channel_id}"
+                    )
+                else:
+                    logger.warning(f"Server closed connection for channel {self.channel_id}")
                 self._close_socket()
                 self.connected = False
                 return False
@@ -1582,13 +1721,25 @@ class StreamManager:
 
         except (socket.timeout, socket.error) as e:
             # Socket error
-            logger.error(f"Socket error: {e}")
+            if self._transport_shutdown_expected():
+                logger.debug(
+                    f"Ignoring socket error during expected shutdown for "
+                    f"channel {self.channel_id}: {e}"
+                )
+            else:
+                logger.error(f"Socket error: {e}")
             self._close_socket()
             self.connected = False
             return False
 
         except Exception as e:
-            logger.error(f"Error in fetch_chunk: {e}")
+            if self._transport_shutdown_expected():
+                logger.debug(
+                    f"Ignoring fetch_chunk error during expected shutdown for "
+                    f"channel {self.channel_id}: {e}"
+                )
+            else:
+                logger.error(f"Error in fetch_chunk: {e}")
             return False
 
     def _set_waiting_for_clients(self):

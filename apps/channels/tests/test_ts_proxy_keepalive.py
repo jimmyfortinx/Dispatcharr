@@ -296,6 +296,45 @@ class ClientRemoveIntegrationTests(TestCase):
                         f"remove_client() blocked for {elapsed:.2f}s waiting for WebSocket "
                         f"(should dispatch to background thread and return immediately)")
 
+    def test_stream_generator_cleanup_does_not_schedule_owner_shutdown(self):
+        """StreamGenerator cleanup should leave shutdown decisions to ClientManager/ProxyServer."""
+        from apps.proxy.ts_proxy.stream_generator import StreamGenerator
+
+        gen = StreamGenerator.__new__(StreamGenerator)
+        gen.channel_id = "00000000-0000-0000-0000-000000000006"
+        gen.client_id = "test-client-1"
+        gen.client_ip = "127.0.0.1"
+        gen.client_user_agent = "DispatcharrTest/1.0"
+        gen.stream_start_time = time.time() - 1
+        gen.bytes_sent = 1234
+
+        client_manager = MagicMock()
+        client_manager.remove_client.return_value = 0
+        client_manager.get_total_client_count.return_value = 0
+
+        proxy_server = MagicMock()
+        proxy_server.client_managers = {gen.channel_id: client_manager}
+
+        channel_obj = MagicMock()
+        channel_obj.name = "Cleanup Test"
+
+        with patch(
+            "apps.proxy.ts_proxy.stream_generator.ProxyServer.get_instance",
+            return_value=proxy_server,
+        ), patch(
+            "apps.proxy.ts_proxy.stream_generator.Channel.objects.get",
+            return_value=channel_obj,
+        ), patch(
+            "apps.proxy.ts_proxy.stream_generator.log_system_event",
+        ), patch(
+            "apps.proxy.ts_proxy.stream_generator.gevent.spawn",
+        ) as mock_spawn:
+            gen._cleanup()
+
+        client_manager.remove_client.assert_called_once_with(gen.client_id)
+        mock_spawn.assert_not_called()
+        proxy_server.am_i_owner.assert_not_called()
+
 
 # ---------------------------------------------------------------------------
 # DVR timeout threshold vs keepalive timing
@@ -329,3 +368,28 @@ class KeepaliveTimingTests(TestCase):
             f"{remaining_window/interval:.1f} keepalives would fit in the "
             f"{remaining_window}s window before DVR timeout",
         )
+
+
+class ProxyConfigDefaultsTests(TestCase):
+    def test_legacy_zero_shutdown_delay_gets_reconnect_grace(self):
+        from apps.proxy.config import TSConfig
+
+        with patch.object(
+            TSConfig,
+            "get_proxy_settings",
+            return_value={
+                "channel_shutdown_delay": 0,
+                "channel_init_grace_period": 5,
+            },
+        ):
+            self.assertEqual(TSConfig.get_channel_shutdown_delay(), 5)
+
+    def test_legacy_realtime_buffering_threshold_is_softened(self):
+        from apps.proxy.config import TSConfig
+
+        with patch.object(
+            TSConfig,
+            "get_proxy_settings",
+            return_value={"buffering_speed": 1.0},
+        ):
+            self.assertEqual(TSConfig.get_buffering_speed(), 0.95)
