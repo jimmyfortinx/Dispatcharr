@@ -8,7 +8,7 @@ import logging
 import threading
 import gevent  # Add this import at the top of your file
 from apps.proxy.config import TSConfig as Config
-from apps.channels.models import Channel, Stream
+from apps.channels.models import Channel
 from core.utils import log_system_event
 from .server import ProxyServer
 from .utils import create_ts_packet, get_logger
@@ -546,38 +546,6 @@ class StreamGenerator:
         total_clients = 0
         proxy_server = ProxyServer.get_instance()
 
-        # Release M3U profile stream allocation if this is the last client
-        stream_released = False
-        if proxy_server.redis_client:
-            try:
-                metadata_key = RedisKeys.channel_metadata(self.channel_id)
-                metadata = proxy_server.redis_client.hgetall(metadata_key)
-                if metadata:
-                    stream_id_bytes = proxy_server.redis_client.hget(metadata_key, ChannelMetadataField.STREAM_ID)
-                    if stream_id_bytes:
-                        stream_id = int(stream_id_bytes.decode('utf-8'))
-
-                        # Check if we're the last client
-                        if self.channel_id in proxy_server.client_managers:
-                            client_count = proxy_server.client_managers[self.channel_id].get_total_client_count()
-                            # Only the last client or owner should release the stream
-                            if client_count <= 1 and proxy_server.am_i_owner(self.channel_id):
-                                try:
-                                    # Try Channel first (normal flow), fall back to Stream (preview flow)
-                                    try:
-                                        obj = Channel.objects.get(uuid=self.channel_id)
-                                    except (Channel.DoesNotExist, Exception):
-                                        obj = Stream.objects.get(stream_hash=self.channel_id)
-                                    stream_released = obj.release_stream()
-                                    if stream_released:
-                                        logger.debug(f"[{self.client_id}] Released stream for channel {self.channel_id}")
-                                    else:
-                                        logger.warning(f"[{self.client_id}] release_stream found no keys for channel {self.channel_id}")
-                                except Exception as e:
-                                    logger.error(f"[{self.client_id}] Error releasing stream for channel {self.channel_id}: {e}")
-            except Exception as e:
-                logger.error(f"[{self.client_id}] Error checking stream data for release: {e}")
-
         if self.channel_id in proxy_server.client_managers:
             client_manager = proxy_server.client_managers[self.channel_id]
             local_clients = client_manager.remove_client(self.client_id)
@@ -599,36 +567,6 @@ class StreamGenerator:
                 )
             except Exception as e:
                 logger.error(f"Could not log client disconnect event: {e}")
-
-            # Schedule channel shutdown if no clients left
-            self._schedule_channel_shutdown_if_needed(local_clients)
-
-    def _schedule_channel_shutdown_if_needed(self, local_clients):
-        """
-        Schedule channel shutdown if there are no clients left and we're the owner.
-        """
-        proxy_server = ProxyServer.get_instance()
-
-        # If no clients left and we're the owner, schedule shutdown using the config value
-        if local_clients == 0 and proxy_server.am_i_owner(self.channel_id):
-            logger.info(f"No local clients left for channel {self.channel_id}, scheduling shutdown")
-
-            def delayed_shutdown():
-                # Use the config setting instead of hardcoded value
-                shutdown_delay = ConfigHelper.channel_shutdown_delay()  # Use ConfigHelper
-                logger.info(f"Waiting {shutdown_delay}s before checking if channel should be stopped")
-                gevent.sleep(shutdown_delay)  # Replace time.sleep
-
-                # After delay, check global client count
-                if self.channel_id in proxy_server.client_managers:
-                    total = proxy_server.client_managers[self.channel_id].get_total_client_count()
-                    if total == 0:
-                        logger.info(f"Shutting down channel {self.channel_id} as no clients connected")
-                        proxy_server.stop_channel(self.channel_id)
-                    else:
-                        logger.info(f"Not shutting down channel {self.channel_id}, {total} clients still connected")
-
-            gevent.spawn(delayed_shutdown)
 
 def create_stream_generator(channel_id, client_id, client_ip, client_user_agent, channel_initializing=False):
     """

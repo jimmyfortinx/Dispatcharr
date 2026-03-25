@@ -201,6 +201,15 @@ class StreamManagerFinallyBlockTests(TestCase):
         error_msg = mapping[ChannelMetadataField.ERROR_MESSAGE]
         self.assertIn("5", error_msg)
 
+    def test_stop_requested_does_not_write_error(self):
+        """Intentional shutdowns must not be reclassified as stream failures."""
+        sm = _make_stream_manager()
+        sm.stop_requested = True
+
+        self.assertFalse(_run_finally_block(sm, sm.worker_id.encode("utf-8"), ChannelState.ACTIVE))
+        sm.buffer.redis_client.hset.assert_not_called()
+        sm.buffer.redis_client.setex.assert_not_called()
+
 
 # ---------------------------------------------------------------------------
 # ChannelState.PRE_ACTIVE: verify contents and immutability

@@ -4,7 +4,7 @@ from unittest.mock import MagicMock, patch
 from django.test import TestCase
 from rest_framework.test import APIRequestFactory, force_authenticate
 
-from apps.channels.models import Stream
+from apps.channels.models import Channel, Stream
 from apps.accounts.models import User
 from apps.m3u.models import M3UAccount, M3UAccountProfile
 from apps.proxy.ts_proxy.constants import ChannelMetadataField
@@ -17,9 +17,57 @@ from apps.proxy.ts_proxy.views import change_stream
 from core.models import PROXY_PROFILE_NAME, StreamProfile, UserAgent
 
 
+class _FakePipeline:
+    def __init__(self, redis):
+        self.redis = redis
+        self.operations = []
+
+    def set(self, key, value):
+        self.operations.append(("set", key, value))
+        return self
+
+    def delete(self, *keys):
+        self.operations.append(("delete", keys))
+        return self
+
+    def hset(self, key, mapping=None, **kwargs):
+        self.operations.append(("hset", key, mapping or kwargs.get("mapping", {})))
+        return self
+
+    def decr(self, key):
+        self.operations.append(("decr", key))
+        return self
+
+    def incr(self, key):
+        self.operations.append(("incr", key))
+        return self
+
+    def execute(self):
+        for operation in self.operations:
+            name = operation[0]
+            if name == "set":
+                _, key, value = operation
+                self.redis.set(key, value)
+            elif name == "delete":
+                _, keys = operation
+                self.redis.delete(*keys)
+            elif name == "hset":
+                _, key, mapping = operation
+                self.redis.hset(key, mapping=mapping)
+            elif name == "decr":
+                _, key = operation
+                self.redis.decr(key)
+            elif name == "incr":
+                _, key = operation
+                self.redis.incr(key)
+        self.operations.clear()
+        return True
+
+
 class _FakeRedis:
     def __init__(self):
         self.values = {}
+        self.hashes = {}
 
     def get(self, key):
         return self.values.get(key)
@@ -31,6 +79,45 @@ class _FakeRedis:
             value = value.encode("utf-8")
         self.values[key] = value
         return True
+
+    def delete(self, *keys):
+        for key in keys:
+            self.values.pop(key, None)
+            self.hashes.pop(key, None)
+        return True
+
+    def hset(self, key, mapping=None, **kwargs):
+        bucket = self.hashes.setdefault(key, {})
+        updates = mapping or kwargs.get("mapping", {})
+        for field, value in updates.items():
+            if isinstance(field, str):
+                field = field.encode("utf-8")
+            if isinstance(value, int):
+                value = str(value).encode("utf-8")
+            elif isinstance(value, str):
+                value = value.encode("utf-8")
+            bucket[field] = value
+        return True
+
+    def hget(self, key, field):
+        if isinstance(field, str):
+            field = field.encode("utf-8")
+        return self.hashes.get(key, {}).get(field)
+
+    def incr(self, key):
+        current = int(self.get(key) or 0)
+        new_value = current + 1
+        self.set(key, new_value)
+        return new_value
+
+    def decr(self, key):
+        current = int(self.get(key) or 0)
+        new_value = current - 1
+        self.set(key, new_value)
+        return new_value
+
+    def pipeline(self):
+        return _FakePipeline(self)
 
 
 class TsProxyStalkerReconnectTests(TestCase):
@@ -104,9 +191,21 @@ class TsProxyStalkerReconnectTests(TestCase):
         ), patch(
             "core.utils.RedisClient.get_client",
             return_value=fake_redis,
+        ), patch.object(
+            Stream,
+            "get_stream",
+            return_value=(self.stream.id, self.account_profile.id, None),
+        ), patch.object(
+            Stream,
+            "get_stream_profile",
+            return_value=self.proxy_profile,
         ), patch(
-            "apps.proxy.ts_proxy.url_utils.resolve_live_stream_url",
-            return_value="http://resolved.example.com/live/world-news",
+            "apps.proxy.ts_proxy.url_utils._resolve_live_stream_context",
+            return_value={
+                "url": "http://resolved.example.com/live/world-news",
+                "user_agent": "DispatcharrTest/1.0",
+                "input_headers": None,
+            },
         ):
             stream_info = get_stream_info_for_switch(
                 self.stream.stream_hash,
@@ -361,3 +460,207 @@ class TsProxyStalkerReconnectTests(TestCase):
         manager._refresh_runtime_stream_url.assert_not_called()
         manager._close_socket.assert_not_called()
         manager._try_next_stream.assert_called_once()
+
+    def test_same_stream_recovery_prepares_stalker_retry_before_failover(self):
+        manager = StreamManager.__new__(StreamManager)
+        manager.channel_id = self.stream.stream_hash
+        manager.current_stream_id = self.stream.id
+        manager.url = "http://expired.example.com/live/world-news"
+        manager.user_agent = "DispatcharrTest/1.0"
+        manager.input_headers = {}
+        manager.transcode = False
+        manager.retry_count = 3
+        manager.same_stream_recovery_attempts = 0
+        manager.max_same_stream_recovery_attempts = 1
+        manager.buffering = True
+        manager.buffering_start_time = 10.0
+        manager.buffering_recovery_in_progress = True
+        manager.needs_reconnect = True
+        manager.needs_stream_switch = True
+        manager.url_switching = False
+        manager.connected = True
+        manager.buffer = MagicMock()
+        manager.buffer.redis_client = MagicMock()
+        manager._close_socket = MagicMock()
+        manager._wait_for_existing_processes_to_close = MagicMock(return_value=True)
+
+        with patch(
+            "apps.proxy.ts_proxy.stream_manager.time.time",
+            return_value=250.0,
+        ), patch(
+            "apps.proxy.ts_proxy.stream_manager.get_stream_info_for_switch",
+            return_value={
+                "url": "http://resolved.example.com/live/world-news-hd",
+                "user_agent": "DispatcharrTest/2.0",
+                "input_headers": {"Authorization": "Bearer TOKEN-NEW"},
+                "transcode": True,
+                "stream_profile": self.proxy_profile.id,
+                "stream_id": self.stream.id,
+                "m3u_profile_id": self.account_profile.id,
+            },
+        ):
+            recovered = manager._attempt_same_stream_recovery(
+                reason="max_retries_exceeded"
+            )
+
+        self.assertTrue(recovered)
+        self.assertEqual(manager.same_stream_recovery_attempts, 1)
+        self.assertEqual(manager.retry_count, 0)
+        self.assertEqual(
+            manager.url,
+            "http://resolved.example.com/live/world-news-hd",
+        )
+        self.assertEqual(manager.user_agent, "DispatcharrTest/2.0")
+        self.assertEqual(
+            manager.input_headers,
+            {"Authorization": "Bearer TOKEN-NEW"},
+        )
+        self.assertTrue(manager.transcode)
+        self.assertFalse(manager.connected)
+        self.assertFalse(manager.buffering)
+        self.assertIsNone(manager.buffering_start_time)
+        self.assertFalse(manager.buffering_recovery_in_progress)
+        self.assertFalse(manager.needs_reconnect)
+        self.assertFalse(manager.needs_stream_switch)
+        manager._close_socket.assert_called_once()
+        manager._wait_for_existing_processes_to_close.assert_called_once()
+
+    def test_run_uses_same_stream_recovery_before_health_failover_for_stalker(self):
+        manager = StreamManager.__new__(StreamManager)
+        manager.channel_id = self.stream.stream_hash
+        manager.worker_id = "worker-1"
+        manager.current_stream_id = self.stream.id
+        manager.url = "http://expired.example.com/live/world-news"
+        manager.user_agent = "DispatcharrTest/1.0"
+        manager.input_headers = {}
+        manager.transcode = False
+        manager.running = True
+        manager.connected = False
+        manager.retry_count = 0
+        manager.max_retries = 1
+        manager.same_stream_recovery_attempts = 0
+        manager.max_same_stream_recovery_attempts = 1
+        manager.needs_reconnect = False
+        manager.needs_stream_switch = True
+        manager.stop_requested = False
+        manager.url_switching = False
+        manager.url_switch_start_time = 0
+        manager.url_switch_timeout = 30
+        manager.stream_type = None
+        manager.transcode_process_active = False
+        manager._buffer_check_timers = []
+        manager.stopping = False
+        manager.socket = None
+        manager.transcode_process = None
+        manager.current_response = None
+        manager.current_session = None
+        manager.tried_stream_ids = set()
+        manager.buffer = MagicMock()
+        manager.buffer.redis_client = MagicMock()
+        manager.buffer.channel_id = self.stream.stream_hash
+        manager._close_all_connections = MagicMock()
+        manager._try_next_stream = MagicMock(return_value=True)
+
+        def _same_stream_recovery(**kwargs):
+            manager.running = False
+            return True
+
+        manager._attempt_same_stream_recovery = MagicMock(
+            side_effect=_same_stream_recovery
+        )
+
+        with patch(
+            "apps.proxy.ts_proxy.stream_manager.threading.Thread",
+            return_value=MagicMock(start=MagicMock()),
+        ), patch(
+            "apps.proxy.ts_proxy.stream_manager.ConfigHelper.max_stream_switches",
+            return_value=0,
+        ), patch(
+            "apps.proxy.ts_proxy.stream_manager.connection.close",
+        ):
+            manager.run()
+
+        manager._attempt_same_stream_recovery.assert_called_once_with(
+            reason="health_stream_switch"
+        )
+        manager._try_next_stream.assert_not_called()
+
+    def test_switch_stream_assignment_moves_canonical_keys_to_new_stream(self):
+        channel = Channel.objects.create(
+            channel_number=101,
+            name="World News",
+            stream_profile=self.proxy_profile,
+        )
+        alternate_stream = Stream.objects.create(
+            name="World News Backup",
+            url="http://portal.example.com/stalker_portal/server/load.php",
+            m3u_account=self.account,
+            stream_profile=self.proxy_profile,
+            stream_hash="runtime-refresh-stream-hash-backup",
+            custom_properties={
+                "portal_url": "http://portal.example.com/stalker_portal/server/load.php",
+                "cmd": "ffmpeg http://upstream.example.com/live/world-news-backup",
+                "provider_type": "stalker",
+            },
+        )
+        old_profile = M3UAccountProfile.objects.create(
+            m3u_account=self.account,
+            name="Legacy",
+            is_default=False,
+            is_active=True,
+            max_streams=2,
+            search_pattern=r"world-news",
+            replace_pattern="world-news",
+        )
+        new_profile = M3UAccountProfile.objects.create(
+            m3u_account=self.account,
+            name="Backup",
+            is_default=False,
+            is_active=True,
+            max_streams=2,
+            search_pattern=r"world-news",
+            replace_pattern="world-news-backup",
+        )
+
+        fake_redis = _FakeRedis()
+        fake_redis.set(f"channel_stream:{channel.id}", self.stream.id)
+        fake_redis.set(f"stream_profile:{self.stream.id}", old_profile.id)
+        fake_redis.set(f"profile_connections:{old_profile.id}", 1)
+
+        with patch(
+            "apps.channels.models.RedisClient.get_client",
+            return_value=fake_redis,
+        ):
+            switched = channel.switch_stream_assignment(
+                alternate_stream.id,
+                new_profile.id,
+            )
+
+        self.assertTrue(switched)
+        self.assertEqual(
+            fake_redis.get(f"channel_stream:{channel.id}"),
+            str(alternate_stream.id).encode("utf-8"),
+        )
+        self.assertIsNone(fake_redis.get(f"stream_profile:{self.stream.id}"))
+        self.assertEqual(
+            fake_redis.get(f"stream_profile:{alternate_stream.id}"),
+            str(new_profile.id).encode("utf-8"),
+        )
+        self.assertEqual(
+            fake_redis.get(f"profile_connections:{old_profile.id}"),
+            b"0",
+        )
+        self.assertEqual(
+            fake_redis.get(f"profile_connections:{new_profile.id}"),
+            b"1",
+        )
+
+        metadata_key = RedisKeys.channel_metadata(str(channel.uuid))
+        self.assertEqual(
+            fake_redis.hget(metadata_key, ChannelMetadataField.STREAM_ID),
+            str(alternate_stream.id).encode("utf-8"),
+        )
+        self.assertEqual(
+            fake_redis.hget(metadata_key, ChannelMetadataField.M3U_PROFILE),
+            str(new_profile.id).encode("utf-8"),
+        )
