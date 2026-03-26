@@ -11,6 +11,7 @@ from apps.proxy.ts_proxy.constants import ChannelMetadataField
 from apps.proxy.ts_proxy.redis_keys import RedisKeys
 from apps.proxy.ts_proxy.server import ProxyServer
 from apps.proxy.ts_proxy.services.channel_service import ChannelService
+from apps.proxy.ts_proxy.stream_buffer import StreamBuffer
 from apps.proxy.ts_proxy.stream_manager import StreamManager
 from apps.proxy.ts_proxy.url_utils import get_stream_info_for_switch
 from apps.proxy.ts_proxy.views import change_stream
@@ -460,6 +461,31 @@ class TsProxyStalkerReconnectTests(TestCase):
         manager._refresh_runtime_stream_url.assert_not_called()
         manager._close_socket.assert_not_called()
         manager._try_next_stream.assert_called_once()
+
+    def test_close_socket_resets_pending_buffer_without_rewinding_buffer_index(self):
+        manager = StreamManager.__new__(StreamManager)
+        manager.channel_id = "channel-1"
+        manager.buffer = StreamBuffer(channel_id="channel-1", redis_client=None)
+        manager.buffer.index = 42
+        manager.buffer._write_buffer = bytearray(b"pending-ts-data")
+        manager.buffer._partial_packet = bytearray(b"tail")
+        manager.current_response = None
+        manager.current_session = None
+        manager.http_reader = None
+        manager.socket = MagicMock()
+        manager.transcode_process = None
+        manager.transcode_process_active = False
+        manager.stderr_reader_thread = None
+        manager._buffer_check_timers = []
+        manager.connected = True
+
+        manager._close_socket()
+
+        self.assertEqual(manager.buffer.index, 42)
+        self.assertEqual(manager.buffer._write_buffer, bytearray())
+        self.assertEqual(manager.buffer._partial_packet, bytearray())
+        self.assertIsNone(manager.socket)
+        self.assertFalse(manager.connected)
 
     def test_switch_stream_assignment_moves_canonical_keys_to_new_stream(self):
         channel = Channel.objects.create(
