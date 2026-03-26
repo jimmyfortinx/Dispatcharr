@@ -1050,6 +1050,23 @@ class StreamManager:
             )
         )
 
+    def _reset_pending_buffer(self, reason="transport restart"):
+        """Drop unpublished TS bytes without touching the shared Redis buffer."""
+        reset_buffer = getattr(getattr(self, "buffer", None), "reset_buffer_position", None)
+        if not callable(reset_buffer):
+            return
+
+        try:
+            reset_buffer()
+            logger.debug(
+                f"Reset pending TS buffer for channel {self.channel_id} after {reason}"
+            )
+        except Exception as e:
+            logger.warning(
+                f"Failed to reset pending TS buffer for channel {self.channel_id} "
+                f"after {reason}: {e}"
+            )
+
     def _close_all_connections(self):
         """Close all connection resources"""
         if self.socket or self.transcode_process:
@@ -1458,6 +1475,16 @@ class StreamManager:
 
     def _close_socket(self):
         """Close socket and transcode resources as needed"""
+        had_transport = any(
+            (
+                bool(getattr(self, "current_response", None)),
+                bool(getattr(self, "current_session", None)),
+                bool(getattr(self, "http_reader", None)),
+                bool(getattr(self, "socket", None)),
+                bool(getattr(self, "transcode_process", None)),
+            )
+        )
+
         # First try to use _close_connection for HTTP resources
         if self.current_response or self.current_session:
             self._close_connection()
@@ -1539,6 +1566,10 @@ class StreamManager:
                     logger.debug(f"Cleared transcode active flag for channel {self.channel_id}")
                 except Exception as e:
                     logger.debug(f"Error clearing transcode flag for channel {self.channel_id}: {e}")
+
+        if had_transport:
+            self._reset_pending_buffer("transport close")
+
         self.socket = None
         self.connected = False
         # Cancel any remaining buffer check timers
