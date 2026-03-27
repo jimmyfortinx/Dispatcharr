@@ -1,6 +1,6 @@
 from django.test import TestCase
 
-from core.models import CoreSettings, DVR_SETTINGS_KEY, EPG_SETTINGS_KEY
+from core.models import CoreSettings, DVR_SETTINGS_KEY, EPG_SETTINGS_KEY, PROXY_SETTINGS_KEY
 
 
 class GetDvrSeriesRulesTest(TestCase):
@@ -148,3 +148,21 @@ class EpgIgnoreListsTest(TestCase):
         ]:
             self._set_epg_field_raw(field, "not a list")
             self.assertEqual(getter(), [])
+
+
+class ProxySettingsDefaultsTest(TestCase):
+    """Verify proxy settings expose merged defaults for new resilience knobs."""
+
+    def test_missing_proxy_setting_keys_are_backfilled_in_getter(self):
+        CoreSettings.objects.create(
+            key=PROXY_SETTINGS_KEY,
+            name="Proxy Settings",
+            value={"new_client_behind_seconds": 15},
+        )
+
+        result = CoreSettings.get_proxy_settings()
+
+        self.assertEqual(result["new_client_behind_seconds"], 15)
+        self.assertEqual(result["connection_ready_chunks"], 16)
+        self.assertEqual(result["max_reconnect_attempts"], 5)
+        self.assertEqual(result["min_stable_time_before_reconnect"], 10)

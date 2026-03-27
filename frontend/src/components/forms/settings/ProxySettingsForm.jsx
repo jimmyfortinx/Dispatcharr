@@ -25,10 +25,21 @@ const ProxySettingsOptions = React.memo(({ proxySettingsForm }) => {
       'channel_shutdown_delay',
       'channel_init_grace_period',
       'new_client_behind_seconds',
+      'connection_ready_chunks',
+      'max_reconnect_attempts',
+      'min_stable_time_before_reconnect',
     ].includes(key);
   };
   const isFloatField = (key) => {
     return key === 'buffering_speed';
+  };
+  const getNumericFieldMin = (key) => {
+    return [
+      'connection_ready_chunks',
+      'max_reconnect_attempts',
+    ].includes(key)
+      ? 1
+      : 0;
   };
   const getNumericFieldMax = (key) => {
     return key === 'buffering_timeout'
@@ -39,6 +50,12 @@ const ProxySettingsOptions = React.memo(({ proxySettingsForm }) => {
           ? 300
           : key === 'new_client_behind_seconds'
             ? 120
+            : key === 'connection_ready_chunks'
+              ? 64
+              : key === 'max_reconnect_attempts'
+                ? 20
+                : key === 'min_stable_time_before_reconnect'
+                  ? 300
             : 60;
   };
   return (
@@ -51,7 +68,7 @@ const ProxySettingsOptions = React.memo(({ proxySettingsForm }) => {
               label={config.label}
               {...proxySettingsForm.getInputProps(key)}
               description={config.description || null}
-              min={0}
+              min={getNumericFieldMin(key)}
               max={getNumericFieldMax(key)}
             />
           );

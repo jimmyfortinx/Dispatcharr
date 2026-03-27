@@ -14,6 +14,9 @@ export const getProxySettingDefaults = () => {
     redis_chunk_ttl: 60,
     channel_shutdown_delay: 0,
     channel_init_grace_period: 5,
-    new_client_behind_seconds: 5,
+    new_client_behind_seconds: 15,
+    connection_ready_chunks: 16,
+    max_reconnect_attempts: 5,
+    min_stable_time_before_reconnect: 10,
   };
 };

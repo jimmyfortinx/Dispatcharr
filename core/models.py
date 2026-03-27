@@ -334,14 +334,21 @@ class CoreSettings(models.Model):
     @classmethod
     def get_proxy_settings(cls):
         """Get proxy settings."""
-        return cls._get_group(PROXY_SETTINGS_KEY, {
+        defaults = {
             "buffering_timeout": 15,
             "buffering_speed": 0.95,
             "redis_chunk_ttl": 60,
             "channel_shutdown_delay": 5,
             "channel_init_grace_period": 5,
-            "new_client_behind_seconds": 5,
-        })
+            "new_client_behind_seconds": 15,
+            "connection_ready_chunks": 16,
+            "max_reconnect_attempts": 5,
+            "min_stable_time_before_reconnect": 10,
+        }
+        settings = cls._get_group(PROXY_SETTINGS_KEY, defaults)
+        if not isinstance(settings, dict):
+            return defaults
+        return {**defaults, **settings}
 
     # System Settings
     @classmethod
