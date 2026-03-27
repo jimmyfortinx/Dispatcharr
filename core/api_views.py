@@ -170,21 +170,30 @@ class ProxySettingsViewSet(viewsets.ViewSet):
     """
     serializer_class = ProxySettingsSerializer
 
+    @staticmethod
+    def _default_settings():
+        return {
+            "buffering_timeout": 15,
+            "buffering_speed": 0.95,
+            "redis_chunk_ttl": 60,
+            "channel_shutdown_delay": 5,
+            "channel_init_grace_period": 5,
+            "new_client_behind_seconds": 15,
+            "connection_ready_chunks": 16,
+            "max_reconnect_attempts": 5,
+            "min_stable_time_before_reconnect": 10,
+        }
+
     def _get_or_create_settings(self):
         """Get or create the proxy settings CoreSettings entry"""
+        defaults = self._default_settings()
         try:
             settings_obj = CoreSettings.objects.get(key=PROXY_SETTINGS_KEY)
-            settings_data = settings_obj.value
+            settings_data = settings_obj.value if isinstance(settings_obj.value, dict) else {}
+            settings_data = {**defaults, **settings_data}
         except CoreSettings.DoesNotExist:
             # Create default settings
-            settings_data = {
-                "buffering_timeout": 15,
-                "buffering_speed": 0.95,
-                "redis_chunk_ttl": 60,
-                "channel_shutdown_delay": 5,
-                "channel_init_grace_period": 5,
-                "new_client_behind_seconds": 5,
-            }
+            settings_data = defaults
             settings_obj, created = CoreSettings.objects.get_or_create(
                 key=PROXY_SETTINGS_KEY,
                 defaults={

@@ -43,7 +43,10 @@ class BaseConfig:
                 "redis_chunk_ttl": 60,
                 "channel_shutdown_delay": 5,
                 "channel_init_grace_period": 5,
-                "new_client_behind_seconds": 5,
+                "new_client_behind_seconds": 15,
+                "connection_ready_chunks": 16,
+                "max_reconnect_attempts": 5,
+                "min_stable_time_before_reconnect": 10,
             }
 
         finally:
@@ -80,10 +83,10 @@ class TSConfig(BaseConfig):
     """Configuration settings for TS proxy"""
 
     # Buffer settings
-    CONNECTION_READY_CHUNKS = 1  # Minimum buffered chunks required before the first client starts
+    CONNECTION_READY_CHUNKS = 16  # Minimum buffered chunks required before the first client starts
     INITIAL_BEHIND_CHUNKS = 4  # How many chunks behind to start a client (4 chunks = ~1MB)
     CHUNK_BATCH_SIZE = 5       # How many chunks to fetch in one batch
-    NEW_CLIENT_BEHIND_SECONDS = 5  # Start new clients this many seconds behind live (0 = start at live)
+    NEW_CLIENT_BEHIND_SECONDS = 15  # Start new clients this many seconds behind live (0 = start at live)
     KEEPALIVE_INTERVAL = 0.5   # Seconds between keepalive packets when at buffer head
     # Chunk read timeout
     CHUNK_TIMEOUT = 5        # Seconds to wait for each chunk read
@@ -105,8 +108,8 @@ class TSConfig(BaseConfig):
 
     # Stream health and recovery settings
     MAX_HEALTH_RECOVERY_ATTEMPTS = 2     # Maximum times to attempt recovery for a single stream
-    MAX_RECONNECT_ATTEMPTS = 3           # Maximum reconnects to try before switching streams
-    MIN_STABLE_TIME_BEFORE_RECONNECT = 30  # Minimum seconds a stream must be stable to try reconnect
+    MAX_RECONNECT_ATTEMPTS = 5           # Maximum reconnects to try before switching streams
+    MIN_STABLE_TIME_BEFORE_RECONNECT = 10  # Minimum seconds a stream must be stable to reset reconnect budget
     FAILOVER_GRACE_PERIOD = 20           # Extra time (seconds) to allow for stream switching before disconnecting clients
     URL_SWITCH_TIMEOUT = 20   # Max time allowed for a stream switch operation
     MAX_KEEPALIVE_DURATION = 300         # Keepalive packets prevent _is_timeout() from firing, so without this a permanently failed stream holds clients open indefinitely.
@@ -144,6 +147,24 @@ class TSConfig(BaseConfig):
         settings = cls.get_proxy_settings()
         return settings.get("channel_init_grace_period", 5)
 
+    @classmethod
+    def get_connection_ready_chunks(cls):
+        """Get how many chunks to buffer before clients start."""
+        settings = cls.get_proxy_settings()
+        return settings.get("connection_ready_chunks", 16)
+
+    @classmethod
+    def get_max_reconnect_attempts(cls):
+        """Get how many reconnect attempts to allow before failover."""
+        settings = cls.get_proxy_settings()
+        return settings.get("max_reconnect_attempts", 5)
+
+    @classmethod
+    def get_min_stable_time_before_reconnect(cls):
+        """Get stable time needed to reset reconnect budget."""
+        settings = cls.get_proxy_settings()
+        return settings.get("min_stable_time_before_reconnect", 10)
+
     # Dynamic property access for these settings
     @property
     def CHANNEL_SHUTDOWN_DELAY(self):
@@ -160,3 +181,15 @@ class TSConfig(BaseConfig):
     @property
     def CHANNEL_INIT_GRACE_PERIOD(self):
         return self.get_channel_init_grace_period()
+
+    @property
+    def CONNECTION_READY_CHUNKS(self):
+        return self.get_connection_ready_chunks()
+
+    @property
+    def MAX_RECONNECT_ATTEMPTS(self):
+        return self.get_max_reconnect_attempts()
+
+    @property
+    def MIN_STABLE_TIME_BEFORE_RECONNECT(self):
+        return self.get_min_stable_time_before_reconnect()

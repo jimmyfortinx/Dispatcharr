@@ -60,6 +60,21 @@ export const PROXY_SETTINGS_OPTIONS = {
     description:
       'Seconds of received buffer to start behind live when a new client connects (0 = start at live). Note: this is chunk receive time, not video duration.',
   },
+  connection_ready_chunks: {
+    label: 'Startup Buffer Chunks',
+    description:
+      'Minimum buffered chunks required before Dispatcharr marks the channel ready for clients.',
+  },
+  max_reconnect_attempts: {
+    label: 'Max Reconnect Attempts',
+    description:
+      'How many reconnect attempts to the current source Dispatcharr should try before failing over.',
+  },
+  min_stable_time_before_reconnect: {
+    label: 'Reconnect Reset Time',
+    description:
+      'Seconds a source must stay stable before Dispatcharr resets the reconnect budget for that same source.',
+  },
 };
 
 export const M3U_FILTER_TYPES = [

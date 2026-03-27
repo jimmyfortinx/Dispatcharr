@@ -44,7 +44,7 @@ class ConfigHelper:
     @staticmethod
     def connection_ready_chunks():
         """Get minimum buffered chunks required before the first client can start."""
-        return ConfigHelper.get('CONNECTION_READY_CHUNKS', 1)
+        return Config.get_connection_ready_chunks()
 
     @staticmethod
     def new_client_behind_seconds():
@@ -53,7 +53,7 @@ class ConfigHelper:
         Loaded from DB proxy_settings so users can change it at runtime."""
         from apps.proxy.config import TSConfig
         settings = TSConfig.get_proxy_settings()
-        return settings.get('new_client_behind_seconds', 5)
+        return settings.get('new_client_behind_seconds', 15)
 
     @staticmethod
     def keepalive_interval():
@@ -77,8 +77,18 @@ class ConfigHelper:
 
     @staticmethod
     def max_retries():
-        """Get maximum retry attempts"""
-        return ConfigHelper.get('MAX_RETRIES', 3)
+        """Backward-compatible alias for max reconnect attempts."""
+        return Config.get_max_reconnect_attempts()
+
+    @staticmethod
+    def max_reconnect_attempts():
+        """Get maximum reconnect attempts before failover."""
+        return Config.get_max_reconnect_attempts()
+
+    @staticmethod
+    def min_stable_time_before_reconnect():
+        """Get stable time required to reset reconnect budget."""
+        return Config.get_min_stable_time_before_reconnect()
 
     def max_stream_switches():
         """Get maximum number of stream switch attempts"""

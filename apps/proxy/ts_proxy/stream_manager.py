@@ -38,7 +38,7 @@ class StreamManager:
         self.running = True
         self.connected = False
         self.retry_count = 0
-        self.max_retries = ConfigHelper.max_retries()
+        self.max_retries = ConfigHelper.max_reconnect_attempts()
         self.current_response = None
         self.current_session = None
         self.url_switching = False
@@ -294,7 +294,7 @@ class StreamManager:
                             # Reset stream switch attempts if the connection lasted longer than threshold
                             # This indicates we had a stable connection for a while before failing
                             connection_duration = time.time() - connection_start_time
-                            stable_connection_threshold = 30  # 30 seconds threshold
+                            stable_connection_threshold = ConfigHelper.min_stable_time_before_reconnect()
 
                             if self.needs_stream_switch:
                                 logger.info(f"Stream needs to switch after {connection_duration:.1f} seconds for channel: {self.channel_id}")
@@ -302,6 +302,7 @@ class StreamManager:
                             if connection_duration > stable_connection_threshold:
                                 logger.info(f"Stream was stable for {connection_duration:.1f} seconds, resetting switch attempts counter for channel: {self.channel_id}")
                                 stream_switch_attempts = 0
+                                self.retry_count = 0
                                 self.buffering_recovery_attempts = 0
                                 self.buffering_recovery_in_progress = False
 
@@ -1331,7 +1332,8 @@ class StreamManager:
                         connection_start_time = getattr(self, 'connection_start_time', 0)
                         stable_time = self.last_data_time - connection_start_time if connection_start_time > 0 else 0
 
-                        if stable_time >= 30:  # Stream was stable, try reconnect first
+                        stable_threshold = ConfigHelper.min_stable_time_before_reconnect()
+                        if stable_time >= stable_threshold:  # Stream was stable, try reconnect first
                             if not self.needs_reconnect:
                                 logger.info(f"Setting reconnect flag for stable stream (stable for {stable_time:.1f}s) for channel {self.channel_id}")
                                 self.needs_reconnect = True
