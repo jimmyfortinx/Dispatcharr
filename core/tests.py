@@ -154,10 +154,12 @@ class ProxySettingsDefaultsTest(TestCase):
     """Verify proxy settings expose merged defaults for new resilience knobs."""
 
     def test_missing_proxy_setting_keys_are_backfilled_in_getter(self):
-        CoreSettings.objects.create(
+        CoreSettings.objects.update_or_create(
             key=PROXY_SETTINGS_KEY,
-            name="Proxy Settings",
-            value={"new_client_behind_seconds": 15},
+            defaults={
+                "name": "Proxy Settings",
+                "value": {"new_client_behind_seconds": 15},
+            },
         )
 
         result = CoreSettings.get_proxy_settings()
