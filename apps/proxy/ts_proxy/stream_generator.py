@@ -88,7 +88,7 @@ class StreamGenerator:
 
             # First handle initialization if needed
             if self.channel_initializing:
-                channel_ready = self._wait_for_initialization()
+                channel_ready = yield from self._wait_for_initialization()
                 if not channel_ready:
                     # If initialization failed or timed out, we've already sent error packets
                     return
