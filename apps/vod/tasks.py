@@ -250,6 +250,7 @@ def refresh_movies(client, account, categories_by_provider, relations, scan_star
             client,
             account,
             categories_by_provider,
+            relations,
             content_type="movie",
         ):
             total_chunks += 1
@@ -346,6 +347,7 @@ def refresh_series(client, account, categories_by_provider, relations, scan_star
             client,
             account,
             categories_by_provider,
+            relations,
             content_type="series",
         ):
             total_chunks += 1
@@ -690,12 +692,21 @@ def build_stalker_page_signature(items, relation_id_extractor=extract_stalker_re
     )
 
 
-def get_stalker_category_requests(categories_by_provider):
-    provider_category_ids = [
-        str(category_id)
-        for category_id in categories_by_provider.keys()
-        if category_id != "__uncategorized__"
-    ]
+def get_stalker_category_requests(categories_by_provider, relations=None):
+    provider_category_ids = []
+    has_provider_categories = False
+
+    for category_id, category in categories_by_provider.items():
+        if category_id == "__uncategorized__":
+            continue
+
+        has_provider_categories = True
+        if relations is not None and category is not None:
+            relation = relations.get(category.id)
+            if relation is not None and not relation.enabled:
+                continue
+
+        provider_category_ids.append(str(category_id))
 
     concrete_category_ids = [
         category_id for category_id in provider_category_ids if category_id != "*"
@@ -712,15 +723,20 @@ def get_stalker_category_requests(categories_by_provider):
         return ["*"]
 
     if not provider_category_ids:
+        if has_provider_categories:
+            return []
         return [None]
 
     return provider_category_ids
 
 
-def iter_stalker_catalog_batches(client, account, categories_by_provider, content_type):
+def iter_stalker_catalog_batches(client, account, categories_by_provider, relations, content_type):
     portal_url = get_stalker_vod_portal_url(client, account)
     fetch_page = client.get_vod_movies if content_type == "movie" else client.get_vod_series
-    provider_category_ids = get_stalker_category_requests(categories_by_provider)
+    provider_category_ids = get_stalker_category_requests(
+        categories_by_provider,
+        relations=relations,
+    )
     seen_relation_ids = set()
 
     logger.info(
@@ -728,6 +744,14 @@ def iter_stalker_catalog_batches(client, account, categories_by_provider, conten
         content_type,
         len(provider_category_ids),
     )
+
+    if not provider_category_ids:
+        logger.info(
+            "Skipping Stalker %s fetch because no VOD categories are enabled for account %s",
+            content_type,
+            account.id,
+        )
+        return
 
     for requested_category_id in provider_category_ids:
         previous_signature = None
