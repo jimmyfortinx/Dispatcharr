@@ -153,6 +153,90 @@ class StalkerPhase12MovieImportTests(TestCase):
 
         self.assertEqual(requests, ["10"])
 
+    def test_stalker_category_requests_only_include_enabled_categories(self):
+        disabled_category = VODCategory.objects.create(
+            name="Drama",
+            category_type="movie",
+        )
+        disabled_relation = M3UVODCategoryRelation.objects.create(
+            m3u_account=self.account,
+            category=disabled_category,
+            enabled=False,
+            custom_properties={
+                "stalker_category_id": "11",
+                "stalker_category_type": "movie",
+            },
+        )
+
+        requests = get_stalker_category_requests(
+            {
+                "10": self.category,
+                "11": disabled_category,
+            },
+            relations={
+                self.category.id: self.category_relation,
+                disabled_category.id: disabled_relation,
+            },
+        )
+
+        self.assertEqual(requests, ["10"])
+
+    def test_refresh_movies_only_requests_enabled_categories(self):
+        disabled_category = VODCategory.objects.create(
+            name="Drama",
+            category_type="movie",
+        )
+        disabled_relation = M3UVODCategoryRelation.objects.create(
+            m3u_account=self.account,
+            category=disabled_category,
+            enabled=False,
+            custom_properties={
+                "stalker_category_id": "11",
+                "stalker_category_type": "movie",
+            },
+        )
+        client = Mock()
+        client.vod_portal_url = "http://portal.example.com/stalker_portal/server/load.php"
+        client.get_vod_movies.side_effect = [
+            [],
+        ]
+
+        refresh_movies(
+            client,
+            self.account,
+            {
+                "10": self.category,
+                "11": disabled_category,
+            },
+            {
+                self.category.id: self.category_relation,
+                disabled_category.id: disabled_relation,
+            },
+            scan_start_time=self.scan_start_time,
+        )
+
+        self.assertEqual(client.get_vod_movies.call_count, 1)
+        self.assertEqual(
+            client.get_vod_movies.call_args_list[0].kwargs,
+            {"category_id": "10", "page": 1},
+        )
+
+    def test_refresh_movies_skips_provider_requests_when_no_categories_enabled(self):
+        self.category_relation.enabled = False
+        self.category_relation.save(update_fields=["enabled"])
+        client = Mock()
+        client.vod_portal_url = "http://portal.example.com/stalker_portal/server/load.php"
+
+        refresh_movies(
+            client,
+            self.account,
+            {"10": self.category},
+            {self.category.id: self.category_relation},
+            scan_start_time=self.scan_start_time,
+        )
+
+        client.get_vod_movies.assert_not_called()
+
     def test_process_movie_batch_keeps_stalker_relations_for_same_movie_across_categories(self):
         second_category = VODCategory.objects.create(
             name="Drama",
