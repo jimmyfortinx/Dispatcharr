@@ -33,7 +33,8 @@ const RegexFormAndView = ({ profile = null, m3u, isOpen, onClose }) => {
   const [sampleInput, setSampleInput] = useState('');
   const isDefaultProfile = profile?.is_default;
 
-  const isXC = m3u?.account_type === 'XC';
+  const hasProviderManagedExpiration =
+    m3u?.account_type === 'XC' || m3u?.account_type === 'STALKER';
 
   const defaultValues = useMemo(
     () => ({
@@ -79,8 +80,8 @@ const RegexFormAndView = ({ profile = null, m3u, isOpen, onClose }) => {
 
     // Convert exp_date for submission
     let expDateValue = values.exp_date;
-    if (isXC) {
-      // XC accounts have exp_date auto-managed; don't send it
+    if (hasProviderManagedExpiration) {
+      // Provider-managed accounts have exp_date auto-managed; don't send it
       expDateValue = undefined;
     } else if (expDateValue instanceof Date) {
       expDateValue = expDateValue.toISOString();
@@ -114,7 +115,7 @@ const RegexFormAndView = ({ profile = null, m3u, isOpen, onClose }) => {
       };
     }
 
-    // Add exp_date for non-XC accounts
+    // Add exp_date for accounts that manage expiration locally
     if (expDateValue !== undefined) {
       submitValues.exp_date = expDateValue;
     }
@@ -277,7 +278,7 @@ const RegexFormAndView = ({ profile = null, m3u, isOpen, onClose }) => {
           </>
         )}
 
-        {!isXC && (
+        {!hasProviderManagedExpiration && (
           <DateTimePicker
             label="Expiration Date"
             description="Set an expiration date to receive a 7-day warning notification"

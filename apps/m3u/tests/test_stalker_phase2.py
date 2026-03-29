@@ -4,7 +4,7 @@ from django.test import TestCase
 
 from apps.channels.models import ChannelGroupM3UAccount
 from apps.m3u.models import M3UAccount
-from apps.m3u.stalker import StalkerGenreDiscoveryResult
+from apps.m3u.stalker import StalkerAccountInfoResult, StalkerGenreDiscoveryResult
 from apps.m3u.tasks import refresh_m3u_groups, refresh_single_m3u_account
 
 
@@ -26,10 +26,12 @@ class StalkerPhase2GroupDiscoveryTests(TestCase):
     @patch("apps.m3u.tasks.release_task_lock")
     @patch("apps.m3u.tasks.TaskLockRenewer")
     @patch("apps.m3u.tasks.acquire_task_lock", return_value=True)
+    @patch("apps.m3u.tasks.StalkerClient.discover_account_info")
     @patch("apps.m3u.tasks.StalkerClient.discover_live_genres")
     def test_refresh_groups_persists_stalker_categories(
         self,
         mock_discover,
+        mock_discover_account_info,
         _mock_lock,
         mock_renewer_cls,
         _mock_release,
@@ -43,6 +45,21 @@ class StalkerPhase2GroupDiscoveryTests(TestCase):
                 {"id": "10", "title": "News"},
                 {"id": 11, "title": "Sports"},
             ],
+            token="TOKEN-123",
+            used_authentication=True,
+        )
+        mock_discover_account_info.return_value = StalkerAccountInfoResult(
+            normalized_portal_url="http://portal.example.com/stalker_portal/server/load.php",
+            profile_name="Demo",
+            account_info={
+                "last_refresh": "2026-03-28T12:00:00Z",
+                "auth_timestamp": 1711627200,
+                "user_info": {"status": "Active", "exp_date": "1893456000"},
+                "server_info": {
+                    "url": "http://portal.example.com/stalker_portal/server/load.php",
+                    "timezone": "America/Toronto",
+                },
+            },
             token="TOKEN-123",
             used_authentication=True,
         )
@@ -79,10 +96,12 @@ class StalkerPhase2GroupDiscoveryTests(TestCase):
     @patch("apps.m3u.tasks.release_task_lock")
     @patch("apps.m3u.tasks.TaskLockRenewer")
     @patch("apps.m3u.tasks.acquire_task_lock", return_value=True)
+    @patch("apps.m3u.tasks.StalkerClient.discover_account_info")
     @patch("apps.m3u.tasks.StalkerClient.discover_live_genres")
     def test_refresh_groups_preserves_existing_relation_metadata(
         self,
         mock_discover,
+        mock_discover_account_info,
         _mock_lock,
         _mock_renewer_cls,
         _mock_release,
@@ -92,6 +111,21 @@ class StalkerPhase2GroupDiscoveryTests(TestCase):
             normalized_portal_url="http://portal.example.com/stalker_portal/server/load.php",
             profile_name="Demo",
             genres=[{"id": "10", "title": "News"}],
+            token="TOKEN-123",
+            used_authentication=True,
+        )
+        mock_discover_account_info.return_value = StalkerAccountInfoResult(
+            normalized_portal_url="http://portal.example.com/stalker_portal/server/load.php",
+            profile_name="Demo",
+            account_info={
+                "last_refresh": "2026-03-28T12:00:00Z",
+                "auth_timestamp": 1711627200,
+                "user_info": {"status": "Active", "exp_date": "1893456000"},
+                "server_info": {
+                    "url": "http://portal.example.com/stalker_portal/server/load.php",
+                    "timezone": "America/Toronto",
+                },
+            },
             token="TOKEN-123",
             used_authentication=True,
         )
@@ -110,6 +144,21 @@ class StalkerPhase2GroupDiscoveryTests(TestCase):
             normalized_portal_url="http://portal.example.com/stalker_portal/server/load.php",
             profile_name="Demo",
             genres=[{"id": "15", "title": "News"}],
+            token="TOKEN-456",
+            used_authentication=True,
+        )
+        mock_discover_account_info.return_value = StalkerAccountInfoResult(
+            normalized_portal_url="http://portal.example.com/stalker_portal/server/load.php",
+            profile_name="Demo",
+            account_info={
+                "last_refresh": "2026-03-28T12:05:00Z",
+                "auth_timestamp": 1711627500,
+                "user_info": {"status": "Active", "exp_date": "1893456000"},
+                "server_info": {
+                    "url": "http://portal.example.com/stalker_portal/server/load.php",
+                    "timezone": "America/Toronto",
+                },
+            },
             token="TOKEN-456",
             used_authentication=True,
         )

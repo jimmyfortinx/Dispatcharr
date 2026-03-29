@@ -142,6 +142,27 @@ const M3UProfiles = ({ playlist = null, isOpen, onClose }) => {
     setAccountInfoOpen(false);
   };
 
+  const parseProviderDate = (value) => {
+    if (!value && value !== 0) return null;
+
+    if (typeof value === 'string' && value.includes('T')) {
+      const parsed = new Date(value);
+      return Number.isNaN(parsed.getTime()) ? null : parsed;
+    }
+
+    const numericValue =
+      typeof value === 'number' ? value : Number.parseFloat(value);
+    if (Number.isFinite(numericValue)) {
+      const parsed = new Date(
+        numericValue > 1_000_000_000_000 ? numericValue : numericValue * 1000
+      );
+      return Number.isNaN(parsed.getTime()) ? null : parsed;
+    }
+
+    const fallback = new Date(value);
+    return Number.isNaN(fallback.getTime()) ? null : fallback;
+  };
+
   // Helper function to get account status from profile
   const getAccountStatus = (profile) => {
     if (!profile.custom_properties?.user_info) return null;
@@ -151,38 +172,28 @@ const M3UProfiles = ({ playlist = null, isOpen, onClose }) => {
   // Helper function to check if account is expired
   const isAccountExpired = (profile) => {
     if (!profile.custom_properties?.user_info?.exp_date) return false;
-    try {
-      const expDate = new Date(
-        parseInt(profile.custom_properties.user_info.exp_date) * 1000
-      );
-      return expDate < new Date();
-    } catch {
-      return false;
-    }
+    const expDate = parseProviderDate(profile.custom_properties.user_info.exp_date);
+    return expDate ? expDate < new Date() : false;
   };
 
   // Helper function to get account expiration info
   const getExpirationInfo = (profile) => {
     if (!profile.custom_properties?.user_info?.exp_date) return null;
-    try {
-      const expDate = new Date(
-        parseInt(profile.custom_properties.user_info.exp_date) * 1000
-      );
-      const now = new Date();
-      const diffMs = expDate - now;
+    const expDate = parseProviderDate(profile.custom_properties.user_info.exp_date);
+    if (!expDate) return null;
 
-      if (diffMs <= 0) return { text: 'Expired', color: 'red' };
+    const now = new Date();
+    const diffMs = expDate - now;
 
-      const days = Math.floor(diffMs / (1000 * 60 * 60 * 24));
-      if (days > 30) return { text: `${days} days`, color: 'green' };
-      if (days > 7) return { text: `${days} days`, color: 'yellow' };
-      if (days > 0) return { text: `${days} days`, color: 'orange' };
+    if (diffMs <= 0) return { text: 'Expired', color: 'red' };
 
-      const hours = Math.floor(diffMs / (1000 * 60 * 60));
-      return { text: `${hours}h`, color: 'red' };
-    } catch {
-      return null;
-    }
+    const days = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+    if (days > 30) return { text: `${days} days`, color: 'green' };
+    if (days > 7) return { text: `${days} days`, color: 'yellow' };
+    if (days > 0) return { text: `${days} days`, color: 'orange' };
+
+    const hours = Math.floor(diffMs / (1000 * 60 * 60));
+    return { text: `${hours}h`, color: 'red' };
   };
 
   // Don't render if modal is not open, or if playlist data is invalid
@@ -236,7 +247,8 @@ const M3UProfiles = ({ playlist = null, isOpen, onClose }) => {
                           </Text>
                         )}
                       </Stack>
-                      {playlist?.account_type === 'XC' &&
+                      {(playlist?.account_type === 'XC' ||
+                        playlist?.account_type === 'STALKER') &&
                         item.custom_properties && (
                           <Group spacing="xs">
                             {/* Account status badge */}

@@ -9,7 +9,6 @@ import {
   Stack,
   Divider,
   Alert,
-  Loader,
   Center,
   ActionIcon,
   Tooltip,
@@ -97,7 +96,7 @@ const AccountInfoModal = ({ isOpen, onClose, profile, onRefresh }) => {
             <Text c="dimmed">No account information available</Text>
             <Text size="sm" c="dimmed" ta="center">
               Account information will be available after the next refresh for
-              XtreamCodes accounts.
+              XtreamCodes and Stalker accounts.
             </Text>
           </Stack>
         </Center>
@@ -108,52 +107,63 @@ const AccountInfoModal = ({ isOpen, onClose, profile, onRefresh }) => {
   const { user_info, server_info, last_refresh } =
     currentProfile.custom_properties || {};
 
+  const parseProviderDate = (value) => {
+    if (!value && value !== 0) return null;
+
+    if (typeof value === 'string' && value.includes('T')) {
+      const parsed = new Date(value);
+      return Number.isNaN(parsed.getTime()) ? null : parsed;
+    }
+
+    const numericValue =
+      typeof value === 'number' ? value : Number.parseFloat(value);
+    if (Number.isFinite(numericValue)) {
+      const parsed = new Date(
+        numericValue > 1_000_000_000_000 ? numericValue : numericValue * 1000
+      );
+      return Number.isNaN(parsed.getTime()) ? null : parsed;
+    }
+
+    const fallback = new Date(value);
+    return Number.isNaN(fallback.getTime()) ? null : fallback;
+  };
+
   // Helper function to format timestamps
   const formatTimestamp = (timestamp) => {
     if (!timestamp) return 'Unknown';
-    try {
-      const date =
-        typeof timestamp === 'string' && timestamp.includes('T')
-          ? new Date(timestamp) // This should handle ISO format properly
-          : new Date(parseInt(timestamp) * 1000);
+    const date = parseProviderDate(timestamp);
+    if (!date) return 'Invalid date';
 
-      // Convert to user's local time and display with timezone
-      return date.toLocaleString(undefined, {
-        year: 'numeric',
-        month: 'short',
-        day: 'numeric',
-        hour: '2-digit',
-        minute: '2-digit',
-        timeZoneName: 'short',
-      });
-    } catch {
-      return 'Invalid date';
-    }
+    return date.toLocaleString(undefined, {
+      year: 'numeric',
+      month: 'short',
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+      timeZoneName: 'short',
+    });
   };
 
   // Helper function to get time remaining
   const getTimeRemaining = (expTimestamp) => {
     if (!expTimestamp) return null;
-    try {
-      const expDate = new Date(parseInt(expTimestamp) * 1000);
-      const now = new Date();
-      const diffMs = expDate - now;
+    const expDate = parseProviderDate(expTimestamp);
+    if (!expDate) return 'Unknown';
 
-      if (diffMs <= 0) return 'Expired';
+    const now = new Date();
+    const diffMs = expDate - now;
 
-      const days = Math.floor(diffMs / (1000 * 60 * 60 * 24));
-      const hours = Math.floor(
-        (diffMs % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60)
-      );
+    if (diffMs <= 0) return 'Expired';
 
-      if (days > 0) {
-        return `${days} day${days !== 1 ? 's' : ''} ${hours} hour${hours !== 1 ? 's' : ''}`;
-      } else {
-        return `${hours} hour${hours !== 1 ? 's' : ''}`;
-      }
-    } catch {
-      return 'Unknown';
+    const days = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+    const hours = Math.floor(
+      (diffMs % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60)
+    );
+
+    if (days > 0) {
+      return `${days} day${days !== 1 ? 's' : ''} ${hours} hour${hours !== 1 ? 's' : ''}`;
     }
+    return `${hours} hour${hours !== 1 ? 's' : ''}`;
   };
 
   // Helper function to get status badge
@@ -186,6 +196,17 @@ const AccountInfoModal = ({ isOpen, onClose, profile, onRefresh }) => {
     ? getTimeRemaining(user_info.exp_date)
     : null;
   const isExpired = timeRemaining === 'Expired';
+  const hasConnectionInfo =
+    [user_info?.active_cons, user_info?.max_connections].some(
+      (value) => value !== undefined && value !== null && value !== ''
+    );
+  const supportsProviderRefresh =
+    currentProfile?.account?.account_type === 'XC' ||
+    currentProfile?.account?.account_type === 'STALKER';
+  const hasTrialInfo =
+    user_info?.is_trial !== undefined &&
+    user_info?.is_trial !== null &&
+    user_info?.is_trial !== '';
 
   return (
     <Modal
@@ -262,26 +283,28 @@ const AccountInfoModal = ({ isOpen, onClose, profile, onRefresh }) => {
             )}
           </Box>
 
-          <Box
-            p="md"
-            style={{
-              backgroundColor: 'rgba(34, 139, 230, 0.08)',
-              border: '1px solid rgba(34, 139, 230, 0.2)',
-              borderRadius: 8,
-            }}
-          >
-            <Group spacing="xs" mb="xs">
-              <Users size={16} color="var(--mantine-color-blue-6)" />
-              <Text fw={500}>Connections</Text>
-            </Group>
-            <Text size="lg" fw={600} c="blue">
-              {user_info?.active_cons || '0'} /{' '}
-              {user_info?.max_connections || 'Unknown'}
-            </Text>
-            <Text size="sm" c="dimmed">
-              Active / Max
-            </Text>
-          </Box>
+          {hasConnectionInfo && (
+            <Box
+              p="md"
+              style={{
+                backgroundColor: 'rgba(34, 139, 230, 0.08)',
+                border: '1px solid rgba(34, 139, 230, 0.2)',
+                borderRadius: 8,
+              }}
+            >
+              <Group spacing="xs" mb="xs">
+                <Users size={16} color="var(--mantine-color-blue-6)" />
+                <Text fw={500}>Connections</Text>
+              </Group>
+              <Text size="lg" fw={600} c="blue">
+                {user_info?.active_cons ?? '0'} /{' '}
+                {user_info?.max_connections ?? 'Unknown'}
+              </Text>
+              <Text size="sm" c="dimmed">
+                Active / Max
+              </Text>
+            </Box>
+          )}
         </Group>
 
         {/* Profile Notes */}
@@ -317,32 +340,92 @@ const AccountInfoModal = ({ isOpen, onClose, profile, onRefresh }) => {
           </Text>
           <Table striped highlightOnHover>
             <Table.Tbody>
-              <Table.Tr>
-                <Table.Td fw={500} w="40%">
-                  Username
-                </Table.Td>
-                <Table.Td>{user_info?.username || 'Unknown'}</Table.Td>
-              </Table.Tr>
-              <Table.Tr>
-                <Table.Td fw={500}>Account Created</Table.Td>
-                <Table.Td>
-                  {user_info?.created_at
-                    ? formatTimestamp(user_info.created_at)
-                    : 'Unknown'}
-                </Table.Td>
-              </Table.Tr>
-              <Table.Tr>
-                <Table.Td fw={500}>Trial Account</Table.Td>
-                <Table.Td>
-                  <Badge
-                    color={user_info?.is_trial === '1' ? 'orange' : 'blue'}
-                    variant="light"
-                    size="sm"
-                  >
-                    {user_info?.is_trial === '1' ? 'Yes' : 'No'}
-                  </Badge>
-                </Table.Td>
-              </Table.Tr>
+              {user_info?.username && (
+                <Table.Tr>
+                  <Table.Td fw={500} w="40%">
+                    Username
+                  </Table.Td>
+                  <Table.Td>{user_info.username}</Table.Td>
+                </Table.Tr>
+              )}
+              {user_info?.full_name && (
+                <Table.Tr>
+                  <Table.Td fw={500}>Name</Table.Td>
+                  <Table.Td>{user_info.full_name}</Table.Td>
+                </Table.Tr>
+              )}
+              {user_info?.account_number && (
+                <Table.Tr>
+                  <Table.Td fw={500}>Account Number</Table.Td>
+                  <Table.Td>{user_info.account_number}</Table.Td>
+                </Table.Tr>
+              )}
+              {user_info?.ls && (
+                <Table.Tr>
+                  <Table.Td fw={500}>Personal Account</Table.Td>
+                  <Table.Td>{user_info.ls}</Table.Td>
+                </Table.Tr>
+              )}
+              {user_info?.tariff_plan && (
+                <Table.Tr>
+                  <Table.Td fw={500}>Tariff Plan</Table.Td>
+                  <Table.Td>{user_info.tariff_plan}</Table.Td>
+                </Table.Tr>
+              )}
+              {user_info?.phone && (
+                <Table.Tr>
+                  <Table.Td fw={500}>Phone</Table.Td>
+                  <Table.Td>{user_info.phone}</Table.Td>
+                </Table.Tr>
+              )}
+              {user_info?.created_at && (
+                <Table.Tr>
+                  <Table.Td fw={500}>Account Created</Table.Td>
+                  <Table.Td>{formatTimestamp(user_info.created_at)}</Table.Td>
+                </Table.Tr>
+              )}
+              {user_info?.last_active && (
+                <Table.Tr>
+                  <Table.Td fw={500}>Last Active</Table.Td>
+                  <Table.Td>{formatTimestamp(user_info.last_active)}</Table.Td>
+                </Table.Tr>
+              )}
+              {user_info?.online !== undefined &&
+                user_info?.online !== null &&
+                user_info?.online !== '' && (
+                  <Table.Tr>
+                    <Table.Td fw={500}>Online</Table.Td>
+                    <Table.Td>
+                      <Badge
+                        color={
+                          user_info.online === '1' || user_info.online === 1
+                            ? 'green'
+                            : 'gray'
+                        }
+                        variant="light"
+                        size="sm"
+                      >
+                        {user_info.online === '1' || user_info.online === 1
+                          ? 'Yes'
+                          : 'No'}
+                      </Badge>
+                    </Table.Td>
+                  </Table.Tr>
+                )}
+              {hasTrialInfo && (
+                <Table.Tr>
+                  <Table.Td fw={500}>Trial Account</Table.Td>
+                  <Table.Td>
+                    <Badge
+                      color={user_info?.is_trial === '1' ? 'orange' : 'blue'}
+                      variant="light"
+                      size="sm"
+                    >
+                      {user_info?.is_trial === '1' ? 'Yes' : 'No'}
+                    </Badge>
+                  </Table.Td>
+                </Table.Tr>
+              )}
               {user_info?.allowed_output_formats &&
                 user_info.allowed_output_formats.length > 0 && (
                   <Table.Tr>
@@ -429,8 +512,7 @@ const AccountInfoModal = ({ isOpen, onClose, profile, onRefresh }) => {
           }}
         >
           <Group spacing="xs" align="center" position="apart">
-            {/* Show refresh button for XtreamCodes accounts */}
-            {currentProfile?.account?.is_xtream_codes && (
+            {supportsProviderRefresh && (
               <Tooltip label="Refresh Account Info Now" position="top">
                 <ActionIcon
                   size="sm"

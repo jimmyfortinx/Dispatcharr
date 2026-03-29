@@ -296,6 +296,15 @@ class M3UAccountProfile(models.Model):
         if parsed is not None:
             # XC account with exp_date in custom_properties — always sync
             self.exp_date = parsed
+            update_fields = kwargs.get("update_fields")
+            if update_fields is not None:
+                normalized_update_fields = list(update_fields)
+                if (
+                    "custom_properties" in normalized_update_fields
+                    and "exp_date" not in normalized_update_fields
+                ):
+                    normalized_update_fields.append("exp_date")
+                    kwargs["update_fields"] = normalized_update_fields
         # else: keep whatever exp_date is already set (manual entry for non-XC)
         super().save(*args, **kwargs)
 

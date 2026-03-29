@@ -1,15 +1,27 @@
+import base64
 import json
 import logging
-import base64
+import re
+from datetime import date, datetime, time as dt_time, timezone as dt_timezone
 from dataclasses import dataclass
 from secrets import token_hex
 from posixpath import dirname, join
 from urllib.parse import quote, quote_plus, urlparse, urlunparse
+from zoneinfo import ZoneInfo
 
 import requests
 
 
 logger = logging.getLogger(__name__)
+
+MONTH_NAME_PATTERN = re.compile(
+    r"\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\b",
+    re.IGNORECASE,
+)
+ISO_DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}(?:[ T].*)?$")
+SLASH_DATE_PATTERN = re.compile(r"^\d{1,2}[/-]\d{1,2}[/-]\d{2,4}(?:\s+.*)?$")
+MAC_ADDRESS_PATTERN = re.compile(r"^(?:[0-9A-F]{2}:){5}[0-9A-F]{2}$", re.IGNORECASE)
+PHONE_VALUE_PATTERN = re.compile(r"^[+()0-9.\- /]+$")
 
 DEFAULT_MODEL = "MAG254"
 DEFAULT_SERIAL_NUMBER = "0000000000000"
@@ -74,6 +86,15 @@ class StalkerVodCategoryDiscoveryResult:
     profile_name: str
     movie_categories: list
     series_categories: list
+    token: str
+    used_authentication: bool
+
+
+@dataclass
+class StalkerAccountInfoResult:
+    normalized_portal_url: str
+    profile_name: str
+    account_info: dict
     token: str
     used_authentication: bool
 
@@ -251,6 +272,22 @@ class StalkerClient:
         detail = errors[-1] if errors else "No portal endpoints could be tested."
         raise StalkerError(detail)
 
+    def discover_account_info(self):
+        errors = []
+        for candidate in self.normalize_portal_candidates(self.server_url):
+            try:
+                return self._discover_account_info_candidate(candidate)
+            except StalkerError as exc:
+                errors.append(f"{candidate}: {exc}")
+                logger.info(
+                    "Stalker account info discovery attempt failed for %s: %s",
+                    candidate,
+                    exc,
+                )
+
+        detail = errors[-1] if errors else "No portal endpoints could be tested."
+        raise StalkerError(detail)
+
     def _discover_candidate(self, portal_url):
         self.handshake(portal_url)
         used_authentication = False
@@ -319,6 +356,42 @@ class StalkerClient:
             profile_name=str(profile_name).strip() or self.mac,
             genres=genres,
             channels=normalized_channels,
+            token=self.token,
+            used_authentication=used_authentication,
+        )
+
+    def _discover_account_info_candidate(self, portal_url):
+        self.handshake(portal_url)
+        used_authentication = False
+        if self.username or self.password:
+            self.authenticate(portal_url)
+            used_authentication = True
+        elif self._should_use_device_id_auth():
+            self.authenticate_with_device_ids(portal_url)
+
+        profile = self.get_profile(portal_url)
+        try:
+            main_info = self.get_main_info(portal_url)
+        except StalkerError as exc:
+            logger.info(
+                "Stalker account info endpoint unavailable for %s, falling back to profile data: %s",
+                portal_url,
+                exc,
+            )
+            main_info = {}
+
+        profile_name = (
+            profile.get("name")
+            or profile.get("fname")
+            or profile.get("login")
+            or self.username
+            or self.mac
+        )
+
+        return StalkerAccountInfoResult(
+            normalized_portal_url=portal_url,
+            profile_name=str(profile_name).strip() or self.mac,
+            account_info=self._build_account_info(profile, main_info, portal_url),
             token=self.token,
             used_authentication=used_authentication,
         )
@@ -567,6 +640,22 @@ class StalkerClient:
         js = payload.get("js")
         if not isinstance(js, dict):
             raise StalkerError("Portal profile response was not recognized.")
+        return js
+
+    def get_main_info(self, portal_url):
+        payload = self._request(
+            "GET",
+            portal_url,
+            query={
+                "type": "account_info",
+                "action": "get_main_info",
+                "JsHttpRequest": "1-xml",
+            },
+            with_auth=True,
+        )
+        js = payload.get("js")
+        if not isinstance(js, dict):
+            raise StalkerError("Portal account info response was not recognized.")
         return js
 
     def get_genres(self, portal_url):
@@ -1064,6 +1153,412 @@ class StalkerClient:
         if not isinstance(items, list):
             return []
         return items[:limit]
+
+    def _build_account_info(self, profile, main_info, portal_url):
+        profile = profile if isinstance(profile, dict) else {}
+        main_info = main_info if isinstance(main_info, dict) else {}
+        account_timezone = self._first_non_empty(
+            main_info,
+            profile,
+            keys=("timezone", "default_timezone"),
+        ) or self.timezone
+        expiration = self._extract_expiration_timestamp(
+            profile,
+            main_info,
+            timezone_name=account_timezone,
+        )
+        raw_status = self._first_non_empty(
+            main_info,
+            profile,
+            keys=("status", "account_status", "state"),
+        )
+        normalized_status = self._normalize_account_status(
+            raw_status,
+            expiration,
+        )
+
+        user_info = {
+            "username": self._first_non_empty(
+                main_info,
+                profile,
+                keys=("login", "username"),
+            )
+            or self.username
+            or self.mac,
+            "status": normalized_status,
+            "exp_date": expiration,
+            "active_cons": None,
+            "created_at": self._normalize_optional_timestamp(
+                self._first_non_empty(
+                    main_info,
+                    profile,
+                    keys=("created_at", "created", "registered"),
+                ),
+                timezone_name=account_timezone,
+            ),
+            "max_connections": None,
+            "allowed_output_formats": [],
+            "full_name": self._extract_full_name(main_info, profile),
+            "phone": self._extract_phone(main_info, profile),
+            "account_number": self._extract_account_number(main_info, profile),
+            "ls": self._first_non_empty(main_info, profile, keys=("ls",)),
+            "tariff_plan": self._first_non_empty(
+                main_info,
+                profile,
+                keys=("tariff_plan", "tariff"),
+            ),
+            "online": self._first_non_empty(main_info, profile, keys=("online",)),
+            "last_active": self._normalize_optional_timestamp(
+                self._first_non_empty(main_info, profile, keys=("last_active",)),
+                timezone_name=account_timezone,
+            ),
+        }
+
+        server_info = {
+            "url": portal_url,
+            "timezone": account_timezone,
+        }
+
+        return {
+            "last_refresh": datetime.utcnow().isoformat() + "Z",
+            "auth_timestamp": datetime.utcnow().timestamp(),
+            "user_info": user_info,
+            "server_info": server_info,
+        }
+
+    def _extract_expiration_timestamp(self, *sources, timezone_name=None):
+        for raw_value in (
+            self._first_non_empty(
+                *sources,
+                keys=(
+                    "end_date",
+                    "expire_billing_date",
+                    "tariff_expired_date",
+                    "expiration_date",
+                    "exp_date",
+                ),
+            ),
+            self._extract_date_like_phone_value(*sources, timezone_name=timezone_name),
+        ):
+            parsed = self._parse_portal_datetime(
+                raw_value,
+                end_of_day_for_date_only=True,
+                timezone_name=timezone_name,
+            )
+            if parsed is not None:
+                return str(int(parsed.timestamp()))
+        return None
+
+    def _normalize_optional_timestamp(self, raw_value, timezone_name=None):
+        if self._is_zeroish_timestamp_value(raw_value):
+            return None
+        parsed = self._parse_portal_datetime(raw_value, timezone_name=timezone_name)
+        if parsed is None:
+            return raw_value or None
+        return parsed.isoformat()
+
+    def _parse_portal_datetime(
+        self,
+        raw_value,
+        end_of_day_for_date_only=False,
+        timezone_name=None,
+    ):
+        if raw_value in (None, ""):
+            return None
+
+        if isinstance(raw_value, (int, float)):
+            if raw_value <= 0:
+                return None
+            try:
+                return datetime.fromtimestamp(float(raw_value), tz=dt_timezone.utc)
+            except (OSError, OverflowError, ValueError):
+                return None
+
+        if isinstance(raw_value, datetime):
+            return (
+                raw_value
+                if raw_value.tzinfo
+                else raw_value.replace(tzinfo=self._portal_timezone(timezone_name))
+            )
+
+        if isinstance(raw_value, date):
+            target_time = dt_time(23, 59, 59) if end_of_day_for_date_only else dt_time.min
+            return datetime.combine(
+                raw_value,
+                target_time,
+                tzinfo=self._portal_timezone(timezone_name),
+            )
+
+        if not isinstance(raw_value, str):
+            return None
+
+        text = raw_value.strip()
+        if (
+            not text
+            or text in {"0000-00-00", "0000-00-00 00:00:00"}
+            or self._is_zeroish_timestamp_value(text)
+        ):
+            return None
+
+        if "T" not in text and " " not in text:
+            try:
+                parsed_date = date.fromisoformat(text)
+            except ValueError:
+                parsed_date = None
+            if parsed_date is not None:
+                target_time = (
+                    dt_time(23, 59, 59) if end_of_day_for_date_only else dt_time.min
+                )
+                return datetime.combine(
+                    parsed_date,
+                    target_time,
+                    tzinfo=self._portal_timezone(timezone_name),
+                )
+
+        for time_format in (
+            "%B %d, %Y, %I:%M %p",
+            "%b %d, %Y, %I:%M %p",
+            "%B %d, %Y, %H:%M",
+            "%b %d, %Y, %H:%M",
+            "%B %d, %Y, %I:%M:%S %p",
+            "%b %d, %Y, %I:%M:%S %p",
+            "%B %d, %Y, %H:%M:%S",
+            "%b %d, %Y, %H:%M:%S",
+            "%B %d, %Y",
+            "%b %d, %Y",
+        ):
+            try:
+                parsed = datetime.strptime(text, time_format)
+            except ValueError:
+                continue
+            target_time = parsed.time()
+            if (
+                end_of_day_for_date_only
+                and parsed.hour == 0
+                and parsed.minute == 0
+                and parsed.second == 0
+                and "%H" not in time_format
+                and "%I" not in time_format
+            ):
+                target_time = dt_time(23, 59, 59)
+            return datetime.combine(
+                parsed.date(),
+                target_time,
+                tzinfo=self._portal_timezone(timezone_name),
+            )
+
+        try:
+            numeric_value = float(text)
+        except ValueError:
+            numeric_value = None
+        if numeric_value is not None:
+            if numeric_value <= 0:
+                return None
+            try:
+                return datetime.fromtimestamp(numeric_value, tz=dt_timezone.utc)
+            except (OSError, OverflowError, ValueError):
+                return None
+
+        iso_candidate = text.replace(" ", "T")
+        if iso_candidate.endswith("Z"):
+            iso_candidate = iso_candidate[:-1] + "+00:00"
+
+        try:
+            parsed = datetime.fromisoformat(iso_candidate)
+        except ValueError:
+            parsed = None
+
+        if parsed is not None:
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=self._portal_timezone(timezone_name))
+            return parsed
+
+        return None
+
+    def _portal_timezone(self, timezone_name=None):
+        timezone_name = str(timezone_name or self.timezone or "").strip()
+        if timezone_name:
+            try:
+                return ZoneInfo(timezone_name)
+            except Exception:
+                logger.debug("Unknown Stalker timezone %s, falling back to UTC", timezone_name)
+        return dt_timezone.utc
+
+    def _extract_full_name(self, *sources):
+        for source in sources:
+            if not isinstance(source, dict):
+                continue
+            for key in ("full_name", "fname", "name"):
+                value = self._normalize_full_name_value(source.get(key))
+                if value:
+                    return value
+        return None
+
+    def _extract_phone(self, *sources):
+        for source in sources:
+            if not isinstance(source, dict):
+                continue
+            value = source.get("phone")
+            if self._looks_like_phone_value(value):
+                return str(value).strip()
+        return None
+
+    def _extract_account_number(self, *sources):
+        explicit_value = self._normalize_account_number_value(
+            self._first_non_empty(*sources, keys=("account_number", "ls"))
+        )
+        if explicit_value:
+            return explicit_value
+
+        for source in sources:
+            if not isinstance(source, dict):
+                continue
+            fallback_value = self._normalize_name_account_number(source.get("name"))
+            if fallback_value:
+                return fallback_value
+        return None
+
+    def _extract_date_like_phone_value(self, *sources, timezone_name=None):
+        for source in sources:
+            if not isinstance(source, dict):
+                continue
+            value = source.get("phone")
+            if self._looks_like_date_value(value, timezone_name=timezone_name):
+                return value
+        return None
+
+    def _normalize_full_name_value(self, raw_value):
+        if raw_value in (None, ""):
+            return None
+
+        text = str(raw_value).strip()
+        if (
+            not text
+            or text in {"0", "0.0"}
+            or text.isdigit()
+            or self._looks_like_mac_address(text)
+            or not any(char.isalpha() for char in text)
+        ):
+            return None
+        return text
+
+    def _normalize_account_number_value(self, raw_value):
+        if raw_value in (None, ""):
+            return None
+
+        text = str(raw_value).strip()
+        if not text or text in {"0", "0.0"} or self._looks_like_mac_address(text):
+            return None
+        return text
+
+    def _normalize_name_account_number(self, raw_value):
+        if raw_value in (None, ""):
+            return None
+
+        text = str(raw_value).strip()
+        if text.isdigit() and text != "0":
+            return text
+        return None
+
+    def _looks_like_mac_address(self, raw_value):
+        if raw_value in (None, ""):
+            return False
+        return bool(MAC_ADDRESS_PATTERN.fullmatch(str(raw_value).strip()))
+
+    def _looks_like_phone_value(self, raw_value):
+        if raw_value in (None, ""):
+            return False
+
+        text = str(raw_value).strip()
+        if not text or self._looks_like_date_value(text):
+            return False
+
+        digit_count = sum(char.isdigit() for char in text)
+        if digit_count < 7 or any(char.isalpha() for char in text):
+            return False
+
+        return bool(PHONE_VALUE_PATTERN.fullmatch(text))
+
+    def _looks_like_date_value(self, raw_value, timezone_name=None):
+        if raw_value in (None, ""):
+            return False
+
+        if isinstance(raw_value, (date, datetime)):
+            return True
+
+        if isinstance(raw_value, (int, float)):
+            return False
+
+        text = str(raw_value).strip()
+        if not text:
+            return False
+
+        if self._is_zeroish_timestamp_value(text):
+            return False
+
+        if MONTH_NAME_PATTERN.search(text):
+            return (
+                self._parse_portal_datetime(text, timezone_name=timezone_name)
+                is not None
+            )
+
+        if "T" in text or ISO_DATE_PATTERN.fullmatch(text) or SLASH_DATE_PATTERN.fullmatch(text):
+            return (
+                self._parse_portal_datetime(text, timezone_name=timezone_name)
+                is not None
+            )
+
+        if ":" in text and ("-" in text or "/" in text or "," in text):
+            return (
+                self._parse_portal_datetime(text, timezone_name=timezone_name)
+                is not None
+            )
+
+        return False
+
+    def _is_zeroish_timestamp_value(self, raw_value):
+        if raw_value in (None, ""):
+            return False
+
+        if isinstance(raw_value, (int, float)):
+            return raw_value <= 0
+
+        text = str(raw_value).strip()
+        return text in {"0", "0.0"}
+
+    def _normalize_account_status(self, raw_status, expiration_timestamp):
+        if expiration_timestamp:
+            try:
+                expiration = datetime.fromtimestamp(
+                    float(expiration_timestamp),
+                    tz=dt_timezone.utc,
+                )
+                if expiration <= datetime.now(dt_timezone.utc):
+                    return "Expired"
+            except (TypeError, ValueError, OSError):
+                pass
+
+        if raw_status is None:
+            return "Active"
+
+        status_text = str(raw_status).strip().lower()
+        if status_text in {"0", "false", "off", "disabled", "disable", "inactive"}:
+            return "Disabled"
+        if status_text in {"1", "true", "on", "active", "enabled", "enable"}:
+            return "Active"
+        if status_text in {"expired"}:
+            return "Expired"
+        return str(raw_status).strip() or "Unknown"
+
+    def _first_non_empty(self, *sources, keys):
+        for source in sources:
+            if not isinstance(source, dict):
+                continue
+            for key in keys:
+                value = source.get(key)
+                if value not in (None, ""):
+                    return value
+        return None
 
     def _request(self, method, portal_url, query=None, data=None, with_auth=False):
         headers = self._headers(portal_url, with_auth=with_auth)
