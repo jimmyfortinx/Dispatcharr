@@ -124,7 +124,9 @@ export const getEpisodeStreamUrl = (episode, selectedProvider, env_mode) => {
   let streamUrl = `/proxy/vod/episode/${episode.uuid}`;
 
   // Add selected provider as query parameter if available
-  if (selectedProvider) {
+  if (episode?.stream_id) {
+    streamUrl += `?stream_id=${encodeURIComponent(episode.stream_id)}`;
+  } else if (selectedProvider) {
     // Use stream_id for most specific selection, fallback to account_id
     if (selectedProvider.stream_id) {
       streamUrl += `?stream_id=${encodeURIComponent(selectedProvider.stream_id)}`;

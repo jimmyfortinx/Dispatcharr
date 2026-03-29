@@ -605,3 +605,94 @@ class VODProvidersApiTests(TestCase):
             [item["m3u_account"]["name"] for item in payload],
             ["trexiptv", "onair"],
         )
+
+    def test_movie_providers_endpoint_filters_by_category_context(self):
+        fr_category = VODCategory.objects.create(
+            name="|FR| FILMS 2026",
+            category_type="movie",
+        )
+        bg_category = VODCategory.objects.create(
+            name="|BG| BULGARIA FILMI",
+            category_type="movie",
+        )
+        M3UVODCategoryRelation.objects.create(
+            m3u_account=self.primary_account,
+            category=fr_category,
+            enabled=True,
+        )
+        M3UVODCategoryRelation.objects.create(
+            m3u_account=self.primary_account,
+            category=bg_category,
+            enabled=True,
+        )
+        M3UMovieRelation.objects.create(
+            m3u_account=self.primary_account,
+            movie=self.movie,
+            category=fr_category,
+            stream_id="fr-1001",
+            custom_properties={"basic_data": {"title": "FR - Dust Bunny"}},
+        )
+        M3UMovieRelation.objects.create(
+            m3u_account=self.primary_account,
+            movie=self.movie,
+            category=bg_category,
+            stream_id="bg-1002",
+            custom_properties={"basic_data": {"title": "BG - Dust Bunny"}},
+        )
+
+        response = self.client.get(
+            f"/api/vod/movies/{self.movie.id}/providers/",
+            {"category": f"{fr_category.name}|{fr_category.category_type}"},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        payload = response.json()
+        self.assertEqual(len(payload), 1)
+        self.assertEqual(payload[0]["stream_id"], "fr-1001")
+        self.assertEqual(payload[0]["category"]["id"], fr_category.id)
+
+    def test_movie_provider_info_endpoint_filters_by_category_context(self):
+        fr_category = VODCategory.objects.create(
+            name="|FR| FILMS 2026",
+            category_type="movie",
+        )
+        bg_category = VODCategory.objects.create(
+            name="|BG| BULGARIA FILMI",
+            category_type="movie",
+        )
+        M3UVODCategoryRelation.objects.create(
+            m3u_account=self.primary_account,
+            category=fr_category,
+            enabled=True,
+        )
+        M3UVODCategoryRelation.objects.create(
+            m3u_account=self.primary_account,
+            category=bg_category,
+            enabled=True,
+        )
+        M3UMovieRelation.objects.create(
+            m3u_account=self.primary_account,
+            movie=self.movie,
+            category=fr_category,
+            stream_id="fr-1001",
+            last_advanced_refresh=timezone.now(),
+            custom_properties={"basic_data": {"title": "FR - Dust Bunny"}},
+        )
+        M3UMovieRelation.objects.create(
+            m3u_account=self.primary_account,
+            movie=self.movie,
+            category=bg_category,
+            stream_id="bg-1002",
+            last_advanced_refresh=timezone.now(),
+            custom_properties={"basic_data": {"title": "BG - Dust Bunny"}},
+        )
+
+        response = self.client.get(
+            f"/api/vod/movies/{self.movie.id}/provider-info/",
+            {"category": f"{fr_category.name}|{fr_category.category_type}"},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        payload = response.json()
+        self.assertEqual(payload["name"], "FR - Dust Bunny")
+        self.assertEqual(payload["stream_id"], "fr-1001")

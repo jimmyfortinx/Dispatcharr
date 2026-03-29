@@ -3182,10 +3182,14 @@ export default class API {
     }
   }
 
-  static async getMovieProviderInfo(movieId) {
+  static async getMovieProviderInfo(movieId, category = '') {
     try {
+      const params = new URLSearchParams();
+      if (category) {
+        params.append('category', category);
+      }
       const response = await request(
-        `${host}/api/vod/movies/${movieId}/provider-info/`
+        `${host}/api/vod/movies/${movieId}/provider-info/${params.toString() ? `?${params.toString()}` : ''}`
       );
       return response;
     } catch (e) {
@@ -3193,10 +3197,14 @@ export default class API {
     }
   }
 
-  static async getMovieProviders(movieId) {
+  static async getMovieProviders(movieId, category = '') {
     try {
+      const params = new URLSearchParams();
+      if (category) {
+        params.append('category', category);
+      }
       const response = await request(
-        `${host}/api/vod/movies/${movieId}/providers/`
+        `${host}/api/vod/movies/${movieId}/providers/${params.toString() ? `?${params.toString()}` : ''}`
       );
       return response;
     } catch (e) {
@@ -3204,10 +3212,14 @@ export default class API {
     }
   }
 
-  static async getSeriesProviders(seriesId) {
+  static async getSeriesProviders(seriesId, category = '') {
     try {
+      const params = new URLSearchParams();
+      if (category) {
+        params.append('category', category);
+      }
       const response = await request(
-        `${host}/api/vod/series/${seriesId}/providers/`
+        `${host}/api/vod/series/${seriesId}/providers/${params.toString() ? `?${params.toString()}` : ''}`
       );
       return response;
     } catch (e) {
@@ -3224,11 +3236,16 @@ export default class API {
     }
   }
 
-  static async getSeriesInfo(seriesId) {
+  static async getSeriesInfo(seriesId, category = '') {
     try {
+      const params = new URLSearchParams();
+      params.append('include_episodes', 'true');
+      if (category) {
+        params.append('category', category);
+      }
       // Call the provider-info endpoint that includes episodes
       const response = await request(
-        `${host}/api/vod/series/${seriesId}/provider-info/?include_episodes=true`
+        `${host}/api/vod/series/${seriesId}/provider-info/?${params.toString()}`
       );
       return response;
     } catch (e) {

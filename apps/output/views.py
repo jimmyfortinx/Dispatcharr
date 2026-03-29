@@ -15,7 +15,7 @@ import html  # Add this import for XML escaping
 import json  # Add this import for JSON parsing
 import time  # Add this import for keep-alive delays
 from tzlocal import get_localzone
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlencode
 import base64
 import logging
 from django.db.models import Exists, OuterRef
@@ -27,6 +27,89 @@ from core.utils import log_system_event
 import hashlib
 
 logger = logging.getLogger(__name__)
+
+
+def _extract_relation_display_name(relation, fallback):
+    relation_props = dict(getattr(relation, "custom_properties", None) or {})
+    payloads = []
+
+    for key in ("basic_data", "detail_data", "detailed_info", "info"):
+        payload = relation_props.get(key)
+        if isinstance(payload, dict):
+            payloads.append(payload)
+
+    payloads.append(relation_props)
+
+    for payload in payloads:
+        for key in ("title", "name", "o_name", "original_name"):
+            value = payload.get(key)
+            if value is None:
+                continue
+
+            text = str(value).strip()
+            if text:
+                return text
+
+    return fallback
+
+
+def _append_query_params(url, **params):
+    query = urlencode(
+        {
+            key: value
+            for key, value in params.items()
+            if value not in (None, "")
+        }
+    )
+    if not query:
+        return url
+    return f"{url}?{query}"
+
+
+def _parse_int(value):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _get_enabled_movie_relations_queryset():
+    from apps.vod.models import M3UMovieRelation, M3UVODCategoryRelation
+
+    enabled_category_relations = M3UVODCategoryRelation.objects.filter(
+        m3u_account_id=OuterRef("m3u_account_id"),
+        category_id=OuterRef("category_id"),
+        enabled=True,
+    )
+
+    return M3UMovieRelation.objects.filter(
+        m3u_account__is_active=True,
+        category__isnull=False,
+    ).annotate(
+        category_enabled=Exists(enabled_category_relations)
+    ).filter(category_enabled=True)
+
+
+def _resolve_enabled_movie_relation(reference):
+    relation_ref = _parse_int(reference)
+    if relation_ref is None:
+        return None
+
+    relations = _get_enabled_movie_relations_queryset().select_related(
+        "movie",
+        "movie__logo",
+        "m3u_account",
+        "category",
+    )
+
+    movie_relation = relations.filter(id=relation_ref).first()
+    if movie_relation is not None:
+        return movie_relation
+
+    return relations.filter(movie_id=relation_ref).order_by(
+        "-m3u_account__priority",
+        "id",
+    ).first()
 
 def get_client_identifier(request):
     """Get client information including IP, user agent, and a unique hash identifier
@@ -2448,24 +2531,8 @@ def xc_get_vod_categories(user):
 
 def xc_get_vod_streams(request, user, category_id=None):
     """Get VOD streams (movies) for XtreamCodes API"""
-    from apps.vod.models import M3UMovieRelation, M3UVODCategoryRelation
-
     streams = []
-
-    enabled_category_relations = M3UVODCategoryRelation.objects.filter(
-        m3u_account_id=OuterRef("m3u_account_id"),
-        category_id=OuterRef("category_id"),
-        enabled=True,
-    )
-
-    relations = M3UMovieRelation.objects.filter(
-        m3u_account__is_active=True,
-        category__isnull=False,
-    ).annotate(
-        category_enabled=Exists(enabled_category_relations)
-    ).filter(
-        category_enabled=True
-    )
+    relations = _get_enabled_movie_relations_queryset()
 
     if category_id:
         relations = relations.filter(category_id=category_id)
@@ -2481,12 +2548,13 @@ def xc_get_vod_streams(request, user, category_id=None):
         if movie.id in seen_movies:
             continue
         seen_movies.add(movie.id)
+        display_name = _extract_relation_display_name(relation, movie.name)
 
         streams.append({
-            "num": movie.id,
-            "name": movie.name,
+            "num": relation.id,
+            "name": display_name,
             "stream_type": "movie",
-            "stream_id": movie.id,
+            "stream_id": relation.id,
             "stream_icon": (
                 None if not movie.logo
                 else build_absolute_uri_with_port(
@@ -2575,9 +2643,10 @@ def xc_get_series(request, user, category_id=None):
 
     for relation in series_relations:
         series = relation.series
+        display_name = _extract_relation_display_name(relation, series.name)
         series_list.append({
             "num": relation.id,  # Use relation ID
-            "name": series.name,
+            "name": display_name,
             "series_id": relation.id,  # Use relation ID
             "cover": (
                 None if not series.logo
@@ -2609,7 +2678,7 @@ def xc_get_series(request, user, category_id=None):
 
 def xc_get_series_info(request, user, series_id):
     """Get detailed series information including episodes"""
-    from apps.vod.models import M3USeriesRelation, M3UEpisodeRelation, M3UVODCategoryRelation
+    from apps.vod.models import M3USeriesRelation, M3UVODCategoryRelation
 
     if not series_id:
         raise Http404()
@@ -2632,6 +2701,10 @@ def xc_get_series_info(request, user, series_id):
             **filters,
         )
         series = series_relation.series
+        relation_display_name = _extract_relation_display_name(
+            series_relation,
+            series.name,
+        )
     except M3USeriesRelation.DoesNotExist:
         raise Http404()
 
@@ -2663,6 +2736,10 @@ def xc_get_series_info(request, user, series_id):
                 # Refresh objects from database after task completion
                 series.refresh_from_db()
                 series_relation.refresh_from_db()
+                relation_display_name = _extract_relation_display_name(
+                    series_relation,
+                    series.name,
+                )
 
     except Exception as e:
         logger.error(f"Error refreshing series data for relation {series_relation.id}: {str(e)}")
@@ -2685,10 +2762,18 @@ def xc_get_series_info(request, user, series_id):
 
         # Get the highest priority relation for this episode (for container_extension, video/audio/bitrate)
         from apps.vod.models import M3UEpisodeRelation
-        best_relation = M3UEpisodeRelation.objects.filter(
+        episode_relations = M3UEpisodeRelation.objects.filter(
             episode=episode,
             m3u_account__is_active=True
-        ).select_related('m3u_account').order_by('-m3u_account__priority', 'id').first()
+        ).select_related('m3u_account')
+        best_relation = episode_relations.filter(
+            series_relation=series_relation
+        ).order_by('-m3u_account__priority', 'id').first()
+        if best_relation is None:
+            best_relation = episode_relations.order_by(
+                '-m3u_account__priority',
+                'id',
+            ).first()
 
         video = audio = bitrate = None
         container_extension = "mp4"
@@ -2744,7 +2829,7 @@ def xc_get_series_info(request, user, series_id):
 
     # Build response using potentially refreshed data
     series_data = {
-        'name': series.name,
+        'name': relation_display_name,
         'description': series.description or '',
         'year': series.year,
         'genre': series.genre or '',
@@ -2836,7 +2921,6 @@ def xc_get_series_info(request, user, series_id):
 
 def xc_get_vod_info(request, user, vod_id):
     """Get detailed VOD (movie) information"""
-    from apps.vod.models import M3UMovieRelation, M3UVODCategoryRelation
     from django.utils import timezone
     from datetime import timedelta
 
@@ -2844,32 +2928,15 @@ def xc_get_vod_info(request, user, vod_id):
         raise Http404()
 
     # All authenticated users get access to VOD from all active M3U accounts
-    filters = {"movie_id": vod_id, "m3u_account__is_active": True}
-    enabled_category_relations = M3UVODCategoryRelation.objects.filter(
-        m3u_account_id=OuterRef("m3u_account_id"),
-        category_id=OuterRef("category_id"),
-        enabled=True,
-    )
-
-    try:
-        # Order by account priority to get the best relation when multiple exist
-        movie_relation = M3UMovieRelation.objects.select_related(
-            'movie', 'movie__logo'
-        ).annotate(
-            category_enabled=Exists(enabled_category_relations)
-        ).filter(
-            category_enabled=True,
-            **filters,
-        ).order_by('-m3u_account__priority', 'id').first()
-        if not movie_relation:
-            raise Http404()
-        movie = movie_relation.movie
-    except (M3UMovieRelation.DoesNotExist, M3UMovieRelation.MultipleObjectsReturned):
+    movie_relation = _resolve_enabled_movie_relation(vod_id)
+    if movie_relation is None:
         raise Http404()
+    movie = movie_relation.movie
+    relation_display_name = _extract_relation_display_name(movie_relation, movie.name)
 
     # Initialize basic movie data first
     movie_data = {
-        'name': movie.name,
+        'name': relation_display_name,
         'description': movie.description or '',
         'year': movie.year,
         'genre': movie.genre or '',
@@ -2903,6 +2970,10 @@ def xc_get_vod_info(request, user, vod_id):
             # Refresh objects from database after task completion
             movie.refresh_from_db()
             movie_relation.refresh_from_db()
+            relation_display_name = _extract_relation_display_name(
+                movie_relation,
+                movie.name,
+            )
 
         # Add detailed info from custom_properties if available
         if movie.custom_properties:
@@ -2942,8 +3013,8 @@ def xc_get_vod_info(request, user, vod_id):
     # Transform API response to XtreamCodes format
     info = {
         "info": {
-            "name": movie_data.get('name', movie.name),
-            "o_name": movie_data.get('name', movie.name),
+            "name": movie_data.get('name', relation_display_name),
+            "o_name": movie_data.get('name', relation_display_name),
             "cover_big": (
                 None if not movie.logo
                 else build_absolute_uri_with_port(
@@ -2978,8 +3049,8 @@ def xc_get_vod_info(request, user, vod_id):
             'audio': movie_data.get('audio', {}),
         },
         "movie_data": {
-            "stream_id": movie.id,
-            "name": movie.name,
+            "stream_id": movie_relation.id,
+            "name": movie_data.get('name', relation_display_name),
             "added": str(int(movie_relation.created_at.timestamp())),
             "category_id": str(movie_relation.category.id) if movie_relation.category else "0",
             "category_ids": [int(movie_relation.category.id)] if movie_relation.category else [],
@@ -2994,8 +3065,6 @@ def xc_get_vod_info(request, user, vod_id):
 
 def xc_movie_stream(request, username, password, stream_id, extension):
     """Handle XtreamCodes movie streaming requests"""
-    from apps.vod.models import M3UMovieRelation
-
     user = get_object_or_404(User, username=username)
 
     custom_properties = user.custom_properties or {}
@@ -3006,15 +3075,8 @@ def xc_movie_stream(request, username, password, stream_id, extension):
     if custom_properties["xc_password"] != password:
         return JsonResponse({"error": "Invalid credentials"}, status=401)
 
-    # All authenticated users get access to VOD from all active M3U accounts
-    filters = {"movie_id": stream_id, "m3u_account__is_active": True}
-
-    try:
-        # Order by account priority to get the best relation when multiple exist
-        movie_relation = M3UMovieRelation.objects.select_related('movie').filter(**filters).order_by('-m3u_account__priority', 'id').first()
-        if not movie_relation:
-            return JsonResponse({"error": "Movie not found"}, status=404)
-    except (M3UMovieRelation.DoesNotExist, M3UMovieRelation.MultipleObjectsReturned):
+    movie_relation = _resolve_enabled_movie_relation(stream_id)
+    if movie_relation is None:
         return JsonResponse({"error": "Movie not found"}, status=404)
 
     # Redirect to the VOD proxy endpoint
@@ -3025,6 +3087,11 @@ def xc_movie_stream(request, username, password, stream_id, extension):
         'content_type': 'movie',
         'content_id': movie_relation.movie.uuid
     })
+    vod_url = _append_query_params(
+        vod_url,
+        stream_id=movie_relation.stream_id,
+        m3u_account_id=movie_relation.m3u_account_id,
+    )
 
     return HttpResponseRedirect(vod_url)
 
