@@ -244,7 +244,9 @@ const useVODStore = create((set, get) => ({
     set({ loading: true, error: null });
     try {
       const category = get().filters.category;
-      const response = await api.getMovieProviderInfo(movieId, category);
+      const response = category
+        ? await api.getMovieProviderInfo(movieId, category)
+        : await api.getMovieProviderInfo(movieId);
 
       // Transform the response data to match our expected format
       const movieDetails = getMovieDetailsWithProvider(response, movieId);
@@ -266,7 +268,9 @@ const useVODStore = create((set, get) => ({
   fetchMovieProviders: async (movieId) => {
     try {
       const category = get().filters.category;
-      const response = await api.getMovieProviders(movieId, category);
+      const response = category
+        ? await api.getMovieProviders(movieId, category)
+        : await api.getMovieProviders(movieId);
       return response || [];
     } catch (error) {
       console.error('Failed to fetch movie providers:', error);
@@ -277,7 +281,9 @@ const useVODStore = create((set, get) => ({
   fetchSeriesProviders: async (seriesId) => {
     try {
       const category = get().filters.category;
-      const response = await api.getSeriesProviders(seriesId, category);
+      const response = category
+        ? await api.getSeriesProviders(seriesId, category)
+        : await api.getSeriesProviders(seriesId);
       return response || [];
     } catch (error) {
       console.error('Failed to fetch series providers:', error);
@@ -353,7 +359,9 @@ const useVODStore = create((set, get) => ({
     set({ loading: true, error: null });
     try {
       const category = get().filters.category;
-      const response = await api.getSeriesInfo(seriesId, category);
+      const response = category
+        ? await api.getSeriesInfo(seriesId, category)
+        : await api.getSeriesInfo(seriesId);
 
       // Transform the response data to match our expected format
       const seriesInfo = getSeriesDetails(response, seriesId);
