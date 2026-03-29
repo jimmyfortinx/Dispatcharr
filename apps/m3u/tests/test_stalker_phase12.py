@@ -142,7 +142,7 @@ class StalkerPhase12MovieImportTests(TestCase):
             "ffmpeg http://provider.example.com/movie-b",
         )
 
-    def test_stalker_category_requests_prefers_all_bucket(self):
+    def test_stalker_category_requests_prefers_specific_categories_over_all_bucket(self):
         requests = get_stalker_category_requests(
             {
                 "*": self.category,
@@ -151,7 +151,80 @@ class StalkerPhase12MovieImportTests(TestCase):
             }
         )
 
-        self.assertEqual(requests, ["*"])
+        self.assertEqual(requests, ["10"])
+
+    def test_process_movie_batch_keeps_stalker_relations_for_same_movie_across_categories(self):
+        second_category = VODCategory.objects.create(
+            name="Drama",
+            category_type="movie",
+        )
+        second_relation = M3UVODCategoryRelation.objects.create(
+            m3u_account=self.account,
+            category=second_category,
+            enabled=True,
+            custom_properties={
+                "stalker_category_id": "11",
+                "stalker_category_type": "movie",
+            },
+        )
+
+        seen_movie_keys = set()
+        categories = {
+            "10": self.category,
+            "11": second_category,
+        }
+        relations = {
+            self.category.id: self.category_relation,
+            second_category.id: second_relation,
+        }
+
+        first_batch = [
+            {
+                "id": "1001",
+                "title": "Heat",
+                "year": "1995",
+                "tmdb_id": "949",
+                "category_id": "10",
+                "cmd": "ffmpeg http://provider.example.com/movie-a",
+            }
+        ]
+        second_batch = [
+            {
+                "id": "1002",
+                "title": "Heat",
+                "year": "1995",
+                "tmdb_id": "949",
+                "category_id": "11",
+                "cmd": "ffmpeg http://provider.example.com/movie-b",
+            }
+        ]
+
+        process_movie_batch(
+            self.account,
+            first_batch,
+            categories,
+            relations,
+            scan_start_time=self.scan_start_time,
+            seen_movie_keys=seen_movie_keys,
+        )
+        process_movie_batch(
+            self.account,
+            second_batch,
+            categories,
+            relations,
+            scan_start_time=self.scan_start_time,
+            seen_movie_keys=seen_movie_keys,
+        )
+
+        self.assertEqual(Movie.objects.count(), 1)
+        self.assertEqual(M3UMovieRelation.objects.filter(m3u_account=self.account).count(), 2)
+        self.assertEqual(
+            set(
+                M3UMovieRelation.objects.filter(m3u_account=self.account)
+                .values_list("category__name", flat=True)
+            ),
+            {"Action", "Drama"},
+        )
 
 
 class StalkerPhase12SeriesImportTests(TestCase):
@@ -255,6 +328,77 @@ class StalkerPhase12SeriesImportTests(TestCase):
         self.assertEqual(series.rating, "8.5")
         self.assertEqual(series.logo.url, "http://img.example.com/fatal-updated.jpg")
         self.assertEqual(relation.external_series_id, "7359:7359")
+
+    def test_process_series_batch_keeps_stalker_relations_for_same_series_across_categories(self):
+        second_category = VODCategory.objects.create(
+            name="Drama",
+            category_type="series",
+        )
+        second_relation = M3UVODCategoryRelation.objects.create(
+            m3u_account=self.account,
+            category=second_category,
+            enabled=True,
+            custom_properties={
+                "stalker_category_id": "21",
+                "stalker_category_type": "series",
+            },
+        )
+
+        seen_series_keys = set()
+        categories = {
+            "20": self.category,
+            "21": second_category,
+        }
+        relations = {
+            self.category.id: self.category_relation,
+            second_category.id: second_relation,
+        }
+
+        first_batch = [
+            {
+                "id": "2001",
+                "title": "Fatal Seduction",
+                "year": "2023",
+                "tmdb_id": "12345",
+                "category_id": "20",
+            }
+        ]
+        second_batch = [
+            {
+                "id": "2002",
+                "title": "Fatal Seduction",
+                "year": "2023",
+                "tmdb_id": "12345",
+                "category_id": "21",
+            }
+        ]
+
+        process_series_batch(
+            self.account,
+            first_batch,
+            categories,
+            relations,
+            scan_start_time=self.scan_start_time,
+            seen_series_keys=seen_series_keys,
+        )
+        process_series_batch(
+            self.account,
+            second_batch,
+            categories,
+            relations,
+            scan_start_time=self.scan_start_time,
+            seen_series_keys=seen_series_keys,
+        )
+
+        self.assertEqual(Series.objects.count(), 1)
+        self.assertEqual(M3USeriesRelation.objects.filter(m3u_account=self.account).count(), 2)
+        self.assertEqual(
+            set(
+                M3USeriesRelation.objects.filter(m3u_account=self.account)
+                .values_list("category__name", flat=True)
+            ),
+            {"Drama", "Shows"},
+        )
 
 
 class StalkerPhase12CleanupTests(TestCase):

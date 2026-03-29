@@ -697,6 +697,17 @@ def get_stalker_category_requests(categories_by_provider):
         if category_id != "__uncategorized__"
     ]
 
+    concrete_category_ids = [
+        category_id for category_id in provider_category_ids if category_id != "*"
+    ]
+
+    # Some portals expose an "All" pseudo-category using "*", but it can omit
+    # rows that only appear in the concrete category buckets. Prefer the
+    # concrete category IDs whenever they exist so category imports stay
+    # complete.
+    if concrete_category_ids:
+        return concrete_category_ids
+
     if "*" in provider_category_ids:
         return ["*"]
 
@@ -874,14 +885,16 @@ def process_movie_batch(account, batch, categories, relations, scan_start_time=N
     movies_to_update = []
     relations_to_create = []
     relations_to_update = []
-    movie_keys = {}  # For deduplication like M3U stream_hashes
+    movie_entries = {}
+    relation_entries = []
+    seen_stream_ids = set()
+    is_stalker = account.account_type == M3UAccount.Types.STALKER
     if seen_movie_keys is None:
         seen_movie_keys = set()
 
     # Process each movie in the batch
     for movie_data in batch:
         try:
-            is_stalker = account.account_type == M3UAccount.Types.STALKER
             if is_stalker:
                 stream_id = extract_stalker_relation_id(movie_data)
                 name = extract_display_name(movie_data)
@@ -891,6 +904,8 @@ def process_movie_batch(account, batch, categories, relations, scan_start_time=N
 
             if not stream_id:
                 logger.debug("Skipping movie without a stable relation key: %s", movie_data)
+                continue
+            if stream_id in seen_stream_ids:
                 continue
 
             # Get category with proper error handling
@@ -945,8 +960,10 @@ def process_movie_batch(account, batch, categories, relations, scan_start_time=N
             else:
                 movie_key = f"name_{name}_{year or 'None'}"
 
-            # Skip duplicates already seen earlier in this refresh or earlier in this batch
-            if movie_key in movie_keys or movie_key in seen_movie_keys:
+            # For XC accounts we still keep a single provider row per deduped
+            # movie key. Stalker needs to keep distinct provider relations so
+            # the same title can remain visible in multiple categories.
+            if not is_stalker and (movie_key in movie_entries or movie_key in seen_movie_keys):
                 continue
 
             # Prepare movie properties
@@ -978,14 +995,36 @@ def process_movie_batch(account, batch, categories, relations, scan_start_time=N
                 'custom_properties': custom_properties or None,
             }
 
-            movie_keys[movie_key] = {
-                'props': movie_props,
+            existing_entry = movie_entries.get(movie_key)
+            if existing_entry is None:
+                movie_entries[movie_key] = {
+                    'props': movie_props,
+                    'logo_url': logo_url,  # Keep logo URL for later processing
+                }
+            else:
+                existing_props = existing_entry['props']
+                if not existing_props.get('description') and description:
+                    existing_props['description'] = description
+                if not existing_props.get('rating') and rating:
+                    existing_props['rating'] = rating
+                if not existing_props.get('genre') and genre:
+                    existing_props['genre'] = genre
+                if not existing_props.get('duration_secs') and duration_secs:
+                    existing_props['duration_secs'] = duration_secs
+                if not existing_props.get('custom_properties') and custom_properties:
+                    existing_props['custom_properties'] = custom_properties
+                if not existing_entry.get('logo_url') and logo_url:
+                    existing_entry['logo_url'] = logo_url
+
+            relation_entries.append({
+                'movie_key': movie_key,
                 'stream_id': stream_id,
                 'category': category,
                 'movie_data': movie_data,
-                'logo_url': logo_url  # Keep logo URL for later processing
-            }
-            seen_movie_keys.add(movie_key)
+            })
+            seen_stream_ids.add(stream_id)
+            if not is_stalker:
+                seen_movie_keys.add(movie_key)
 
         except Exception as e:
             logger.error(f"Error preparing movie {movie_data.get('name', 'Unknown')}: {str(e)}")
@@ -993,7 +1032,7 @@ def process_movie_batch(account, batch, categories, relations, scan_start_time=N
     # Collect all logo URLs and create logos in batch
     logo_urls = set()
     logo_url_to_name = {}  # Map logo URLs to movie names
-    for data in movie_keys.values():
+    for data in movie_entries.values():
         logo_url = data.get('logo_url')
         if logo_url and len(logo_url) <= 500:  # Ignore overly long URLs (likely embedded image data)
             logo_urls.add(logo_url)
@@ -1031,21 +1070,21 @@ def process_movie_batch(account, batch, categories, relations, scan_start_time=N
     existing_movies = {}
 
     # Query by TMDB IDs
-    tmdb_keys = [k for k in movie_keys.keys() if k.startswith('tmdb_')]
+    tmdb_keys = [k for k in movie_entries.keys() if k.startswith('tmdb_')]
     tmdb_ids = [k.replace('tmdb_', '') for k in tmdb_keys]
     if tmdb_ids:
         for movie in Movie.objects.filter(tmdb_id__in=tmdb_ids):
             existing_movies[f"tmdb_{movie.tmdb_id}"] = movie
 
     # Query by IMDB IDs
-    imdb_keys = [k for k in movie_keys.keys() if k.startswith('imdb_')]
+    imdb_keys = [k for k in movie_entries.keys() if k.startswith('imdb_')]
     imdb_ids = [k.replace('imdb_', '') for k in imdb_keys]
     if imdb_ids:
         for movie in Movie.objects.filter(imdb_id__in=imdb_ids):
             existing_movies[f"imdb_{movie.imdb_id}"] = movie
 
     # Query by name+year for movies without external IDs
-    name_year_keys = [k for k in movie_keys.keys() if k.startswith('name_')]
+    name_year_keys = [k for k in movie_entries.keys() if k.startswith('name_')]
     if name_year_keys:
         for movie in Movie.objects.filter(tmdb_id__isnull=True, imdb_id__isnull=True):
             key = f"name_{movie.name}_{movie.year or 'None'}"
@@ -1053,7 +1092,7 @@ def process_movie_batch(account, batch, categories, relations, scan_start_time=N
                 existing_movies[key] = movie
 
     # Get existing relations
-    stream_ids = [data['stream_id'] for data in movie_keys.values()]
+    stream_ids = [data['stream_id'] for data in relation_entries]
     existing_relations = {
         rel.stream_id: rel for rel in M3UMovieRelation.objects.filter(
             m3u_account=account,
@@ -1061,12 +1100,11 @@ def process_movie_batch(account, batch, categories, relations, scan_start_time=N
         ).select_related('movie')
     }
 
-    # Process each movie
-    for movie_key, data in movie_keys.items():
+    resolved_movies = {}
+
+    # Process each unique movie
+    for movie_key, data in movie_entries.items():
         movie_props = data['props']
-        stream_id = data['stream_id']
-        category = data['category']
-        movie_data = data['movie_data']
         logo_url = data.get('logo_url')
 
         if movie_key in existing_movies:
@@ -1113,6 +1151,15 @@ def process_movie_batch(account, batch, categories, relations, scan_start_time=N
                 movie.logo = existing_logos[logo_url]
 
             movies_to_create.append(movie)
+
+        resolved_movies[movie_key] = movie
+
+    for relation_data in relation_entries:
+        movie_key = relation_data['movie_key']
+        stream_id = relation_data['stream_id']
+        category = relation_data['category']
+        movie_data = relation_data['movie_data']
+        movie = resolved_movies[movie_key]
 
         # Handle relation
         if stream_id in existing_relations:
@@ -1236,14 +1283,16 @@ def process_series_batch(account, batch, categories, relations, scan_start_time=
     series_to_update = []
     relations_to_create = []
     relations_to_update = []
-    series_keys = {}  # For deduplication like M3U stream_hashes
+    series_entries = {}
+    relation_entries = []
+    seen_relation_ids = set()
+    is_stalker = account.account_type == M3UAccount.Types.STALKER
     if seen_series_keys is None:
         seen_series_keys = set()
 
     # Process each series in the batch
     for series_data in batch:
         try:
-            is_stalker = account.account_type == M3UAccount.Types.STALKER
             if is_stalker:
                 series_id = extract_stalker_relation_id(series_data)
                 name = extract_display_name(series_data)
@@ -1253,6 +1302,8 @@ def process_series_batch(account, batch, categories, relations, scan_start_time=
 
             if not series_id:
                 logger.debug("Skipping series without a stable relation key: %s", series_data)
+                continue
+            if series_id in seen_relation_ids:
                 continue
 
             # Get category with proper error handling
@@ -1307,8 +1358,7 @@ def process_series_batch(account, batch, categories, relations, scan_start_time=
             else:
                 series_key = f"name_{name}_{year or 'None'}"
 
-            # Skip duplicates already seen earlier in this refresh or earlier in this batch
-            if series_key in series_keys or series_key in seen_series_keys:
+            if not is_stalker and (series_key in series_entries or series_key in seen_series_keys):
                 continue
 
             # Prepare series properties
@@ -1349,14 +1399,34 @@ def process_series_batch(account, batch, categories, relations, scan_start_time=
                 'custom_properties': additional_metadata if additional_metadata else None,
             }
 
-            series_keys[series_key] = {
-                'props': series_props,
+            existing_entry = series_entries.get(series_key)
+            if existing_entry is None:
+                series_entries[series_key] = {
+                    'props': series_props,
+                    'logo_url': logo_url,  # Keep logo URL for later processing
+                }
+            else:
+                existing_props = existing_entry['props']
+                if not existing_props.get('description') and description:
+                    existing_props['description'] = description
+                if not existing_props.get('rating') and rating:
+                    existing_props['rating'] = rating
+                if not existing_props.get('genre') and genre:
+                    existing_props['genre'] = genre
+                if not existing_props.get('custom_properties') and additional_metadata:
+                    existing_props['custom_properties'] = additional_metadata
+                if not existing_entry.get('logo_url') and logo_url:
+                    existing_entry['logo_url'] = logo_url
+
+            relation_entries.append({
+                'series_key': series_key,
                 'series_id': series_id,
                 'category': category,
                 'series_data': series_data,
-                'logo_url': logo_url  # Keep logo URL for later processing
-            }
-            seen_series_keys.add(series_key)
+            })
+            seen_relation_ids.add(series_id)
+            if not is_stalker:
+                seen_series_keys.add(series_key)
 
         except Exception as e:
             logger.error(f"Error preparing series {series_data.get('name', 'Unknown')}: {str(e)}")
@@ -1364,7 +1434,7 @@ def process_series_batch(account, batch, categories, relations, scan_start_time=
     # Collect all logo URLs and create logos in batch
     logo_urls = set()
     logo_url_to_name = {}  # Map logo URLs to series names
-    for data in series_keys.values():
+    for data in series_entries.values():
         logo_url = data.get('logo_url')
         if logo_url and len(logo_url) <= 500:  # Ignore overly long URLs (likely embedded image data)
             logo_urls.add(logo_url)
@@ -1402,21 +1472,21 @@ def process_series_batch(account, batch, categories, relations, scan_start_time=
     existing_series = {}
 
     # Query by TMDB IDs
-    tmdb_keys = [k for k in series_keys.keys() if k.startswith('tmdb_')]
+    tmdb_keys = [k for k in series_entries.keys() if k.startswith('tmdb_')]
     tmdb_ids = [k.replace('tmdb_', '') for k in tmdb_keys]
     if tmdb_ids:
         for series in Series.objects.filter(tmdb_id__in=tmdb_ids):
             existing_series[f"tmdb_{series.tmdb_id}"] = series
 
     # Query by IMDB IDs
-    imdb_keys = [k for k in series_keys.keys() if k.startswith('imdb_')]
+    imdb_keys = [k for k in series_entries.keys() if k.startswith('imdb_')]
     imdb_ids = [k.replace('imdb_', '') for k in imdb_keys]
     if imdb_ids:
         for series in Series.objects.filter(imdb_id__in=imdb_ids):
             existing_series[f"imdb_{series.imdb_id}"] = series
 
     # Query by name+year for series without external IDs
-    name_year_keys = [k for k in series_keys.keys() if k.startswith('name_')]
+    name_year_keys = [k for k in series_entries.keys() if k.startswith('name_')]
     if name_year_keys:
         for series in Series.objects.filter(tmdb_id__isnull=True, imdb_id__isnull=True):
             key = f"name_{series.name}_{series.year or 'None'}"
@@ -1424,7 +1494,7 @@ def process_series_batch(account, batch, categories, relations, scan_start_time=
                 existing_series[key] = series
 
     # Get existing relations
-    series_ids = [data['series_id'] for data in series_keys.values()]
+    series_ids = [data['series_id'] for data in relation_entries]
     existing_relations = {
         rel.external_series_id: rel for rel in M3USeriesRelation.objects.filter(
             m3u_account=account,
@@ -1432,12 +1502,11 @@ def process_series_batch(account, batch, categories, relations, scan_start_time=
         ).select_related('series')
     }
 
-    # Process each series
-    for series_key, data in series_keys.items():
+    resolved_series = {}
+
+    # Process each unique series
+    for series_key, data in series_entries.items():
         series_props = data['props']
-        series_id = data['series_id']
-        category = data['category']
-        series_data = data['series_data']
         logo_url = data.get('logo_url')
 
         if series_key in existing_series:
@@ -1484,6 +1553,15 @@ def process_series_batch(account, batch, categories, relations, scan_start_time=
                 series.logo = existing_logos[logo_url]
 
             series_to_create.append(series)
+
+        resolved_series[series_key] = series
+
+    for relation_data in relation_entries:
+        series_key = relation_data['series_key']
+        series_id = relation_data['series_id']
+        category = relation_data['category']
+        series_data = relation_data['series_data']
+        series = resolved_series[series_key]
 
         # Handle relation
         if series_id in existing_relations:
