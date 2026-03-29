@@ -57,6 +57,126 @@ def _dedupe_relations_by_account(relations):
     return unique_relations
 
 
+def _extract_relation_display_name(relation, fallback):
+    relation_props = dict(getattr(relation, "custom_properties", None) or {})
+    payloads = []
+
+    for key in ("basic_data", "detail_data", "detailed_info", "info"):
+        payload = relation_props.get(key)
+        if isinstance(payload, dict):
+            payloads.append(payload)
+
+    payloads.append(relation_props)
+
+    for payload in payloads:
+        for key in ("title", "name", "o_name", "original_name"):
+            value = payload.get(key)
+            if value is None:
+                continue
+
+            text = str(value).strip()
+            if text:
+                return text
+
+    return fallback
+
+
+def _parse_category_filter_value(category_value):
+    text = str(category_value or "").strip()
+    if not text:
+        return None, None
+
+    if "|" in text:
+        category_name, category_type = text.rsplit("|", 1)
+        return category_name, category_type
+
+    return text, None
+
+
+def _filter_relations_by_category(relations, category_value):
+    category_name, category_type = _parse_category_filter_value(category_value)
+    if not category_name:
+        return relations
+
+    relations = relations.filter(
+        category__isnull=False,
+        category__name=category_name,
+    )
+
+    if category_type:
+        relations = relations.filter(category__category_type=category_type)
+
+    return relations
+
+
+def _build_movie_relation_display_name_map(movie_ids, category_value):
+    category_name, category_type = _parse_category_filter_value(category_value)
+    if not movie_ids or not category_name:
+        return {}
+
+    enabled_category_relations = M3UVODCategoryRelation.objects.filter(
+        m3u_account_id=OuterRef("m3u_account_id"),
+        category_id=OuterRef("category_id"),
+        enabled=True,
+    )
+
+    relations = (
+        M3UMovieRelation.objects.filter(
+            movie_id__in=movie_ids,
+            m3u_account__is_active=True,
+            category__name=category_name,
+            category__isnull=False,
+        )
+        .annotate(category_enabled=Exists(enabled_category_relations))
+        .filter(category_enabled=True)
+        .select_related("movie", "category")
+        .order_by("movie_id", "-m3u_account__priority", "id")
+    )
+
+    if category_type:
+        relations = relations.filter(category__category_type=category_type)
+
+    display_names = {}
+    for relation in relations:
+        display_names.setdefault(
+            relation.movie_id,
+            _extract_relation_display_name(relation, relation.movie.name),
+        )
+
+    return display_names
+
+
+def _build_series_relation_display_name_map(series_ids, category_value):
+    category_name, category_type = _parse_category_filter_value(category_value)
+    if not series_ids or not category_name:
+        return {}
+
+    relations = M3USeriesRelation.objects.filter(
+        series_id__in=series_ids,
+        m3u_account__is_active=True,
+        category__name=category_name,
+        category__isnull=False,
+    ).select_related("series", "category").order_by(
+        "series_id",
+        "-m3u_account__priority",
+        "id",
+    )
+
+    if category_type:
+        relations = relations.filter(category__category_type=category_type)
+
+    relations = get_enabled_series_relations_queryset(relations)
+
+    display_names = {}
+    for relation in relations:
+        display_names.setdefault(
+            relation.series_id,
+            _extract_relation_display_name(relation, relation.series.name),
+        )
+
+    return display_names
+
+
 class VODPagination(PageNumberPagination):
     page_size = 20  # Default page size to match frontend default
     page_size_query_param = "page_size"  # Allow clients to specify page size
@@ -110,20 +230,59 @@ class MovieViewSet(viewsets.ReadOnlyModelViewSet):
         except KeyError:
             return [Authenticated()]
 
+    def get_serializer_context(self):
+        context = super().get_serializer_context()
+        context["relation_display_names_by_id"] = getattr(
+            self,
+            "_relation_display_names_by_id",
+            {},
+        )
+        return context
+
     def get_queryset(self):
         # Only return movies that have active M3U relations
         return Movie.objects.filter(
             m3u_relations__m3u_account__is_active=True
         ).distinct().select_related('logo').prefetch_related('m3u_relations__m3u_account')
 
+    def list(self, request, *args, **kwargs):
+        queryset = self.filter_queryset(self.get_queryset())
+        page = self.paginate_queryset(queryset)
+        objects = page if page is not None else list(queryset)
+
+        self._relation_display_names_by_id = _build_movie_relation_display_name_map(
+            [movie.id for movie in objects],
+            request.query_params.get("category"),
+        )
+
+        if page is not None:
+            serializer = self.get_serializer(page, many=True)
+            return self.get_paginated_response(serializer.data)
+
+        serializer = self.get_serializer(objects, many=True)
+        return Response(serializer.data)
+
     @action(detail=True, methods=['get'], url_path='providers')
     def get_providers(self, request, pk=None):
         """Get all providers (M3U accounts) that have this movie"""
         movie = self.get_object()
+        enabled_category_relations = M3UVODCategoryRelation.objects.filter(
+            m3u_account_id=OuterRef("m3u_account_id"),
+            category_id=OuterRef("category_id"),
+            enabled=True,
+        )
         relations = M3UMovieRelation.objects.filter(
             movie=movie,
             m3u_account__is_active=True
-        ).select_related('m3u_account', 'category')
+        ).select_related('m3u_account', 'category').annotate(
+            category_enabled=Exists(enabled_category_relations)
+        ).filter(
+            Q(category__isnull=True) | Q(category_enabled=True)
+        )
+        relations = _filter_relations_by_category(
+            relations,
+            request.query_params.get("category"),
+        )
 
         serializer = M3UMovieRelationSerializer(
             _dedupe_relations_by_account(relations),
@@ -137,11 +296,24 @@ class MovieViewSet(viewsets.ReadOnlyModelViewSet):
         """Get detailed movie information from the original provider, throttled to 24h."""
         movie = self.get_object()
 
-        # Get the highest priority active relation
-        relation = M3UMovieRelation.objects.filter(
+        enabled_category_relations = M3UVODCategoryRelation.objects.filter(
+            m3u_account_id=OuterRef("m3u_account_id"),
+            category_id=OuterRef("category_id"),
+            enabled=True,
+        )
+        relations = M3UMovieRelation.objects.filter(
             movie=movie,
             m3u_account__is_active=True
-        ).select_related('m3u_account').order_by('-m3u_account__priority', 'id').first()
+        ).select_related('m3u_account').annotate(
+            category_enabled=Exists(enabled_category_relations)
+        ).filter(
+            Q(category__isnull=True) | Q(category_enabled=True)
+        )
+        relations = _filter_relations_by_category(
+            relations,
+            request.query_params.get("category"),
+        )
+        relation = relations.order_by('-m3u_account__priority', 'id').first()
 
         if not relation:
             return Response(
@@ -170,14 +342,15 @@ class MovieViewSet(viewsets.ReadOnlyModelViewSet):
         custom_props = relation.custom_properties or {}
         info = custom_props.get('detailed_info', {})
         movie_data = custom_props.get('movie_data', {})
+        relation_display_name = _extract_relation_display_name(relation, movie.name)
 
         # Build response with available data
         response_data = {
             'id': movie.id,
             'uuid': movie.uuid,
             'stream_id': relation.stream_id,
-            'name': info.get('name', movie.name),
-            'o_name': info.get('o_name', ''),
+            'name': info.get('name', relation_display_name),
+            'o_name': info.get('o_name', relation_display_name),
             'description': info.get('description', info.get('plot', movie.description)),
             'plot': info.get('plot', info.get('description', movie.description)),
             'year': movie.year or info.get('year'),
@@ -294,6 +467,15 @@ class SeriesViewSet(viewsets.ReadOnlyModelViewSet):
         except KeyError:
             return [Authenticated()]
 
+    def get_serializer_context(self):
+        context = super().get_serializer_context()
+        context["relation_display_names_by_id"] = getattr(
+            self,
+            "_relation_display_names_by_id",
+            {},
+        )
+        return context
+
     def get_queryset(self):
         enabled_series_relations = get_enabled_series_relations_queryset(
             M3USeriesRelation.objects.filter(
@@ -306,6 +488,23 @@ class SeriesViewSet(viewsets.ReadOnlyModelViewSet):
             Exists(enabled_series_relations)
         ).distinct().select_related('logo').prefetch_related('episodes', 'm3u_relations__m3u_account')
 
+    def list(self, request, *args, **kwargs):
+        queryset = self.filter_queryset(self.get_queryset())
+        page = self.paginate_queryset(queryset)
+        objects = page if page is not None else list(queryset)
+
+        self._relation_display_names_by_id = _build_series_relation_display_name_map(
+            [series.id for series in objects],
+            request.query_params.get("category"),
+        )
+
+        if page is not None:
+            serializer = self.get_serializer(page, many=True)
+            return self.get_paginated_response(serializer.data)
+
+        serializer = self.get_serializer(objects, many=True)
+        return Response(serializer.data)
+
     @action(detail=True, methods=['get'], url_path='providers')
     def get_providers(self, request, pk=None):
         """Get all providers (M3U accounts) that have this series"""
@@ -314,6 +513,10 @@ class SeriesViewSet(viewsets.ReadOnlyModelViewSet):
             series=series,
             m3u_account__is_active=True
         ).select_related('m3u_account', 'category')
+        relations = _filter_relations_by_category(
+            relations,
+            request.query_params.get("category"),
+        )
         relations = get_enabled_series_relations_queryset(relations)
 
         serializer = M3USeriesRelationSerializer(
@@ -357,7 +560,11 @@ class SeriesViewSet(viewsets.ReadOnlyModelViewSet):
         relation = M3USeriesRelation.objects.filter(
             series=series,
             m3u_account__is_active=True
-        ).select_related('m3u_account', 'category').order_by('-m3u_account__priority', 'id')
+        ).select_related('m3u_account', 'category')
+        relation = _filter_relations_by_category(
+            relation,
+            request.query_params.get("category"),
+        ).order_by('-m3u_account__priority', 'id')
         relation = get_enabled_series_relations_queryset(relation).first()
 
         if not relation:
@@ -404,12 +611,14 @@ class SeriesViewSet(viewsets.ReadOnlyModelViewSet):
                     series.refresh_from_db()  # Reload from database after refresh
                     relation.refresh_from_db()  # Reload relation too
 
+            relation_display_name = _extract_relation_display_name(relation, series.name)
+
             # Return the database data (which should now be fresh)
             custom_props = relation.custom_properties or {}
             response_data = {
                 'id': series.id,
                 'series_id': relation.external_series_id,
-                'name': series.name,
+                'name': relation_display_name,
                 'description': series.description,
                 'year': series.year,
                 'genre': series.genre,
@@ -445,13 +654,21 @@ class SeriesViewSet(viewsets.ReadOnlyModelViewSet):
                         episodes_by_season[season_key] = []
 
                     # Get episode relation for additional data
-                    episode_relation = M3UEpisodeRelation.objects.filter(
+                    episode_relations = M3UEpisodeRelation.objects.filter(
                         episode=episode,
                         m3u_account=relation.m3u_account
+                    )
+                    episode_relation = episode_relations.filter(
+                        series_relation=relation
                     ).first()
+                    if episode_relation is None:
+                        episode_relation = episode_relations.filter(
+                            series_relation__isnull=True
+                        ).first()
 
                     episode_data = {
                         'id': episode.id,
+                        'stream_id': episode_relation.stream_id if episode_relation else '',
                         'uuid': episode.uuid,
                         'name': episode.name,
                         'title': episode.name,
@@ -469,7 +686,7 @@ class SeriesViewSet(viewsets.ReadOnlyModelViewSet):
                         'type': 'episode',
                         'series': {
                             'id': series.id,
-                            'name': series.name
+                            'name': relation_display_name
                         }
                     }
                     episodes_by_season[season_key].append(episode_data)
@@ -702,6 +919,22 @@ class UnifiedContentViewSet(viewsets.ReadOnlyModelViewSet):
                         'content_type': item_dict['content_type']
                     }
                     results.append(formatted_item)
+
+            if category:
+                movie_display_names = _build_movie_relation_display_name_map(
+                    [item["id"] for item in results if item["content_type"] == "movie"],
+                    category,
+                )
+                series_display_names = _build_series_relation_display_name_map(
+                    [item["id"] for item in results if item["content_type"] == "series"],
+                    category,
+                )
+
+                for item in results:
+                    if item["content_type"] == "movie":
+                        item["name"] = movie_display_names.get(item["id"], item["name"])
+                    elif item["content_type"] == "series":
+                        item["name"] = series_display_names.get(item["id"], item["name"])
 
             logger.error(f"Retrieved {len(results)} results via SQL")
 

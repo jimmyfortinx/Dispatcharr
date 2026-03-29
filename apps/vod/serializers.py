@@ -98,6 +98,7 @@ class VODCategorySerializer(serializers.ModelSerializer):
         ]
 
 class SeriesSerializer(serializers.ModelSerializer):
+    name = serializers.SerializerMethodField()
     logo = VODLogoSerializer(read_only=True)
     episode_count = serializers.SerializerMethodField()
 
@@ -105,16 +106,23 @@ class SeriesSerializer(serializers.ModelSerializer):
         model = Series
         fields = '__all__'
 
+    def get_name(self, obj):
+        return self.context.get("relation_display_names_by_id", {}).get(obj.id, obj.name)
+
     def get_episode_count(self, obj):
         return obj.episodes.count()
 
 
 class MovieSerializer(serializers.ModelSerializer):
+    name = serializers.SerializerMethodField()
     logo = VODLogoSerializer(read_only=True)
 
     class Meta:
         model = Movie
         fields = '__all__'
+
+    def get_name(self, obj):
+        return self.context.get("relation_display_names_by_id", {}).get(obj.id, obj.name)
 
 
 class EpisodeSerializer(serializers.ModelSerializer):

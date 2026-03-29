@@ -2,6 +2,8 @@ from django.test import TestCase, Client, RequestFactory
 from django.http import Http404
 from django.utils import timezone
 from django.urls import reverse
+from urllib.parse import parse_qs, urlparse
+from apps.accounts.models import User
 from apps.channels.models import Channel, ChannelGroup
 from apps.epg.models import EPGData, EPGSource
 from apps.m3u.models import M3UAccount
@@ -20,6 +22,7 @@ from apps.output.views import (
     xc_get_series,
     xc_get_series_info,
     xc_get_vod_info,
+    xc_movie_stream,
 )
 import xml.etree.ElementTree as ET
 
@@ -318,3 +321,197 @@ class OutputXtreamVodVisibilityTest(TestCase):
                 user=None,
                 vod_id=self.disabled_movie.id,
             )
+
+
+class OutputXtreamRelationSelectionTest(TestCase):
+    def setUp(self):
+        self.factory = RequestFactory()
+        self.account = M3UAccount.objects.create(
+            name="stalker-output-account",
+            account_type=M3UAccount.Types.STALKER,
+            is_active=True,
+            priority=100,
+        )
+        self.user = User.objects.create_user(
+            username="xtream-user",
+            password="testpass123",
+            custom_properties={"xc_password": "secret"},
+        )
+
+        self.fr_movie_category = VODCategory.objects.create(
+            name="|FR| FILMS 2026",
+            category_type="movie",
+        )
+        self.bg_movie_category = VODCategory.objects.create(
+            name="|BG| BULGARIA FILMI",
+            category_type="movie",
+        )
+        self.fr_series_category = VODCategory.objects.create(
+            name="|FR| SERIES",
+            category_type="series",
+        )
+        self.bg_series_category = VODCategory.objects.create(
+            name="|BG| SERIES",
+            category_type="series",
+        )
+
+        for category in (
+            self.fr_movie_category,
+            self.bg_movie_category,
+            self.fr_series_category,
+            self.bg_series_category,
+        ):
+            M3UVODCategoryRelation.objects.create(
+                m3u_account=self.account,
+                category=category,
+                enabled=True,
+            )
+
+        self.movie = Movie.objects.create(
+            name="BG - Accused (2026)",
+            year=2026,
+        )
+        self.fr_movie_relation = M3UMovieRelation.objects.create(
+            m3u_account=self.account,
+            movie=self.movie,
+            category=self.fr_movie_category,
+            stream_id="fr-movie-stream",
+            last_advanced_refresh=timezone.now(),
+            custom_properties={
+                "basic_data": {
+                    "title": "FR - Accused (2026)",
+                }
+            },
+        )
+        self.bg_movie_relation = M3UMovieRelation.objects.create(
+            m3u_account=self.account,
+            movie=self.movie,
+            category=self.bg_movie_category,
+            stream_id="bg-movie-stream",
+            last_advanced_refresh=timezone.now(),
+            custom_properties={
+                "basic_data": {
+                    "title": "BG - Accused (2026)",
+                }
+            },
+        )
+
+        self.series = Series.objects.create(
+            name="BG - Example Series",
+            year=2026,
+        )
+        self.fr_series_relation = M3USeriesRelation.objects.create(
+            m3u_account=self.account,
+            series=self.series,
+            category=self.fr_series_category,
+            external_series_id="fr-series",
+            last_episode_refresh=timezone.now(),
+            custom_properties={
+                "basic_data": {
+                    "title": "FR - Example Series",
+                },
+                "episodes_fetched": True,
+                "detailed_fetched": True,
+            },
+        )
+        self.bg_series_relation = M3USeriesRelation.objects.create(
+            m3u_account=self.account,
+            series=self.series,
+            category=self.bg_series_category,
+            external_series_id="bg-series",
+            last_episode_refresh=timezone.now(),
+            custom_properties={
+                "basic_data": {
+                    "title": "BG - Example Series",
+                },
+                "episodes_fetched": True,
+                "detailed_fetched": True,
+            },
+        )
+
+    def test_xc_get_vod_streams_uses_relation_title_and_relation_id(self):
+        request = self.factory.get("/player_api.php")
+
+        response = xc_get_vod_streams(
+            request,
+            user=None,
+            category_id=self.fr_movie_category.id,
+        )
+
+        self.assertEqual(len(response), 1)
+        self.assertEqual(response[0]["name"], "FR - Accused (2026)")
+        self.assertEqual(response[0]["stream_id"], self.fr_movie_relation.id)
+        self.assertEqual(response[0]["num"], self.fr_movie_relation.id)
+
+    def test_xc_get_vod_info_uses_relation_title_and_relation_id(self):
+        request = self.factory.get("/player_api.php")
+
+        response = xc_get_vod_info(
+            request,
+            user=None,
+            vod_id=self.fr_movie_relation.id,
+        )
+
+        self.assertEqual(response["info"]["name"], "FR - Accused (2026)")
+        self.assertEqual(response["movie_data"]["name"], "FR - Accused (2026)")
+        self.assertEqual(response["movie_data"]["stream_id"], self.fr_movie_relation.id)
+        self.assertEqual(
+            response["movie_data"]["category_id"],
+            str(self.fr_movie_category.id),
+        )
+
+    def test_xc_movie_stream_redirects_with_selected_relation_stream(self):
+        request = self.factory.get("/movie/xtream-user/secret/1.mp4")
+
+        response = xc_movie_stream(
+            request,
+            username=self.user.username,
+            password="secret",
+            stream_id=str(self.fr_movie_relation.id),
+            extension="mp4",
+        )
+
+        self.assertEqual(response.status_code, 302)
+        location = response["Location"]
+        parsed = urlparse(location)
+        self.assertEqual(
+            parsed.path,
+            reverse(
+                "proxy:vod_proxy:vod_stream",
+                kwargs={
+                    "content_type": "movie",
+                    "content_id": self.movie.uuid,
+                },
+            ),
+        )
+        params = parse_qs(parsed.query)
+        self.assertEqual(params["stream_id"], [self.fr_movie_relation.stream_id])
+        self.assertEqual(params["m3u_account_id"], [str(self.account.id)])
+
+    def test_xc_get_series_uses_relation_title(self):
+        request = self.factory.get("/player_api.php")
+
+        response = xc_get_series(
+            request,
+            user=None,
+            category_id=self.fr_series_category.id,
+        )
+
+        self.assertEqual(len(response), 1)
+        self.assertEqual(response[0]["name"], "FR - Example Series")
+        self.assertEqual(response[0]["series_id"], self.fr_series_relation.id)
+
+    def test_xc_get_series_info_uses_relation_title(self):
+        request = self.factory.get("/player_api.php")
+
+        response = xc_get_series_info(
+            request,
+            user=None,
+            series_id=self.fr_series_relation.id,
+        )
+
+        self.assertEqual(response["info"]["name"], "FR - Example Series")
+        self.assertEqual(
+            response["info"]["category_id"],
+            str(self.fr_series_category.id),
+        )

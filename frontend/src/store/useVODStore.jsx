@@ -97,7 +97,7 @@ const getSeriesDetails = (response, seriesId) => {
 const getEpisodeDetails = (episode, seasonNumber, seriesInfo) => {
   return {
     id: episode.id,
-    stream_id: episode.id,
+    stream_id: episode.stream_id || episode.id,
     name: episode.title || '',
     description: episode.plot || '',
     season_number: parseInt(seasonNumber) || 0,
@@ -243,7 +243,8 @@ const useVODStore = create((set, get) => ({
   fetchMovieDetailsFromProvider: async (movieId) => {
     set({ loading: true, error: null });
     try {
-      const response = await api.getMovieProviderInfo(movieId);
+      const category = get().filters.category;
+      const response = await api.getMovieProviderInfo(movieId, category);
 
       // Transform the response data to match our expected format
       const movieDetails = getMovieDetailsWithProvider(response, movieId);
@@ -264,7 +265,8 @@ const useVODStore = create((set, get) => ({
 
   fetchMovieProviders: async (movieId) => {
     try {
-      const response = await api.getMovieProviders(movieId);
+      const category = get().filters.category;
+      const response = await api.getMovieProviders(movieId, category);
       return response || [];
     } catch (error) {
       console.error('Failed to fetch movie providers:', error);
@@ -274,7 +276,8 @@ const useVODStore = create((set, get) => ({
 
   fetchSeriesProviders: async (seriesId) => {
     try {
-      const response = await api.getSeriesProviders(seriesId);
+      const category = get().filters.category;
+      const response = await api.getSeriesProviders(seriesId, category);
       return response || [];
     } catch (error) {
       console.error('Failed to fetch series providers:', error);
@@ -349,7 +352,8 @@ const useVODStore = create((set, get) => ({
   fetchSeriesInfo: async (seriesId) => {
     set({ loading: true, error: null });
     try {
-      const response = await api.getSeriesInfo(seriesId);
+      const category = get().filters.category;
+      const response = await api.getSeriesInfo(seriesId, category);
 
       // Transform the response data to match our expected format
       const seriesInfo = getSeriesDetails(response, seriesId);
