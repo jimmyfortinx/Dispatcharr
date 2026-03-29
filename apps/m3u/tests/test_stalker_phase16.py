@@ -86,6 +86,7 @@ class StalkerPhase16AccountInfoClientTests(TestCase):
                 return_value={
                     "name": "1252202",
                     "status": 0,
+                    "blocked": "0",
                     "created": "0",
                     "default_timezone": "Europe/Amsterdam",
                 },
@@ -111,7 +112,7 @@ class StalkerPhase16AccountInfoClientTests(TestCase):
             result.account_info["user_info"]["exp_date"],
             str(int(expected_expiration.timestamp())),
         )
-        self.assertEqual(result.account_info["user_info"]["status"], "Disabled")
+        self.assertEqual(result.account_info["user_info"]["status"], "Active")
         self.assertEqual(
             result.account_info["user_info"]["account_number"],
             "1252202",
@@ -123,6 +124,32 @@ class StalkerPhase16AccountInfoClientTests(TestCase):
             result.account_info["server_info"]["timezone"],
             "Europe/Amsterdam",
         )
+
+    def test_client_marks_blocked_accounts_as_disabled(self):
+        client = StalkerClient(
+            server_url="http://portal.example.com/c/",
+            mac="00:1A:79:00:00:82",
+        )
+
+        with (
+            patch.object(client, "handshake"),
+            patch.object(
+                client,
+                "get_profile",
+                return_value={
+                    "status": 0,
+                    "blocked": "1",
+                },
+            ),
+            patch.object(
+                client,
+                "get_main_info",
+                return_value={"phone": "December 25, 2026, 8:48 pm"},
+            ),
+        ):
+            result = client.discover_account_info()
+
+        self.assertEqual(result.account_info["user_info"]["status"], "Disabled")
 
 
 class StalkerPhase16AccountInfoPersistenceTests(TestCase):

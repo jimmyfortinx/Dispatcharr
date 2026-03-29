@@ -1172,9 +1172,15 @@ class StalkerClient:
             profile,
             keys=("status", "account_status", "state"),
         )
+        raw_blocked = self._first_non_empty(
+            main_info,
+            profile,
+            keys=("blocked", "is_blocked"),
+        )
         normalized_status = self._normalize_account_status(
             raw_status,
             expiration,
+            blocked=raw_blocked,
         )
 
         user_info = {
@@ -1526,7 +1532,12 @@ class StalkerClient:
         text = str(raw_value).strip()
         return text in {"0", "0.0"}
 
-    def _normalize_account_status(self, raw_status, expiration_timestamp):
+    def _normalize_account_status(
+        self,
+        raw_status,
+        expiration_timestamp,
+        blocked=None,
+    ):
         if expiration_timestamp:
             try:
                 expiration = datetime.fromtimestamp(
@@ -1538,16 +1549,22 @@ class StalkerClient:
             except (TypeError, ValueError, OSError):
                 pass
 
+        blocked_text = str(blocked).strip().lower() if blocked is not None else ""
+        if blocked_text in {"1", "true", "on", "yes", "blocked"}:
+            return "Disabled"
+
         if raw_status is None:
             return "Active"
 
         status_text = str(raw_status).strip().lower()
-        if status_text in {"0", "false", "off", "disabled", "disable", "inactive"}:
-            return "Disabled"
         if status_text in {"1", "true", "on", "active", "enabled", "enable"}:
             return "Active"
         if status_text in {"expired"}:
             return "Expired"
+        if status_text in {"disabled", "disable", "inactive", "blocked", "banned"}:
+            return "Disabled"
+        if status_text in {"0", "false", "off"}:
+            return "Active"
         return str(raw_status).strip() or "Unknown"
 
     def _first_non_empty(self, *sources, keys):
