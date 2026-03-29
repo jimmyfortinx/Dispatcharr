@@ -1745,8 +1745,18 @@ def refresh_m3u_groups(account_id, use_cache=False, full_refresh=False, scan_sta
 
         updated_props = dict(custom_props)
         updated_props["token"] = discovery.token
+        updated_props["stalker_portal_url"] = discovery.normalized_portal_url
         account.custom_properties = updated_props
         account.save(update_fields=["custom_properties"])
+
+        try:
+            refresh_stalker_account_profiles(account, client=client)
+        except StalkerError as exc:
+            logger.warning(
+                "Failed to refresh Stalker account metadata for account %s: %s",
+                account.id,
+                exc,
+            )
 
         groups = {}
         for genre in discovery.genres:
@@ -2741,6 +2751,52 @@ def get_transformed_credentials(account, profile=None):
         return base_url, base_username, base_password
 
 
+def update_account_info_for_profiles(account, account_info, profiles=None):
+    """Persist provider account metadata onto one or more profiles."""
+    from apps.m3u.models import M3UAccountProfile
+
+    if profiles is None:
+        profiles = M3UAccountProfile.objects.filter(m3u_account=account)
+
+    profiles_updated = 0
+    for profile in profiles:
+        existing_props = profile.custom_properties or {}
+        existing_props.update(account_info)
+        profile.custom_properties = existing_props
+        profile.save(update_fields=["custom_properties"])
+        profiles_updated += 1
+
+    return profiles_updated
+
+
+def refresh_stalker_account_profiles(account, client=None, profiles=None):
+    """Fetch and persist Stalker account metadata for the account's profiles."""
+    if client is None:
+        custom_props = account.custom_properties or {}
+        client = StalkerClient(
+            server_url=account.server_url,
+            mac=custom_props.get("mac", ""),
+            username=account.username or "",
+            password=account.password or "",
+            custom_properties=custom_props,
+        )
+
+    result = client.discover_account_info()
+
+    updated_props = dict(account.custom_properties or {})
+    updated_props["token"] = result.token
+    updated_props["stalker_portal_url"] = result.normalized_portal_url
+    account.custom_properties = updated_props
+    account.save(update_fields=["custom_properties"])
+
+    profiles_updated = update_account_info_for_profiles(
+        account,
+        result.account_info,
+        profiles=profiles,
+    )
+    return result, profiles_updated
+
+
 @shared_task
 def refresh_account_profiles(account_id):
     """Refresh account information for all active profiles of an XC account.
@@ -2854,49 +2910,54 @@ def refresh_account_info(profile_id):
         profile = M3UAccountProfile.objects.get(id=profile_id)
         account = profile.m3u_account
 
-        if account.account_type != M3UAccount.Types.XC:
+        if account.account_type == M3UAccount.Types.XC:
+            # Get transformed credentials using the helper function
+            transformed_url, transformed_username, transformed_password = get_transformed_credentials(account, profile)
+
+            # Initialize XtreamCodes client with extracted/transformed credentials
+            client = XCClient(
+                transformed_url,
+                transformed_username,
+                transformed_password,
+                account.get_user_agent(),
+            )        # Authenticate and get account info
+            auth_result = client.authenticate()
+            if not auth_result:
+                error_msg = f"Authentication failed for profile {profile.name} ({profile_id})"
+                logger.error(error_msg)
+
+                # Send error notification to frontend via websocket
+                send_websocket_update(
+                    "updates",
+                    "update",
+                    {
+                        "type": "account_info_refresh_error",
+                        "profile_id": profile_id,
+                        "profile_name": profile.name,
+                        "error": "Authentication failed with the provided credentials",
+                        "message": f"Failed to authenticate profile '{profile.name}'. Please check the credentials."
+                    }
+                )
+
+                release_task_lock("refresh_account_info", profile_id)
+                return error_msg
+
+            # Get account information
+            account_info = client.get_account_info()
+
+            # Update only this specific profile with the new account info
+            if not profile.custom_properties:
+                profile.custom_properties = {}
+            profile.custom_properties.update(account_info)
+            profile.save()
+        elif account.account_type == M3UAccount.Types.STALKER:
+            refresh_stalker_account_profiles(account)
+        else:
             release_task_lock("refresh_account_info", profile_id)
-            return f"Profile {profile_id} belongs to account {account.id} which is not an XtreamCodes account."
-
-        # Get transformed credentials using the helper function
-        transformed_url, transformed_username, transformed_password = get_transformed_credentials(account, profile)
-
-        # Initialize XtreamCodes client with extracted/transformed credentials
-        client = XCClient(
-            transformed_url,
-            transformed_username,
-            transformed_password,
-            account.get_user_agent(),
-        )        # Authenticate and get account info
-        auth_result = client.authenticate()
-        if not auth_result:
-            error_msg = f"Authentication failed for profile {profile.name} ({profile_id})"
-            logger.error(error_msg)
-
-            # Send error notification to frontend via websocket
-            send_websocket_update(
-                "updates",
-                "update",
-                {
-                    "type": "account_info_refresh_error",
-                    "profile_id": profile_id,
-                    "profile_name": profile.name,
-                    "error": "Authentication failed with the provided credentials",
-                    "message": f"Failed to authenticate profile '{profile.name}'. Please check the credentials."
-                }
+            return (
+                f"Profile {profile_id} belongs to account {account.id} "
+                "which does not support provider account info refresh."
             )
-
-            release_task_lock("refresh_account_info", profile_id)
-            return error_msg
-
-        # Get account information
-        account_info = client.get_account_info()
-
-        # Update only this specific profile with the new account info
-        if not profile.custom_properties:
-            profile.custom_properties = {}
-        profile.custom_properties.update(account_info)
-        profile.save()
 
         # Send success notification to frontend via websocket
         send_websocket_update(

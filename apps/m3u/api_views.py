@@ -579,11 +579,17 @@ class RefreshAccountInfoAPIView(APIView):
             profile = M3UAccountProfile.objects.get(id=profile_id)
             account = profile.m3u_account
 
-            if account.account_type != M3UAccount.Types.XC:
+            if account.account_type not in (
+                M3UAccount.Types.XC,
+                M3UAccount.Types.STALKER,
+            ):
                 return Response(
                     {
                         "success": False,
-                        "error": "Account info refresh is only available for XtreamCodes accounts",
+                        "error": (
+                            "Account info refresh is only available for "
+                            "XtreamCodes and Stalker accounts"
+                        ),
                     },
                     status=status.HTTP_400_BAD_REQUEST,
                 )
