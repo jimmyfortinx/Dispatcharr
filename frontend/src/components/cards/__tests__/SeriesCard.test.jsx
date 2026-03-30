@@ -53,7 +53,10 @@ vi.mock('lucide-react', () => ({
 const makeSeries = (overrides = {}) => ({
   id: 'series-1',
   name: 'Breaking Bad',
-  logo: { url: '/posters/breaking-bad.jpg' },
+  logo: {
+    url: '/posters/breaking-bad.jpg',
+    cache_url: '/api/vod/vodlogos/7/cache/',
+  },
   year: 2008,
   rating: 9.5,
   genre: 'Drama',
@@ -78,10 +81,10 @@ describe('SeriesCard', () => {
       expect(screen.getByText('Breaking Bad')).toBeInTheDocument();
     });
 
-    it('renders the poster image with correct src', () => {
+    it('renders the poster image with the cache url when available', () => {
       render(<SeriesCard series={makeSeries()} onClick={vi.fn()} />);
       const img = screen.getByAltText('Breaking Bad');
-      expect(img).toHaveAttribute('src', '/posters/breaking-bad.jpg');
+      expect(img).toHaveAttribute('src', '/api/vod/vodlogos/7/cache/');
     });
 
     it('renders a fallback image when poster_url is missing', () => {
@@ -124,6 +127,19 @@ describe('SeriesCard', () => {
         />
       );
       expect(screen.getByTestId('icon-play')).toBeInTheDocument();
+    });
+
+    it('falls back to logo.url when cache_url is missing', () => {
+      render(
+        <SeriesCard
+          series={makeSeries({ logo: { url: '/posters/fallback.jpg' } })}
+          onClick={vi.fn()}
+        />
+      );
+      expect(screen.getByAltText('Breaking Bad')).toHaveAttribute(
+        'src',
+        '/posters/fallback.jpg'
+      );
     });
 
     it('renders star icon', () => {

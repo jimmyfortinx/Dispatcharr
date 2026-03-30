@@ -14,6 +14,7 @@ import {
   getPlayerPrefs,
   savePlayerPrefs,
 } from '../utils/components/FloatingVideoUtils.js';
+import { getVODImageSrc } from '../utils/vodImages.js';
 
 const ResizeHandles = ({ startResize }) => {
   const HANDLE_SIZE = 18;
@@ -882,7 +883,11 @@ export default function FloatingVideo() {
             }}
             // Add poster for VOD if available
             {...(contentType === 'vod' && {
-              poster: metadata?.logo?.url, // Use VOD poster if available
+              poster: getVODImageSrc(
+                metadata?.movie_image,
+                metadata?.series_image,
+                metadata?.logo
+              ),
             })}
           />
 
