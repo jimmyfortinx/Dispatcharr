@@ -32,6 +32,7 @@ import {
   getMovieStreamUrl,
   getTechnicalDetails,
 } from '../utils/components/VODModalUtils.js';
+import { getVODImageSrc } from '../utils/vodImages.js';
 
 const Movie = ({
   onClickYouTubeTrailer,
@@ -330,6 +331,8 @@ const VODModal = ({ vod, opened, onClose }) => {
 
   // Use detailed data if available, otherwise use basic vod data
   const displayVOD = detailedVOD || vod;
+  const backdropSrc = getVODImageSrc(displayVOD.backdrop_path?.[0]);
+  const posterSrc = getVODImageSrc(displayVOD.movie_image, displayVOD.logo);
 
   return (
     <>
@@ -342,10 +345,10 @@ const VODModal = ({ vod, opened, onClose }) => {
       >
         <Box style={{ position: 'relative', minHeight: 400 }}>
           {/* Backdrop image as background */}
-          {displayVOD.backdrop_path && displayVOD.backdrop_path.length > 0 && (
+          {backdropSrc && (
             <>
               <Image
-                src={displayVOD.backdrop_path[0]}
+                src={backdropSrc}
                 alt={`${displayVOD.name} backdrop`}
                 fit="cover"
                 style={{
@@ -391,10 +394,10 @@ const VODModal = ({ vod, opened, onClose }) => {
               {/* Movie poster and basic info */}
               <Flex gap="md">
                 {/* Use movie_image or logo */}
-                {displayVOD.movie_image || displayVOD.logo?.url ? (
+                {posterSrc ? (
                   <Box style={{ flexShrink: 0 }}>
                     <Image
-                      src={displayVOD.movie_image || displayVOD.logo.url}
+                      src={posterSrc}
                       width={200}
                       height={300}
                       alt={displayVOD.name}

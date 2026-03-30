@@ -8,10 +8,12 @@ from django_filters.rest_framework import DjangoFilterBackend
 from django.shortcuts import get_object_or_404
 from django.http import StreamingHttpResponse, HttpResponse, FileResponse
 from django.db.models import Exists, OuterRef, Q
+from django.urls import reverse
 import django_filters
 import logging
 import os
 import requests
+from urllib.parse import urlparse, urlunparse
 from apps.accounts.permissions import (
     Authenticated,
     permission_classes_by_action,
@@ -41,6 +43,39 @@ from django.utils import timezone
 from datetime import timedelta
 
 logger = logging.getLogger(__name__)
+
+REMOTE_IMAGE_REQUEST_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/136.0.0.0 Safari/537.36"
+    ),
+    "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Connection": "close",
+}
+
+
+def _build_vod_logo_payload(request, logo):
+    if not logo:
+        return None
+
+    cache_url = reverse("api:vod:vodlogo-cache", args=[logo.id])
+
+    return {
+        "id": logo.id,
+        "url": logo.url,
+        "name": logo.name,
+        "cache_url": cache_url,
+    }
+
+
+def _http_fallback_url(url):
+    parsed = urlparse(str(url or "").strip())
+    if parsed.scheme != "https" or not parsed.netloc:
+        return None
+
+    return urlunparse(parsed._replace(scheme="http"))
 
 
 def _dedupe_relations_by_account(relations):
@@ -343,6 +378,7 @@ class MovieViewSet(viewsets.ReadOnlyModelViewSet):
         info = custom_props.get('detailed_info', {})
         movie_data = custom_props.get('movie_data', {})
         relation_display_name = _extract_relation_display_name(relation, movie.name)
+        logo_payload = _build_vod_logo_payload(request, movie.logo)
 
         # Build response with available data
         response_data = {
@@ -366,9 +402,10 @@ class MovieViewSet(viewsets.ReadOnlyModelViewSet):
             'duration_secs': movie.duration_secs or info.get('duration_secs'),
             'age': info.get('age', ''),
             'backdrop_path': (movie.custom_properties or {}).get('backdrop_path') or info.get('backdrop_path', []),
+            'logo': logo_payload,
             'cover': info.get('cover_big', ''),
             'cover_big': info.get('cover_big', ''),
-            'movie_image': movie.logo.url if movie.logo else info.get('movie_image', ''),
+            'movie_image': logo_payload['cache_url'] if logo_payload else info.get('movie_image', ''),
             'bitrate': info.get('bitrate', 0),
             'video': info.get('video', {}),
             'audio': info.get('audio', {}),
@@ -612,6 +649,7 @@ class SeriesViewSet(viewsets.ReadOnlyModelViewSet):
                     relation.refresh_from_db()  # Reload relation too
 
             relation_display_name = _extract_relation_display_name(relation, series.name)
+            logo_payload = _build_vod_logo_payload(request, series.logo)
 
             # Return the database data (which should now be fresh)
             custom_props = relation.custom_properties or {}
@@ -627,11 +665,8 @@ class SeriesViewSet(viewsets.ReadOnlyModelViewSet):
                 'imdb_id': series.imdb_id,
                 'category_id': relation.category.id if relation.category else None,
                 'category_name': relation.category.name if relation.category else None,
-                'cover': {
-                    'id': series.logo.id,
-                    'url': series.logo.url,
-                    'name': series.logo.name,
-                } if series.logo else None,
+                'cover': logo_payload,
+                'series_image': logo_payload['cache_url'] if logo_payload else '',
                 'last_refreshed': series.updated_at,
                 'custom_properties': series.custom_properties,
                 'm3u_account': {
@@ -1064,18 +1099,50 @@ class VODLogoViewSet(viewsets.ModelViewSet):
         else:
             # It's a remote URL - proxy it
             try:
-                response = requests.get(logo.url, stream=True, timeout=10)
-                response.raise_for_status()
-
-                content_type = response.headers.get('Content-Type', 'image/png')
-
-                return StreamingHttpResponse(
-                    response.iter_content(chunk_size=8192),
-                    content_type=content_type
+                response = requests.get(
+                    logo.url,
+                    headers=REMOTE_IMAGE_REQUEST_HEADERS,
+                    stream=True,
+                    timeout=10,
                 )
+                response.raise_for_status()
+            except requests.exceptions.SSLError as e:
+                fallback_url = _http_fallback_url(logo.url)
+                if not fallback_url:
+                    logger.error(f"Error fetching remote VOD logo {logo.url}: {str(e)}")
+                    return HttpResponse(status=404)
+
+                logger.warning(
+                    "Retrying remote VOD logo over HTTP after SSL error for %s: %s",
+                    logo.url,
+                    e,
+                )
+                try:
+                    response = requests.get(
+                        fallback_url,
+                        headers=REMOTE_IMAGE_REQUEST_HEADERS,
+                        stream=True,
+                        timeout=10,
+                    )
+                    response.raise_for_status()
+                except requests.exceptions.RequestException as fallback_error:
+                    logger.error(
+                        "Error fetching remote VOD logo %s after HTTP fallback %s: %s",
+                        logo.url,
+                        fallback_url,
+                        fallback_error,
+                    )
+                    return HttpResponse(status=404)
             except requests.exceptions.RequestException as e:
                 logger.error(f"Error fetching remote VOD logo {logo.url}: {str(e)}")
                 return HttpResponse(status=404)
+
+            content_type = response.headers.get('Content-Type', 'image/png')
+
+            return StreamingHttpResponse(
+                response.iter_content(chunk_size=8192),
+                content_type=content_type
+            )
 
     @action(detail=False, methods=["delete"], url_path="bulk-delete")
     def bulk_delete(self, request):
