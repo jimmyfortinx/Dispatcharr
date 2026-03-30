@@ -40,11 +40,6 @@ class VODLogoSerializer(serializers.ModelSerializer):
         return instance
 
     def get_cache_url(self, obj):
-        request = self.context.get("request")
-        if request:
-            return request.build_absolute_uri(
-                reverse("api:vod:vodlogo-cache", args=[obj.id])
-            )
         return reverse("api:vod:vodlogo-cache", args=[obj.id])
 
     def get_movie_count(self, obj):

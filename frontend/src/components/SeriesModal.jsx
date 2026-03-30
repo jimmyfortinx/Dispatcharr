@@ -43,15 +43,21 @@ import {
   sortEpisodesList,
   tmdbUrl,
 } from '../utils/components/SeriesModalUtils.js';
+import { getVODImageSrc } from '../utils/vodImages.js';
 import { YouTubeTrailerModal } from './modals/YouTubeTrailerModal.jsx';
 
 const Series = ({ displaySeries, onClickYouTubeTrailer }) => {
+  const posterSrc = getVODImageSrc(
+    displaySeries.series_image,
+    displaySeries.logo
+  );
+
   return (
     <Flex gap="md">
-      {displaySeries.series_image || displaySeries.logo?.url ? (
+      {posterSrc ? (
         <Box style={{ flexShrink: 0 }}>
           <Image
-            src={displaySeries.series_image || displaySeries.logo.url}
+            src={posterSrc}
             width={200}
             height={300}
             alt={displaySeries.name}
@@ -187,15 +193,17 @@ const Series = ({ displaySeries, onClickYouTubeTrailer }) => {
 };
 
 const Episode = ({ episode, displaySeries }) => {
+  const episodeImageSrc = getVODImageSrc(episode.movie_image, episode.logo);
+
   return (
     <Stack spacing="sm">
       {/* Episode Image and Description Row */}
       <Flex gap="md">
         {/* Episode Image */}
-        {episode.movie_image && (
+        {episodeImageSrc && (
           <Box style={{ flexShrink: 0 }}>
             <Image
-              src={episode.movie_image}
+              src={episodeImageSrc}
               width={120}
               height={160}
               alt={episode.name}
@@ -476,6 +484,7 @@ const SeriesModal = ({ series, opened, onClose }) => {
 
   // Use detailed data if available, otherwise use basic series data
   const displaySeries = detailedSeries || series;
+  const backdropSrc = getVODImageSrc(displaySeries.backdrop_path?.[0]);
 
   return (
     <>
@@ -488,41 +497,40 @@ const SeriesModal = ({ series, opened, onClose }) => {
       >
         <Box style={{ position: 'relative', minHeight: 400 }}>
           {/* Backdrop image as background */}
-          {displaySeries.backdrop_path &&
-            displaySeries.backdrop_path.length > 0 && (
-              <>
-                <Image
-                  src={displaySeries.backdrop_path[0]}
-                  alt={`${displaySeries.name} backdrop`}
-                  fit="cover"
-                  style={{
-                    position: 'absolute',
-                    top: 0,
-                    left: 0,
-                    width: '100%',
-                    height: '100%',
-                    objectFit: 'cover',
-                    zIndex: 0,
-                    borderRadius: 8,
-                    filter: 'blur(2px) brightness(0.5)',
-                  }}
-                />
-                {/* Overlay for readability */}
-                <Box
-                  style={{
-                    position: 'absolute',
-                    top: 0,
-                    left: 0,
-                    width: '100%',
-                    height: '100%',
-                    background:
-                      'linear-gradient(180deg, rgba(24,24,27,0.85) 60%, rgba(24,24,27,1) 100%)',
-                    zIndex: 1,
-                    borderRadius: 8,
-                  }}
-                />
-              </>
-            )}
+          {backdropSrc && (
+            <>
+              <Image
+                src={backdropSrc}
+                alt={`${displaySeries.name} backdrop`}
+                fit="cover"
+                style={{
+                  position: 'absolute',
+                  top: 0,
+                  left: 0,
+                  width: '100%',
+                  height: '100%',
+                  objectFit: 'cover',
+                  zIndex: 0,
+                  borderRadius: 8,
+                  filter: 'blur(2px) brightness(0.5)',
+                }}
+              />
+              {/* Overlay for readability */}
+              <Box
+                style={{
+                  position: 'absolute',
+                  top: 0,
+                  left: 0,
+                  width: '100%',
+                  height: '100%',
+                  background:
+                    'linear-gradient(180deg, rgba(24,24,27,0.85) 60%, rgba(24,24,27,1) 100%)',
+                  zIndex: 1,
+                  borderRadius: 8,
+                }}
+              />
+            </>
+          )}
 
           {/* Modal content above backdrop */}
           <Box style={{ position: 'relative', zIndex: 2 }}>
