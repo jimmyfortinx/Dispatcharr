@@ -288,8 +288,13 @@ class UserViewSet(viewsets.ModelViewSet):
             ALLOWED_FIELDS = {"custom_properties", "first_name", "last_name", "email", "password"}
             disallowed = set(request.data.keys()) - ALLOWED_FIELDS
 
-            for key in disallowed:
-                request.data.pop(key, None)
+            if disallowed:
+                raise serializers.ValidationError(
+                    {
+                        key: "This field cannot be updated via this endpoint."
+                        for key in sorted(disallowed)
+                    }
+                )
 
             serializer = UserSerializer(user, data=request.data, partial=True)
             serializer.is_valid(raise_exception=True)
