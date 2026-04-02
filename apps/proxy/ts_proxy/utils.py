@@ -81,10 +81,15 @@ def create_ts_packet(packet_type='null', message=None):
         packet[1] = 0x1F  # PID high bits (null packet)
         packet[2] = 0xFF  # PID low bits (null packet)
 
-    # Add message to payload if provided
+    # Add message to payload if provided.
+    # Initialization/error paths pass normal Python strings here.
     if message:
-        msg_bytes = message
-        packet[4:4+min(len(msg_bytes), 180)] = msg_bytes[:180]
+        if isinstance(message, str):
+            msg_bytes = message.encode('utf-8', errors='replace')
+        else:
+            msg_bytes = bytes(message)
+
+        packet[4:4 + min(len(msg_bytes), 180)] = msg_bytes[:180]
 
     return bytes(packet)
 
