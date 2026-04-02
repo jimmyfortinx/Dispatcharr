@@ -32,8 +32,9 @@ def should_skip_initialization():
     """
     # Skip management commands and background services
     skip_commands = [
-        'celery', 'beat', 'migrate', 'makemigrations', 'shell', 'dbshell',
-        'collectstatic', 'loaddata'
+        'celery', 'beat', 'migrate', 'makemigrations', 'showmigrations',
+        'shell', 'dbshell', 'collectstatic', 'loaddata', 'test', 'testserver',
+        'check', 'pytest'
     ]
     if any(cmd in sys.argv for cmd in skip_commands):
         logger.debug(f"Skipping initialization due to command: {sys.argv}")
