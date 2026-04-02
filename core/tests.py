@@ -1,3 +1,5 @@
+from unittest.mock import patch, MagicMock
+
 from django.test import TestCase
 
 from core.models import CoreSettings, DVR_SETTINGS_KEY, EPG_SETTINGS_KEY, PROXY_SETTINGS_KEY
@@ -149,7 +151,6 @@ class EpgIgnoreListsTest(TestCase):
             self._set_epg_field_raw(field, "not a list")
             self.assertEqual(getter(), [])
 
-
 class ProxySettingsDefaultsTest(TestCase):
     """Verify proxy settings expose merged defaults for new resilience knobs."""
 
@@ -168,3 +169,74 @@ class ProxySettingsDefaultsTest(TestCase):
         self.assertEqual(result["connection_ready_chunks"], 16)
         self.assertEqual(result["max_reconnect_attempts"], 5)
         self.assertEqual(result["min_stable_time_before_reconnect"], 10)
+
+
+class DropDBCommandTlsTest(TestCase):
+    """Verify dropdb management command passes TLS parameters to psycopg2."""
+    databases = []
+
+    _DB_WITH_TLS = {
+        'default': {
+            'ENGINE': 'django.db.backends.postgresql',
+            'NAME': 'testdb',
+            'USER': 'testuser',
+            'PASSWORD': 'testpass',
+            'HOST': 'localhost',
+            'PORT': 5432,
+            'OPTIONS': {
+                'sslmode': 'verify-full',
+                'sslrootcert': '/certs/ca.crt',
+                'sslcert': '/certs/client.crt',
+                'sslkey': '/certs/client.key',
+            },
+        }
+    }
+
+    _DB_NO_TLS = {
+        'default': {
+            'ENGINE': 'django.db.backends.postgresql',
+            'NAME': 'testdb',
+            'USER': 'testuser',
+            'PASSWORD': 'testpass',
+            'HOST': 'localhost',
+            'PORT': 5432,
+        }
+    }
+
+    @patch('core.management.commands.dropdb.psycopg2.connect')
+    @patch('core.management.commands.dropdb.connection')
+    @patch('builtins.input', return_value='yes')
+    def test_dropdb_passes_ssl_kwargs_when_tls_enabled(self, _inp, _conn, mock_connect):
+        mock_pg = MagicMock()
+        mock_connect.return_value = mock_pg
+        mock_pg.cursor.return_value = MagicMock()
+
+        with self.settings(DATABASES=self._DB_WITH_TLS):
+            from django.core.management import call_command
+            call_command('dropdb')
+
+        mock_connect.assert_called_once_with(
+            dbname='postgres', user='testuser', password='testpass',
+            host='localhost', port=5432,
+            sslmode='verify-full',
+            sslrootcert='/certs/ca.crt',
+            sslcert='/certs/client.crt',
+            sslkey='/certs/client.key',
+        )
+
+    @patch('core.management.commands.dropdb.psycopg2.connect')
+    @patch('core.management.commands.dropdb.connection')
+    @patch('builtins.input', return_value='yes')
+    def test_dropdb_no_ssl_kwargs_when_tls_disabled(self, _inp, _conn, mock_connect):
+        mock_pg = MagicMock()
+        mock_connect.return_value = mock_pg
+        mock_pg.cursor.return_value = MagicMock()
+
+        with self.settings(DATABASES=self._DB_NO_TLS):
+            from django.core.management import call_command
+            call_command('dropdb')
+
+        mock_connect.assert_called_once_with(
+            dbname='postgres', user='testuser', password='testpass',
+            host='localhost', port=5432,
+        )
