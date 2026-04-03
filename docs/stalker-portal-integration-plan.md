@@ -230,11 +230,13 @@ Add `STALKER` as a first-class account type and expose its fields in the UI.
 - A Stalker account can be created, edited, listed, and deleted from the UI
 - No refresh or connection logic is required yet
 
-### Phase 1: Connection Test
+### Phase 1: Initial Setup Discovery
 
 #### Goal
 
-Validate Stalker portal credentials from the UI without importing groups or streams yet.
+Validate Stalker portal access during provider creation, discover live groups immediately,
+and land the account in pending setup so the user can filter categories before the first
+full refresh.
 
 #### Backend work
 
@@ -243,26 +245,31 @@ Validate Stalker portal credentials from the UI without importing groups or stre
   - portal URL normalization
   - handshake
   - optional auth
-  - a small validation call such as genre or profile fetch
-- Add an API action for `test-connection`
+  - initial live genre discovery
+  - profile/account metadata refresh during setup
+- Trigger initial Stalker group discovery during account creation
+- Persist success/error details in `status` / `last_message`
 
 #### Frontend work
 
-- Add a `Test Connection` button to the Stalker form
-- Show success/error in the form and persist summary in `status` / `last_message`
+- Reuse the Xtream Codes create flow for Stalker:
+  - save the provider
+  - open the groups modal immediately after successful discovery
+  - let `Save and Refresh` perform the first full import
+- Keep setup failures non-blocking so the saved provider can be fixed and retried
 
 #### UI test
 
 - Test with:
-  - valid portal + MAC
-  - wrong endpoint
-  - wrong MAC
-  - auth-required portal with bad credentials
+  - valid portal + MAC opens the groups step
+  - wrong endpoint persists a usable error on the provider
+  - wrong MAC persists a usable error on the provider
+  - auth-required portal with bad credentials persists a usable error on the provider
 
 #### Done when
 
-- The M3U table shows usable Stalker-specific connection errors
-- No shell access is needed to validate the portal
+- The M3U table shows usable Stalker-specific setup errors
+- A new Stalker provider reaches the groups filter step without a manual test button
 
 ### Phase 2: Group Discovery
 

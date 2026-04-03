@@ -1,9 +1,13 @@
 from unittest.mock import patch
 
+from django.contrib.auth import get_user_model
 from django.test import TestCase
+from rest_framework import status
+from rest_framework.test import APIClient
 
 from apps.m3u.models import M3UAccount
 from apps.m3u.serializers import M3UAccountSerializer
+from apps.m3u.stalker import StalkerClient
 
 
 class StalkerPhase0SerializerTests(TestCase):
@@ -129,22 +133,6 @@ class StalkerPhase0SignalTests(TestCase):
 
         mock_delay.assert_called_once()
 
-
-from unittest.mock import patch
-
-from django.contrib.auth import get_user_model
-from django.test import TestCase
-from rest_framework import status
-from rest_framework.test import APIClient
-
-from apps.m3u.models import M3UAccount
-from apps.m3u.stalker import (
-    StalkerClient,
-    StalkerConnectionResult,
-    StalkerError,
-)
-
-
 User = get_user_model()
 
 
@@ -191,51 +179,107 @@ class StalkerPhase1APITests(TestCase):
             custom_properties={"mac": "00:1A:79:00:00:10"},
         )
 
-    @patch("apps.m3u.api_views.StalkerClient.test_connection")
-    def test_test_connection_success_updates_status_and_message(self, mock_test):
-        mock_test.return_value = StalkerConnectionResult(
-            normalized_portal_url="http://portal.example.com/stalker_portal/server/load.php",
-            profile_name="Demo User",
-            genre_count=12,
-            token="ABC123TOKEN",
-            used_authentication=True,
+    def create_payload(self, **overrides):
+        payload = {
+            "name": "New Stalker Provider",
+            "account_type": M3UAccount.Types.STALKER,
+            "server_url": "http://portal.example.com/c/",
+            "mac": "00:1A:79:00:00:20",
+            "username": "demo",
+            "password": "secret",
+        }
+        payload.update(overrides)
+        return payload
+
+    @patch("apps.m3u.api_views.refresh_m3u_groups")
+    def test_create_stalker_account_runs_initial_group_discovery(self, mock_refresh_groups):
+        def fake_refresh(account_id):
+            account = M3UAccount.objects.get(id=account_id)
+            account.status = M3UAccount.Status.PENDING_SETUP
+            account.last_message = (
+                "M3U groups loaded. Please select groups or refresh M3U to complete setup."
+            )
+            account.save(update_fields=["status", "last_message"])
+            return [], {"News": {"stalker_genre_id": "1"}}
+
+        mock_refresh_groups.side_effect = fake_refresh
+        response = self.client.post(
+            "/api/m3u/accounts/",
+            self.create_payload(),
+            format="json",
         )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        created = M3UAccount.objects.get(id=response.data["id"])
+        self.assertEqual(created.status, M3UAccount.Status.PENDING_SETUP)
+        self.assertIn("Please select groups", created.last_message)
+        mock_refresh_groups.assert_called_once_with(created.id)
+
+    @patch("apps.m3u.api_views.refresh_m3u_groups")
+    def test_create_stalker_account_persists_error_when_initial_discovery_fails(
+        self,
+        mock_refresh_groups,
+    ):
+        def fake_refresh(account_id):
+            account = M3UAccount.objects.get(id=account_id)
+            account.status = M3UAccount.Status.ERROR
+            account.last_message = "Portal rejected the provided credentials."
+            account.save(update_fields=["status", "last_message"])
+            return "Portal rejected the provided credentials.", None
+
+        mock_refresh_groups.side_effect = fake_refresh
 
         response = self.client.post(
-            f"/api/m3u/accounts/{self.account.id}/test-connection/", format="json"
+            "/api/m3u/accounts/",
+            self.create_payload(name="Broken Stalker Provider"),
+            format="json",
         )
 
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.account.refresh_from_db()
-        self.assertEqual(self.account.status, M3UAccount.Status.SUCCESS)
-        self.assertIn("Retrieved 12 live genres", self.account.last_message)
-        self.assertEqual(self.account.custom_properties["token"], "ABC123TOKEN")
-        self.assertEqual(response.data["account"]["status"], M3UAccount.Status.SUCCESS)
-
-    @patch("apps.m3u.api_views.StalkerClient.test_connection")
-    def test_test_connection_failure_updates_error_status(self, mock_test):
-        mock_test.side_effect = StalkerError("Portal rejected the provided credentials.")
-
-        response = self.client.post(
-            f"/api/m3u/accounts/{self.account.id}/test-connection/", format="json"
-        )
-
-        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.account.refresh_from_db()
-        self.assertEqual(self.account.status, M3UAccount.Status.ERROR)
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        created = M3UAccount.objects.get(id=response.data["id"])
+        self.assertEqual(created.status, M3UAccount.Status.ERROR)
         self.assertEqual(
-            self.account.last_message, "Portal rejected the provided credentials."
+            created.last_message, "Portal rejected the provided credentials."
         )
+        mock_refresh_groups.assert_called_once_with(created.id)
 
-    def test_test_connection_rejects_non_stalker_accounts(self):
-        standard = M3UAccount.objects.create(
-            name="Standard API",
-            account_type=M3UAccount.Types.STADNARD,
-            server_url="http://playlist.example.com/list.m3u",
-        )
+    @patch("apps.vod.tasks.refresh_categories")
+    @patch("apps.m3u.api_views.ensure_default_vod_category_relations")
+    @patch("apps.m3u.api_views.refresh_m3u_groups")
+    def test_create_vod_enabled_stalker_account_preloads_vod_categories(
+        self,
+        mock_refresh_groups,
+        mock_ensure_relations,
+        mock_refresh_categories,
+    ):
+        def fake_refresh(account_id):
+            account = M3UAccount.objects.get(id=account_id)
+            account.status = M3UAccount.Status.PENDING_SETUP
+            account.last_message = "M3U groups loaded."
+            account.save(update_fields=["status", "last_message"])
+            return [], {"News": {"stalker_genre_id": "1"}}
+
+        mock_refresh_groups.side_effect = fake_refresh
 
         response = self.client.post(
-            f"/api/m3u/accounts/{standard.id}/test-connection/", format="json"
+            "/api/m3u/accounts/",
+            self.create_payload(
+                name="Stalker With VOD",
+                enable_vod=True,
+            ),
+            format="json",
         )
 
-        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        created = M3UAccount.objects.get(id=response.data["id"])
+        mock_refresh_groups.assert_called_once_with(created.id)
+        mock_ensure_relations.assert_called_once()
+        mock_refresh_categories.assert_called_once_with(created.id)
+
+    def test_removed_test_connection_endpoint_returns_404(self):
+        response = self.client.post(
+            f"/api/m3u/accounts/{self.account.id}/test-connection/",
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)

@@ -3,7 +3,6 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 from apps.accounts.permissions import (
     Authenticated,
-    IsAdmin,
     permission_classes_by_action,
     permission_classes_by_method,
 )
@@ -49,8 +48,6 @@ class M3UAccountViewSet(viewsets.ModelViewSet):
     serializer_class = M3UAccountSerializer
 
     def get_permissions(self):
-        if self.action == "test_connection":
-            return [IsAdmin()]
         try:
             return [perm() for perm in permission_classes_by_action[self.action]]
         except KeyError:
@@ -111,10 +108,17 @@ class M3UAccountViewSet(viewsets.ModelViewSet):
                 from apps.vod.tasks import refresh_categories
 
                 refresh_categories(account_id)
-        elif account_type == M3UAccount.Types.STALKER and enable_vod:
-            ensure_default_vod_category_relations(
-                M3UAccount.objects.get(id=account_id)
-            )
+        elif account_type == M3UAccount.Types.STALKER:
+            refresh_m3u_groups(account_id)
+
+            if enable_vod:
+                ensure_default_vod_category_relations(
+                    M3UAccount.objects.get(id=account_id)
+                )
+
+                from apps.vod.tasks import refresh_categories
+
+                refresh_categories(account_id)
 
         # After the instance is created, return the response
         return response
@@ -196,62 +200,6 @@ class M3UAccountViewSet(viewsets.ModelViewSet):
 
         # Continue with regular partial update
         return super().partial_update(request, *args, **kwargs)
-
-    @action(detail=True, methods=["post"], url_path="test-connection")
-    def test_connection(self, request, pk=None):
-        account = self.get_object()
-
-        if account.account_type != M3UAccount.Types.STALKER:
-            return Response(
-                {"error": "Connection testing is only available for Stalker accounts"},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        custom_props = account.custom_properties or {}
-        mac = custom_props.get("mac", "")
-
-        client = StalkerClient(
-            server_url=account.server_url,
-            mac=mac,
-            username=account.username or "",
-            password=account.password or "",
-            custom_properties=custom_props,
-        )
-
-        try:
-            result = client.test_connection()
-        except StalkerError as exc:
-            account.status = M3UAccount.Status.ERROR
-            account.last_message = str(exc)
-            account.save(update_fields=["status", "last_message"])
-            return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
-
-        updated_props = dict(custom_props)
-        updated_props["token"] = result.token
-        account.custom_properties = updated_props
-        account.status = M3UAccount.Status.SUCCESS
-        account.last_message = (
-            f"Connected to {result.normalized_portal_url} as {result.profile_name}. "
-            f"Retrieved {result.genre_count} live genres."
-        )
-        account.save(
-            update_fields=[
-                "custom_properties",
-                "status",
-                "last_message",
-            ]
-        )
-
-        return Response(
-            {
-                "message": account.last_message,
-                "normalized_portal_url": result.normalized_portal_url,
-                "profile_name": result.profile_name,
-                "genre_count": result.genre_count,
-                "used_authentication": result.used_authentication,
-                "account": self.get_serializer(account).data,
-            }
-        )
 
     @action(detail=True, methods=["post"], url_path="refresh-vod")
     def refresh_vod(self, request, pk=None):

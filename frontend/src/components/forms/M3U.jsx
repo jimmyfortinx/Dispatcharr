@@ -1,14 +1,12 @@
 // Modal.js
-import React, { useState, useEffect } from 'react';
+import { useState, useEffect } from 'react';
 import API from '../../api';
 import useUserAgentsStore from '../../store/userAgents';
 import M3UProfiles from './M3UProfiles';
 import {
   LoadingOverlay,
   TextInput,
-  Button,
-  Alert,
-  Checkbox,
+  Button, Checkbox,
   Modal,
   Flex,
   Select,
@@ -20,8 +18,7 @@ import {
   Switch,
   Box,
   PasswordInput,
-  Collapse,
-  Text,
+  Collapse
 } from '@mantine/core';
 import M3UGroupFilter from './M3UGroupFilter';
 import useChannelsStore from '../../store/channels';
@@ -54,7 +51,6 @@ const M3U = ({
   const [showCredentialFields, setShowCredentialFields] = useState(false);
   const [scheduleType, setScheduleType] = useState('interval');
   const [showAdvancedDeviceFields, setShowAdvancedDeviceFields] = useState(false);
-  const [testingConnection, setTestingConnection] = useState(false);
 
   const form = useForm({
     mode: 'uncontrolled',
@@ -260,13 +256,6 @@ const M3U = ({
         return;
       }
 
-      if (values.account_type === 'STALKER') {
-        if (newPlaylist) {
-          setPlaylist(newPlaylist);
-        }
-        return;
-      }
-
       // Fetch the updated playlist details (this also updates the store via API)
       const updatedPlaylist = await API.getPlaylist(newPlaylist.id);
 
@@ -281,44 +270,34 @@ const M3U = ({
         (values.account_type === 'XC' || values.account_type === 'STALKER') &&
         values.enable_vod
       ) {
-        fetchCategories();
+        await fetchCategories();
       }
 
-      console.log('opening group options');
       setPlaylist(updatedPlaylist);
-      setGroupFilterModalOpen(true);
+
+      const hasLiveSetupData =
+        (updatedPlaylist?.channel_groups || []).length > 0;
+      const hasVodSetupData =
+        values.enable_vod &&
+        Object.values(useVODStore.getState().categories || {}).some((category) =>
+          (category.m3u_accounts || []).some(
+            (account) => account.m3u_account == updatedPlaylist.id
+          )
+        );
+
+      if (
+        values.account_type === 'XC' ||
+        hasLiveSetupData ||
+        hasVodSetupData
+      ) {
+        setGroupFilterModalOpen(true);
+      }
       return;
     }
 
     form.reset();
     setFile(null);
     onClose(newPlaylist);
-  };
-
-  const handleTestConnection = async () => {
-    if (!playlist?.id) {
-      notifications.show({
-        title: 'Save Required',
-        message: 'Save the Stalker account before testing the connection.',
-        color: 'yellow',
-      });
-      return;
-    }
-
-    setTestingConnection(true);
-    try {
-      const response = await API.testStalkerConnection(playlist.id);
-      if (response?.account) {
-        setPlaylist(response.account);
-      }
-      notifications.show({
-        title: 'Connection Successful',
-        message: response?.message || 'The Stalker portal connection succeeded.',
-        color: 'green',
-      });
-    } finally {
-      setTestingConnection(false);
-    }
   };
 
   const close = () => {
@@ -573,15 +552,6 @@ const M3U = ({
                       />
                     </Stack>
                   </Collapse>
-
-                  {playlist?.last_message && (
-                    <Alert
-                      color={playlist.status === 'error' ? 'red' : 'green'}
-                      variant="light"
-                    >
-                      <Text size="sm">{playlist.last_message}</Text>
-                    </Alert>
-                  )}
                 </Stack>
               )}
 
@@ -674,7 +644,7 @@ const M3U = ({
                 description="Priority for VOD provider selection (higher numbers = higher priority). Used when multiple providers offer the same content."
                 {...form.getInputProps('priority')}
                 key={form.key('priority')}
-                disabled={!isXC}
+                disabled={!isXC && !isStalker}
               />
 
               <Checkbox
@@ -721,17 +691,6 @@ const M3U = ({
                 >
                   Profiles
                 </Button>
-                {isStalker && (
-                  <Button
-                    type="button"
-                    variant="light"
-                    size="sm"
-                    onClick={handleTestConnection}
-                    loading={testingConnection}
-                  >
-                    Test Connection
-                  </Button>
-                )}
               </>
             )}
 
