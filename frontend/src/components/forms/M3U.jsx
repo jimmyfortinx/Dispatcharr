@@ -552,6 +552,15 @@ const M3U = ({
                       />
                     </Stack>
                   </Collapse>
+
+                  {playlist?.last_message && playlist.status === 'error' && (
+                    <Alert
+                      color="red"
+                      variant="light"
+                    >
+                      <Text size="sm">{playlist.last_message}</Text>
+                    </Alert>
+                  )}
                 </Stack>
               )}
 
