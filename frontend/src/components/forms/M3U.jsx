@@ -6,7 +6,9 @@ import M3UProfiles from './M3UProfiles';
 import {
   LoadingOverlay,
   TextInput,
-  Button, Checkbox,
+  Button,
+  Alert,
+  Checkbox,
   Modal,
   Flex,
   Select,
@@ -18,7 +20,8 @@ import {
   Switch,
   Box,
   PasswordInput,
-  Collapse
+  Collapse,
+  Text
 } from '@mantine/core';
 import M3UGroupFilter from './M3UGroupFilter';
 import useChannelsStore from '../../store/channels';
