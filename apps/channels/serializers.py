@@ -15,6 +15,7 @@ from .models import (
     RecurringRecordingRule,
 )
 from apps.epg.serializers import EPGDataSerializer
+from apps.m3u.models import M3UAccount
 from core.models import StreamProfile
 from apps.epg.models import EPGData
 from django.urls import reverse
@@ -92,6 +93,8 @@ class LogoSerializer(serializers.ModelSerializer):
 # Stream
 #
 class StreamSerializer(serializers.ModelSerializer):
+    proxy_url = serializers.SerializerMethodField()
+    source_url = serializers.SerializerMethodField()
     url = serializers.CharField(
         required=False,
         allow_blank=True,
@@ -112,6 +115,8 @@ class StreamSerializer(serializers.ModelSerializer):
             "id",
             "name",
             "url",
+            "source_url",
+            "proxy_url",
             "m3u_account",  # Uncomment if using M3U fields
             "logo_url",
             "tvg_id",
@@ -148,6 +153,31 @@ class StreamSerializer(serializers.ModelSerializer):
             fields["channel_group"].read_only = True
 
         return fields
+
+    def get_proxy_url(self, obj):
+        request = self.context.get("request")
+        channel = self.context.get("parent_channel")
+        if channel is None:
+            channel = obj.channels.all().order_by("channelstream__order", "id").first()
+        if channel is None:
+            return None
+
+        path = f"/proxy/ts/stream/{channel.uuid}"
+        if request is None:
+            return path
+        return request.build_absolute_uri(path)
+
+    def get_source_url(self, obj):
+        return obj.url
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        if (
+            getattr(instance, "m3u_account", None)
+            and instance.m3u_account.account_type == M3UAccount.Types.STALKER
+        ):
+            data["url"] = data.get("proxy_url")
+        return data
 
 
 class ChannelGroupM3UAccountSerializer(serializers.ModelSerializer):
@@ -280,6 +310,7 @@ class ChannelSerializer(serializers.ModelSerializer):
     )
 
     auto_created_by_name = serializers.SerializerMethodField()
+    channel_url = serializers.SerializerMethodField()
 
     class Meta:
         model = Channel
@@ -300,6 +331,7 @@ class ChannelSerializer(serializers.ModelSerializer):
             "auto_created",
             "auto_created_by",
             "auto_created_by_name",
+            "channel_url",
         ]
 
     def to_representation(self, instance):
@@ -322,10 +354,19 @@ class ChannelSerializer(serializers.ModelSerializer):
     def get_logo(self, obj):
         return LogoSerializer(obj.logo).data
 
+    def get_channel_url(self, obj):
+        request = self.context.get("request")
+        path = f"/proxy/ts/stream/{obj.uuid}"
+        if request is None:
+            return path
+        return request.build_absolute_uri(path)
+
     def get_streams(self, obj):
         """Retrieve ordered stream IDs for GET requests."""
         return StreamSerializer(
-            obj.streams.all().order_by("channelstream__order"), many=True
+            obj.streams.all().order_by("channelstream__order"),
+            many=True,
+            context={**self.context, "parent_channel": obj},
         ).data
 
     def create(self, validated_data):

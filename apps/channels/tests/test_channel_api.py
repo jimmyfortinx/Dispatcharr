@@ -3,7 +3,8 @@ from django.contrib.auth import get_user_model
 from rest_framework.test import APIClient
 from rest_framework import status
 
-from apps.channels.models import Channel, ChannelGroup
+from apps.channels.models import Channel, ChannelGroup, Stream
+from apps.m3u.models import M3UAccount
 
 User = get_user_model()
 
@@ -209,3 +210,76 @@ class ChannelBulkEditAPITests(TestCase):
         self.assertEqual(self.channel1.name, "Only Name Changed")
         self.assertEqual(self.channel1.channel_number, original_channel_number)
         self.assertEqual(self.channel1.tvg_id, original_tvg_id)
+
+
+class ChannelProxyUrlAPITests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(username="proxyuser", password="testpass123")
+        self.user.user_level = 10
+        self.user.save()
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.user)
+
+        self.group = ChannelGroup.objects.create(name="Proxy Group")
+        self.channel = Channel.objects.create(
+            channel_number=101.0,
+            name="Portal Channel",
+            channel_group=self.group,
+        )
+        self.stalker_account = M3UAccount.objects.create(
+            name="Portal Account",
+            account_type=M3UAccount.Types.STALKER,
+            server_url="http://portal.example.com/c/",
+        )
+        self.stream = Stream.objects.create(
+            name="Portal Stream",
+            url="http://portal.example.com/stalker_portal/server/load.php",
+            m3u_account=self.stalker_account,
+        )
+        self.channel.streams.add(self.stream)
+
+    def test_channel_list_includes_proxy_channel_url(self):
+        response = self.client.get("/api/channels/channels/")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        result = next(item for item in response.data if item["id"] == self.channel.id)
+
+        self.assertEqual(
+            result["channel_url"],
+            f"http://testserver/proxy/ts/stream/{self.channel.uuid}",
+        )
+
+    def test_channel_list_with_streams_includes_proxy_url_on_nested_streams(self):
+        response = self.client.get("/api/channels/channels/?include_streams=true")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        result = next(item for item in response.data if item["id"] == self.channel.id)
+
+        self.assertEqual(len(result["streams"]), 1)
+        self.assertEqual(
+            result["streams"][0]["proxy_url"],
+            f"http://testserver/proxy/ts/stream/{self.channel.uuid}",
+        )
+        self.assertEqual(
+            result["streams"][0]["url"],
+            f"http://testserver/proxy/ts/stream/{self.channel.uuid}",
+        )
+        self.assertEqual(
+            result["streams"][0]["source_url"],
+            "http://portal.example.com/stalker_portal/server/load.php",
+        )
+
+    def test_stream_list_serializes_stalker_url_as_proxy_url(self):
+        response = self.client.get("/api/channels/streams/")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        result = next(item for item in response.data["results"] if item["id"] == self.stream.id)
+
+        self.assertEqual(
+            result["url"],
+            f"http://testserver/proxy/ts/stream/{self.channel.uuid}",
+        )
+        self.assertEqual(
+            result["source_url"],
+            "http://portal.example.com/stalker_portal/server/load.php",
+        )
