@@ -45,8 +45,7 @@ from apps.proxy.utils import check_user_stream_limits
 logger = get_logger()
 
 
-@api_view(["GET"])
-def stream_ts(request, channel_id, user=None):
+def _stream_ts_impl(request, channel_id, user=None, force_redirect=False):
     if not network_access_allowed(request, "STREAMS"):
         return JsonResponse({"error": "Forbidden"}, status=403)
 
@@ -271,7 +270,7 @@ def stream_ts(request, channel_id, user=None):
 
             # Generate transcode command if needed
             stream_profile = channel.get_stream_profile()
-            if stream_profile.is_redirect():
+            if force_redirect or stream_profile.is_redirect():
                 # Validate the stream URL before redirecting
                 from .url_utils import (
                     validate_stream_url,
@@ -553,6 +552,16 @@ def stream_ts(request, channel_id, user=None):
             except Exception:
                 pass
         return JsonResponse({"error": str(e)}, status=500)
+
+
+@api_view(["GET"])
+def stream_ts(request, channel_id, user=None):
+    return _stream_ts_impl(request, channel_id, user=user, force_redirect=False)
+
+
+@api_view(["GET"])
+def stream_ts_redirect(request, channel_id, user=None):
+    return _stream_ts_impl(request, channel_id, user=user, force_redirect=True)
 
 
 @api_view(["GET"])

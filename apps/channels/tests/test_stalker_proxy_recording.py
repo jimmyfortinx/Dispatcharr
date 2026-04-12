@@ -581,7 +581,7 @@ from requests.exceptions import ChunkedEncodingError
 from apps.channels.models import Channel, Recording, Stream
 from apps.channels.tasks import build_dvr_request_headers, build_dvr_stream_url, run_recording
 from apps.m3u.models import M3UAccount, M3UAccountProfile
-from apps.proxy.ts_proxy.views import stream_ts
+from apps.proxy.ts_proxy.views import stream_ts, stream_ts_redirect
 from core.models import PROXY_PROFILE_NAME, StreamProfile, UserAgent
 
 
@@ -725,6 +725,58 @@ class StalkerPhase9DvrTests(TestCase):
             self.account_profile.id,
         )
         proxy_server.client_managers[channel_id].add_client.assert_called_once()
+
+    def test_stream_ts_redirect_returns_http_redirect_without_initializing_proxy(self):
+        channel_id = str(self.channel.uuid)
+        request = self.factory.get(
+            f"/proxy/ts/redirect/{channel_id}",
+            HTTP_USER_AGENT="ECM-Probe/1.0",
+        )
+
+        proxy_server = MagicMock()
+        proxy_server.worker_id = "worker-1"
+        proxy_server.check_if_channel_exists.return_value = False
+        proxy_server.am_i_owner.return_value = False
+        proxy_server.stream_buffers = {}
+        proxy_server.client_managers = {}
+
+        redis_client = MagicMock()
+        redis_client.exists.return_value = False
+        proxy_server.redis_client = redis_client
+
+        with patch(
+            "apps.proxy.ts_proxy.views.network_access_allowed",
+            return_value=True,
+        ), patch(
+            "apps.proxy.ts_proxy.views.ProxyServer.get_instance",
+            return_value=proxy_server,
+        ), patch(
+            "apps.proxy.ts_proxy.views.generate_stream_url",
+            return_value=(
+                "http://resolved.example.com/live/world-news",
+                "DispatcharrTest/2.0",
+                {"Authorization": "Bearer REFRESHED-TOKEN"},
+                False,
+                self.proxy_profile.id,
+                None,
+            ),
+        ) as mock_generate_stream_url, patch(
+            "apps.proxy.ts_proxy.url_utils.validate_stream_url",
+            return_value=(True, "http://resolved.example.com/live/world-news", 200, "ok"),
+        ) as mock_validate_stream_url, patch(
+            "apps.proxy.ts_proxy.views.ChannelService.initialize_channel",
+        ) as mock_initialize_channel:
+            response = stream_ts_redirect(request, channel_id)
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response["Location"], "http://resolved.example.com/live/world-news")
+        mock_generate_stream_url.assert_called_once_with(channel_id)
+        mock_validate_stream_url.assert_called_once_with(
+            "http://resolved.example.com/live/world-news",
+            user_agent="DispatcharrTest/2.0",
+            timeout=(5, 5),
+        )
+        mock_initialize_channel.assert_not_called()
 
     def test_run_recording_reconnects_to_ts_proxy_for_stalker_channels(self):
         now = timezone.now()

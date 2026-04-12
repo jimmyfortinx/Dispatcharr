@@ -246,7 +246,7 @@ class ChannelProxyUrlAPITests(TestCase):
 
         self.assertEqual(
             result["channel_url"],
-            f"http://testserver/proxy/ts/stream/{self.channel.uuid}",
+            f"http://testserver/proxy/ts/redirect/{self.channel.uuid}",
         )
 
     def test_channel_list_with_streams_includes_proxy_url_on_nested_streams(self):
@@ -261,8 +261,12 @@ class ChannelProxyUrlAPITests(TestCase):
             f"http://testserver/proxy/ts/stream/{self.channel.uuid}",
         )
         self.assertEqual(
+            result["streams"][0]["redirect_url"],
+            f"http://testserver/proxy/ts/redirect/{self.channel.uuid}",
+        )
+        self.assertEqual(
             result["streams"][0]["url"],
-            f"http://testserver/proxy/ts/stream/{self.channel.uuid}",
+            f"http://testserver/proxy/ts/redirect/{self.channel.uuid}",
         )
         self.assertEqual(
             result["streams"][0]["source_url"],
@@ -277,7 +281,7 @@ class ChannelProxyUrlAPITests(TestCase):
 
         self.assertEqual(
             result["url"],
-            f"http://testserver/proxy/ts/stream/{self.channel.uuid}",
+            f"http://testserver/proxy/ts/redirect/{self.channel.uuid}",
         )
         self.assertEqual(
             result["source_url"],

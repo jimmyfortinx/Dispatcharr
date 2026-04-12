@@ -94,6 +94,7 @@ class LogoSerializer(serializers.ModelSerializer):
 #
 class StreamSerializer(serializers.ModelSerializer):
     proxy_url = serializers.SerializerMethodField()
+    redirect_url = serializers.SerializerMethodField()
     source_url = serializers.SerializerMethodField()
     url = serializers.CharField(
         required=False,
@@ -117,6 +118,7 @@ class StreamSerializer(serializers.ModelSerializer):
             "url",
             "source_url",
             "proxy_url",
+            "redirect_url",
             "m3u_account",  # Uncomment if using M3U fields
             "logo_url",
             "tvg_id",
@@ -167,6 +169,19 @@ class StreamSerializer(serializers.ModelSerializer):
             return path
         return request.build_absolute_uri(path)
 
+    def get_redirect_url(self, obj):
+        request = self.context.get("request")
+        channel = self.context.get("parent_channel")
+        if channel is None:
+            channel = obj.channels.all().order_by("channelstream__order", "id").first()
+        if channel is None:
+            return None
+
+        path = f"/proxy/ts/redirect/{channel.uuid}"
+        if request is None:
+            return path
+        return request.build_absolute_uri(path)
+
     def get_source_url(self, obj):
         return obj.url
 
@@ -176,7 +191,7 @@ class StreamSerializer(serializers.ModelSerializer):
             getattr(instance, "m3u_account", None)
             and instance.m3u_account.account_type == M3UAccount.Types.STALKER
         ):
-            data["url"] = data.get("proxy_url")
+            data["url"] = data.get("redirect_url")
         return data
 
 
@@ -356,7 +371,7 @@ class ChannelSerializer(serializers.ModelSerializer):
 
     def get_channel_url(self, obj):
         request = self.context.get("request")
-        path = f"/proxy/ts/stream/{obj.uuid}"
+        path = f"/proxy/ts/redirect/{obj.uuid}"
         if request is None:
             return path
         return request.build_absolute_uri(path)
