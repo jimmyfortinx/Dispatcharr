@@ -32,6 +32,7 @@ const RegexFormAndView = ({ profile = null, m3u, isOpen, onClose }) => {
   const [newPassword, setNewPassword] = useState('');
   const [simpleErrors, setSimpleErrors] = useState({});
   const isDefaultProfile = profile?.is_default;
+  const isXC = m3u?.account_type === 'XC';
 
   const hasProviderManagedExpiration =
     m3u?.account_type === 'XC' || m3u?.account_type === 'STALKER';

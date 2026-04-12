@@ -10,6 +10,7 @@ import gevent
 import re
 import json
 from typing import Optional, List
+from collections import deque
 from django.db import connection
 from django.shortcuts import get_object_or_404
 from urllib3.exceptions import ReadTimeoutError
@@ -131,6 +132,63 @@ class StreamManager:
         # Add HTTP reader thread property
         self.http_reader = None
 
+        # Reconnect diagnostics
+        self.last_transport_failure = None
+        self.last_transport_failure_at = None
+        self.recent_stderr_lines = deque(maxlen=20)
+
+    def _record_transport_failure(self, reason, **details):
+        """Capture the latest transport-side failure that may trigger recovery."""
+        details = dict(details)
+        if self.recent_stderr_lines:
+            details["stderr_tail"] = list(self.recent_stderr_lines)[-8:]
+        self.last_transport_failure = {
+            "reason": reason,
+            "details": details,
+        }
+        self.last_transport_failure_at = time.time()
+
+    def _log_reconnect_diagnostics(self, reason, level="warning", **details):
+        """Emit a compact snapshot of stream state around reconnect decisions."""
+        process_state = "none"
+        process_pid = None
+        if self.transcode_process is not None:
+            process_pid = self.transcode_process.pid
+            poll_result = self.transcode_process.poll()
+            process_state = (
+                "running" if poll_result is None else f"exited({poll_result})"
+            )
+
+        snapshot = {
+            "reason": reason,
+            "url": self.url,
+            "transcode": self.transcode,
+            "connected": self.connected,
+            "healthy": self.healthy,
+            "retry_count": self.retry_count,
+            "buffering": self.buffering,
+            "buffering_recovery_attempts": self.buffering_recovery_attempts,
+            "needs_reconnect": getattr(self, "needs_reconnect", False),
+            "needs_stream_switch": getattr(self, "needs_stream_switch", False),
+            "last_data_age": round(time.time() - self.last_data_time, 3),
+            "ffmpeg_process_pid": process_pid,
+            "ffmpeg_process_state": process_state,
+            "last_transport_failure": self.last_transport_failure,
+            "stderr_tail": list(self.recent_stderr_lines)[-8:],
+        }
+        snapshot.update(details)
+
+        log_method = getattr(logger, level, logger.warning)
+        log_method(
+            f"Reconnect diagnostics for channel {self.channel_id}: "
+            f"{json.dumps(snapshot, default=str, sort_keys=True)}"
+        )
+
+    def _remember_stderr_line(self, content):
+        """Keep a small rolling window of recent stderr for reconnect forensics."""
+        if content:
+            self.recent_stderr_lines.append(content)
+
     def _create_session(self):
         """Create and configure requests session with optimal settings"""
         session = requests.Session()
@@ -154,6 +212,58 @@ class StreamManager:
         session.mount('https://', adapter)
 
         return session
+
+    def _should_prefer_http_passthrough(self) -> bool:
+        """Use raw HTTP relay for native Stalker TS streams instead of ffmpeg copy."""
+        if not self.transcode:
+            return False
+
+        if getattr(self, "stream_type", None) != StreamType.TS:
+            return False
+
+        try:
+            channel_or_stream = get_stream_object(self.channel_id)
+            stream_profile = channel_or_stream.get_stream_profile()
+        except Exception as e:
+            logger.debug(
+                f"Unable to evaluate passthrough preference for channel "
+                f"{self.channel_id}: {e}"
+            )
+            return False
+
+        if not stream_profile or (stream_profile.command or "").lower() != "ffmpeg":
+            return False
+
+        normalized_parameters = " ".join((stream_profile.parameters or "").split())
+        expected_parameters = (
+            "-user_agent {userAgent} -i {streamUrl} -c copy -f mpegts pipe:1"
+        )
+        if normalized_parameters != expected_parameters:
+            return False
+
+        stream_obj = None
+        if isinstance(channel_or_stream, Stream):
+            stream_obj = channel_or_stream
+        elif self.current_stream_id:
+            try:
+                stream_obj = Stream.objects.get(id=self.current_stream_id)
+            except Stream.DoesNotExist:
+                return False
+
+        if stream_obj is None:
+            return False
+
+        custom_properties = stream_obj.custom_properties or {}
+        return custom_properties.get("provider_type") == "stalker"
+
+    def _apply_transport_mode_override(self):
+        """Prefer transparent relay when ffmpeg adds no value and hurts stability."""
+        if self._should_prefer_http_passthrough():
+            logger.info(
+                f"Using HTTP passthrough instead of ffmpeg copy for native "
+                f"Stalker TS stream on channel {self.channel_id}"
+            )
+            self.transcode = False
 
     def _wait_for_existing_processes_to_close(self, timeout=5.0):
         """Wait for existing processes/connections to fully close before establishing new ones"""
@@ -247,6 +357,8 @@ class StreamManager:
                     self.transcode = True
                     # We'll override the stream profile selection with ffmpeg in the transcoding section
                     self.force_ffmpeg = True
+                else:
+                    self._apply_transport_mode_override()
                 # Reset connection retry count for this specific URL
                 self.retry_count = 0
                 url_failed = False
@@ -258,6 +370,8 @@ class StreamManager:
                 while self.running and self.retry_count < self.max_retries and not url_failed and not self.needs_stream_switch:
                     if self.retry_count > 0:
                         self._refresh_runtime_stream_url(reason="retry")
+                        self.stream_type = detect_stream_type(self.url)
+                        self._apply_transport_mode_override()
 
                     logger.info(f"Connection attempt {self.retry_count + 1}/{self.max_retries} for URL: {self.url} for channel {self.channel_id}")
 
@@ -277,12 +391,18 @@ class StreamManager:
                             if self.retry_count > 0:
                                 try:
                                     channel_obj = Channel.objects.get(uuid=self.channel_id)
+                                    reconnect_reason = (
+                                        (self.last_transport_failure or {}).get("reason")
+                                        or "retry_loop"
+                                    )
                                     log_system_event(
                                         'channel_reconnect',
                                         channel_id=self.channel_id,
                                         channel_name=channel_obj.name,
                                         attempt=self.retry_count + 1,
-                                        max_attempts=self.max_retries
+                                        max_attempts=self.max_retries,
+                                        reason=reconnect_reason,
+                                        transport_failure=self.last_transport_failure,
                                     )
                                 except Exception as e:
                                     logger.error(f"Could not log reconnection event: {e}")
@@ -702,6 +822,8 @@ class StreamManager:
             if not content:
                 return
 
+            self._remember_stderr_line(content)
+
             # Convert to lowercase for easier matching
             content_lower = content.lower()
             # Check if we are still in the input phase
@@ -822,6 +944,17 @@ class StreamManager:
                         if buffering_duration > self.buffering_timeout:
                             # Buffering timeout reached, log error and try next stream
                             logger.error(f"Buffering timeout reached for channel {self.channel_id} after {buffering_duration:.1f} seconds")
+                            self._record_transport_failure(
+                                "buffering_timeout",
+                                buffering_duration=round(buffering_duration, 3),
+                                buffering_speed_threshold=self.buffering_speed,
+                            )
+                            self._log_reconnect_diagnostics(
+                                "buffering_timeout",
+                                buffering_duration=round(buffering_duration, 3),
+                                ffmpeg_speed=ffmpeg_speed,
+                                action="reconnect_current_stream_or_failover",
+                            )
                             recovery_attempts = getattr(self, 'buffering_recovery_attempts', 0)
                             max_recovery_attempts = getattr(
                                 self, 'max_buffering_recovery_attempts', 1
@@ -1335,12 +1468,36 @@ class StreamManager:
                         stable_threshold = ConfigHelper.min_stable_time_before_reconnect()
                         if stable_time >= stable_threshold:  # Stream was stable, try reconnect first
                             if not self.needs_reconnect:
+                                self._record_transport_failure(
+                                    "health_monitor_inactive",
+                                    inactivity_duration=round(inactivity_duration, 3),
+                                    stable_time=round(stable_time, 3),
+                                    timeout_threshold=timeout_threshold,
+                                )
+                                self._log_reconnect_diagnostics(
+                                    "health_monitor_set_reconnect",
+                                    inactivity_duration=round(inactivity_duration, 3),
+                                    stable_time=round(stable_time, 3),
+                                    timeout_threshold=timeout_threshold,
+                                )
                                 logger.info(f"Setting reconnect flag for stable stream (stable for {stable_time:.1f}s) for channel {self.channel_id}")
                                 self.needs_reconnect = True
                                 self.last_health_action_time = now
                         else:
                             # Stream wasn't stable, suggest stream switch
                             if not self.needs_stream_switch:
+                                self._record_transport_failure(
+                                    "health_monitor_unstable_stream",
+                                    inactivity_duration=round(inactivity_duration, 3),
+                                    stable_time=round(stable_time, 3),
+                                    timeout_threshold=timeout_threshold,
+                                )
+                                self._log_reconnect_diagnostics(
+                                    "health_monitor_set_stream_switch",
+                                    inactivity_duration=round(inactivity_duration, 3),
+                                    stable_time=round(stable_time, 3),
+                                    timeout_threshold=timeout_threshold,
+                                )
                                 logger.info(f"Setting stream switch flag for unstable stream (stable for {stable_time:.1f}s) for channel {self.channel_id}")
                                 self.needs_stream_switch = True
                                 self.last_health_action_time = now
@@ -1367,6 +1524,7 @@ class StreamManager:
     def _attempt_reconnect(self):
         """Attempt to reconnect to the current stream"""
         try:
+            self._log_reconnect_diagnostics("attempt_reconnect_start", level="info")
             logger.info(f"Attempting reconnect to current stream for channel {self.channel_id}")
 
             # Don't try to reconnect if we're already switching URLs
@@ -1383,6 +1541,8 @@ class StreamManager:
 
             try:
                 self._refresh_runtime_stream_url(reason="health_reconnect")
+                self.stream_type = detect_stream_type(self.url)
+                self._apply_transport_mode_override()
 
                 # Close existing connection and wait for it to fully terminate
                 if self.transcode or self.socket:
@@ -1407,6 +1567,7 @@ class StreamManager:
 
                 if connection_result:
                     self.connection_start_time = time.time()
+                    self._log_reconnect_diagnostics("attempt_reconnect_success", level="info")
                     logger.info(f"Reconnect successful for channel {self.channel_id}")
 
                     # Log reconnection event
@@ -1423,6 +1584,7 @@ class StreamManager:
 
                     return True
                 else:
+                    self._log_reconnect_diagnostics("attempt_reconnect_failed")
                     logger.warning(f"Reconnect failed for channel {self.channel_id}")
                     return False
 
@@ -1610,6 +1772,10 @@ class StreamManager:
                     if not ready:
                         # Timeout occurred
                         logger.debug(f"Chunk read timeout ({chunk_timeout}s) for channel {self.channel_id}")
+                        self._record_transport_failure(
+                            "chunk_read_timeout",
+                            chunk_timeout=chunk_timeout,
+                        )
                         return False
 
                     chunk = self.socket.read(Config.CHUNK_SIZE)
@@ -1617,6 +1783,10 @@ class StreamManager:
             except socket.timeout:
                 # Socket timeout occurred
                 logger.debug(f"Socket timeout ({chunk_timeout}s) for channel {self.channel_id}")
+                self._record_transport_failure(
+                    "socket_timeout",
+                    chunk_timeout=chunk_timeout,
+                )
                 return False
 
             if not chunk:
@@ -1628,6 +1798,17 @@ class StreamManager:
                     )
                 else:
                     logger.warning(f"Server closed connection for channel {self.channel_id}")
+                    process_poll = None
+                    process_pid = None
+                    if self.transcode_process is not None:
+                        process_pid = self.transcode_process.pid
+                        process_poll = self.transcode_process.poll()
+                    self._record_transport_failure(
+                        "upstream_closed_connection",
+                        chunk_timeout=chunk_timeout,
+                        ffmpeg_process_pid=process_pid,
+                        ffmpeg_process_poll=process_poll,
+                    )
                 self._close_socket()
                 self.connected = False
                 return False
@@ -1655,6 +1836,10 @@ class StreamManager:
                 )
             else:
                 logger.error(f"Socket error: {e}")
+                self._record_transport_failure(
+                    "socket_error",
+                    error=str(e),
+                )
             self._close_socket()
             self.connected = False
             return False
@@ -1666,6 +1851,10 @@ class StreamManager:
                     f"channel {self.channel_id}: {e}"
                 )
             else:
+                self._record_transport_failure(
+                    "fetch_chunk_exception",
+                    error=str(e),
+                )
                 logger.error(f"Error in fetch_chunk: {e}")
             return False
 
