@@ -20,6 +20,7 @@ import json
 
 from .models import M3UAccount, M3UFilter, ServerGroup, M3UAccountProfile
 from core.models import UserAgent
+from core.utils import safe_upload_path
 from apps.channels.models import ChannelGroupM3UAccount
 from core.serializers import UserAgentSerializer
 from apps.vod.models import (
@@ -58,10 +59,12 @@ class M3UAccountViewSet(viewsets.ModelViewSet):
         file_path = None
         if "file" in request.FILES:
             file = request.FILES["file"]
-            file_name = file.name
-            file_path = os.path.join("/data/uploads/m3us", file_name)
+            try:
+                file_path = safe_upload_path(file.name, "/data/uploads/m3us")
+            except ValueError:
+                return Response({"detail": "Invalid filename."}, status=status.HTTP_400_BAD_REQUEST)
 
-            os.makedirs(os.path.dirname(file_path), exist_ok=True)
+            os.makedirs("/data/uploads/m3us", exist_ok=True)
             with open(file_path, "wb+") as destination:
                 for chunk in file.chunks():
                     destination.write(chunk)
@@ -136,10 +139,12 @@ class M3UAccountViewSet(viewsets.ModelViewSet):
         file_path = None
         if "file" in request.FILES:
             file = request.FILES["file"]
-            file_name = file.name
-            file_path = os.path.join("/data/uploads/m3us", file_name)
+            try:
+                file_path = safe_upload_path(file.name, "/data/uploads/m3us")
+            except ValueError:
+                return Response({"detail": "Invalid filename."}, status=status.HTTP_400_BAD_REQUEST)
 
-            os.makedirs(os.path.dirname(file_path), exist_ok=True)
+            os.makedirs("/data/uploads/m3us", exist_ok=True)
             with open(file_path, "wb+") as destination:
                 for chunk in file.chunks():
                     destination.write(chunk)

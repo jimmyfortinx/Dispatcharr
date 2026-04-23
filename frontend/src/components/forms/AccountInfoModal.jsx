@@ -1,30 +1,37 @@
-import React, { useState, useMemo } from 'react';
+import React, { useMemo, useState } from 'react';
 import {
-  Modal,
-  Text,
-  Box,
-  Group,
-  Badge,
-  Table,
-  Stack,
-  Divider,
-  Alert,
-  Center,
   ActionIcon,
+  Alert,
+  Badge,
+  Box,
+  Center,
+  Divider,
+  Group,
+  Modal,
+  Stack,
+  Table,
+  TableTbody,
+  TableTd,
+  TableTr,
+  Text,
   Tooltip,
 } from '@mantine/core';
-import { notifications } from '@mantine/notifications';
 import {
-  Info,
-  Clock,
-  Users,
-  CheckCircle,
-  XCircle,
   AlertTriangle,
+  CheckCircle,
+  Clock,
+  Info,
   RefreshCw,
+  Users,
+  XCircle,
 } from 'lucide-react';
-import API from '../../api';
 import usePlaylistsStore from '../../store/playlists';
+import { showNotification } from '../../utils/notificationUtils.js';
+import {
+  formatTimestamp,
+  getTimeRemaining,
+  refreshAccountInfo,
+} from '../../utils/forms/AccountInfoModalUtils.js';
 
 const AccountInfoModal = ({ isOpen, onClose, profile, onRefresh }) => {
   const [isRefreshing, setIsRefreshing] = useState(false);
@@ -44,7 +51,7 @@ const AccountInfoModal = ({ isOpen, onClose, profile, onRefresh }) => {
 
   const handleRefresh = async () => {
     if (!currentProfile?.id) {
-      notifications.show({
+      showNotification({
         title: 'Error',
         message: 'Unable to refresh: Profile information not available',
         color: 'red',
@@ -56,10 +63,10 @@ const AccountInfoModal = ({ isOpen, onClose, profile, onRefresh }) => {
     setIsRefreshing(true);
 
     try {
-      const data = await API.refreshAccountInfo(currentProfile.id);
+      const data = await refreshAccountInfo(currentProfile);
 
       if (data.success) {
-        notifications.show({
+        showNotification({
           title: 'Success',
           message:
             'Account info refresh initiated. The information will be updated shortly.',
@@ -73,7 +80,7 @@ const AccountInfoModal = ({ isOpen, onClose, profile, onRefresh }) => {
           setTimeout(onRefresh, 2000);
         }
       } else {
-        notifications.show({
+        showNotification({
           title: 'Error',
           message: data.error || 'Failed to refresh account information',
           color: 'red',
@@ -87,6 +94,7 @@ const AccountInfoModal = ({ isOpen, onClose, profile, onRefresh }) => {
       setIsRefreshing(false);
     }
   };
+
   if (!currentProfile || !currentProfile.custom_properties) {
     return (
       <Modal opened={isOpen} onClose={onClose} title="Account Information">
@@ -106,65 +114,6 @@ const AccountInfoModal = ({ isOpen, onClose, profile, onRefresh }) => {
 
   const { user_info, server_info, last_refresh } =
     currentProfile.custom_properties || {};
-
-  const parseProviderDate = (value) => {
-    if (!value && value !== 0) return null;
-
-    if (typeof value === 'string' && value.includes('T')) {
-      const parsed = new Date(value);
-      return Number.isNaN(parsed.getTime()) ? null : parsed;
-    }
-
-    const numericValue =
-      typeof value === 'number' ? value : Number.parseFloat(value);
-    if (Number.isFinite(numericValue)) {
-      const parsed = new Date(
-        numericValue > 1_000_000_000_000 ? numericValue : numericValue * 1000
-      );
-      return Number.isNaN(parsed.getTime()) ? null : parsed;
-    }
-
-    const fallback = new Date(value);
-    return Number.isNaN(fallback.getTime()) ? null : fallback;
-  };
-
-  // Helper function to format timestamps
-  const formatTimestamp = (timestamp) => {
-    if (!timestamp) return 'Unknown';
-    const date = parseProviderDate(timestamp);
-    if (!date) return 'Invalid date';
-
-    return date.toLocaleString(undefined, {
-      year: 'numeric',
-      month: 'short',
-      day: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit',
-      timeZoneName: 'short',
-    });
-  };
-
-  // Helper function to get time remaining
-  const getTimeRemaining = (expTimestamp) => {
-    if (!expTimestamp) return null;
-    const expDate = parseProviderDate(expTimestamp);
-    if (!expDate) return 'Unknown';
-
-    const now = new Date();
-    const diffMs = expDate - now;
-
-    if (diffMs <= 0) return 'Expired';
-
-    const days = Math.floor(diffMs / (1000 * 60 * 60 * 24));
-    const hours = Math.floor(
-      (diffMs % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60)
-    );
-
-    if (days > 0) {
-      return `${days} day${days !== 1 ? 's' : ''} ${hours} hour${hours !== 1 ? 's' : ''}`;
-    }
-    return `${hours} hour${hours !== 1 ? 's' : ''}`;
-  };
 
   // Helper function to get status badge
   const getStatusBadge = (status) => {
@@ -339,63 +288,63 @@ const AccountInfoModal = ({ isOpen, onClose, profile, onRefresh }) => {
             Account Details
           </Text>
           <Table striped highlightOnHover>
-            <Table.Tbody>
+            <TableTbody>
               {user_info?.username && (
-                <Table.Tr>
-                  <Table.Td fw={500} w="40%">
+                <TableTr>
+                  <TableTd fw={500} w="40%">
                     Username
-                  </Table.Td>
-                  <Table.Td>{user_info.username}</Table.Td>
-                </Table.Tr>
+                  </TableTd>
+                  <TableTd>{user_info.username}</TableTd>
+                </TableTr>
               )}
               {user_info?.full_name && (
-                <Table.Tr>
-                  <Table.Td fw={500}>Name</Table.Td>
-                  <Table.Td>{user_info.full_name}</Table.Td>
-                </Table.Tr>
+                <TableTr>
+                  <TableTd fw={500}>Name</TableTd>
+                  <TableTd>{user_info.full_name}</TableTd>
+                </TableTr>
               )}
               {user_info?.account_number && (
-                <Table.Tr>
-                  <Table.Td fw={500}>Account Number</Table.Td>
-                  <Table.Td>{user_info.account_number}</Table.Td>
-                </Table.Tr>
+                <TableTr>
+                  <TableTd fw={500}>Account Number</TableTd>
+                  <TableTd>{user_info.account_number}</TableTd>
+                </TableTr>
               )}
               {user_info?.ls && (
-                <Table.Tr>
-                  <Table.Td fw={500}>Personal Account</Table.Td>
-                  <Table.Td>{user_info.ls}</Table.Td>
-                </Table.Tr>
+                <TableTr>
+                  <TableTd fw={500}>Personal Account</TableTd>
+                  <TableTd>{user_info.ls}</TableTd>
+                </TableTr>
               )}
               {user_info?.tariff_plan && (
-                <Table.Tr>
-                  <Table.Td fw={500}>Tariff Plan</Table.Td>
-                  <Table.Td>{user_info.tariff_plan}</Table.Td>
-                </Table.Tr>
+                <TableTr>
+                  <TableTd fw={500}>Tariff Plan</TableTd>
+                  <TableTd>{user_info.tariff_plan}</TableTd>
+                </TableTr>
               )}
               {user_info?.phone && (
-                <Table.Tr>
-                  <Table.Td fw={500}>Phone</Table.Td>
-                  <Table.Td>{user_info.phone}</Table.Td>
-                </Table.Tr>
+                <TableTr>
+                  <TableTd fw={500}>Phone</TableTd>
+                  <TableTd>{user_info.phone}</TableTd>
+                </TableTr>
               )}
               {user_info?.created_at && (
-                <Table.Tr>
-                  <Table.Td fw={500}>Account Created</Table.Td>
-                  <Table.Td>{formatTimestamp(user_info.created_at)}</Table.Td>
-                </Table.Tr>
+                <TableTr>
+                  <TableTd fw={500}>Account Created</TableTd>
+                  <TableTd>{formatTimestamp(user_info.created_at)}</TableTd>
+                </TableTr>
               )}
               {user_info?.last_active && (
-                <Table.Tr>
-                  <Table.Td fw={500}>Last Active</Table.Td>
-                  <Table.Td>{formatTimestamp(user_info.last_active)}</Table.Td>
-                </Table.Tr>
+                <TableTr>
+                  <TableTd fw={500}>Last Active</TableTd>
+                  <TableTd>{formatTimestamp(user_info.last_active)}</TableTd>
+                </TableTr>
               )}
               {user_info?.online !== undefined &&
                 user_info?.online !== null &&
                 user_info?.online !== '' && (
-                  <Table.Tr>
-                    <Table.Td fw={500}>Online</Table.Td>
-                    <Table.Td>
+                  <TableTr>
+                    <TableTd fw={500}>Online</TableTd>
+                    <TableTd>
                       <Badge
                         color={
                           user_info.online === '1' || user_info.online === 1
@@ -409,13 +358,13 @@ const AccountInfoModal = ({ isOpen, onClose, profile, onRefresh }) => {
                           ? 'Yes'
                           : 'No'}
                       </Badge>
-                    </Table.Td>
-                  </Table.Tr>
+                    </TableTd>
+                  </TableTr>
                 )}
               {hasTrialInfo && (
-                <Table.Tr>
-                  <Table.Td fw={500}>Trial Account</Table.Td>
-                  <Table.Td>
+                <TableTr>
+                  <TableTd fw={500}>Trial Account</TableTd>
+                  <TableTd>
                     <Badge
                       color={user_info?.is_trial === '1' ? 'orange' : 'blue'}
                       variant="light"
@@ -423,14 +372,14 @@ const AccountInfoModal = ({ isOpen, onClose, profile, onRefresh }) => {
                     >
                       {user_info?.is_trial === '1' ? 'Yes' : 'No'}
                     </Badge>
-                  </Table.Td>
-                </Table.Tr>
+                  </TableTd>
+                </TableTr>
               )}
               {user_info?.allowed_output_formats &&
                 user_info.allowed_output_formats.length > 0 && (
-                  <Table.Tr>
-                    <Table.Td fw={500}>Allowed Formats</Table.Td>
-                    <Table.Td>
+                  <TableTr>
+                    <TableTd fw={500}>Allowed Formats</TableTd>
+                    <TableTd>
                       <Group spacing="xs">
                         {user_info.allowed_output_formats.map(
                           (format, index) => (
@@ -440,10 +389,10 @@ const AccountInfoModal = ({ isOpen, onClose, profile, onRefresh }) => {
                           )
                         )}
                       </Group>
-                    </Table.Td>
-                  </Table.Tr>
+                    </TableTd>
+                  </TableTr>
                 )}
-            </Table.Tbody>
+            </TableTbody>
           </Table>
         </Box>
 
@@ -456,46 +405,46 @@ const AccountInfoModal = ({ isOpen, onClose, profile, onRefresh }) => {
                 Server Information
               </Text>
               <Table striped highlightOnHover>
-                <Table.Tbody>
+                <TableTbody>
                   {server_info.url && (
-                    <Table.Tr>
-                      <Table.Td fw={500} w="40%">
+                    <TableTr>
+                      <TableTd fw={500} w="40%">
                         Server URL
-                      </Table.Td>
-                      <Table.Td>
+                      </TableTd>
+                      <TableTd>
                         <Text size="sm" family="monospace">
                           {server_info.url}
                         </Text>
-                      </Table.Td>
-                    </Table.Tr>
+                      </TableTd>
+                    </TableTr>
                   )}
                   {server_info.port && (
-                    <Table.Tr>
-                      <Table.Td fw={500}>Port</Table.Td>
-                      <Table.Td>
+                    <TableTr>
+                      <TableTd fw={500}>Port</TableTd>
+                      <TableTd>
                         <Badge variant="outline" size="sm">
                           {server_info.port}
                         </Badge>
-                      </Table.Td>
-                    </Table.Tr>
+                      </TableTd>
+                    </TableTr>
                   )}
                   {server_info.https_port && (
-                    <Table.Tr>
-                      <Table.Td fw={500}>HTTPS Port</Table.Td>
-                      <Table.Td>
+                    <TableTr>
+                      <TableTd fw={500}>HTTPS Port</TableTd>
+                      <TableTd>
                         <Badge variant="outline" size="sm" color="green">
                           {server_info.https_port}
                         </Badge>
-                      </Table.Td>
-                    </Table.Tr>
+                      </TableTd>
+                    </TableTr>
                   )}
                   {server_info.timezone && (
-                    <Table.Tr>
-                      <Table.Td fw={500}>Timezone</Table.Td>
-                      <Table.Td>{server_info.timezone}</Table.Td>
-                    </Table.Tr>
+                    <TableTr>
+                      <TableTd fw={500}>Timezone</TableTd>
+                      <TableTd>{server_info.timezone}</TableTd>
+                    </TableTr>
                   )}
-                </Table.Tbody>
+                </TableTbody>
               </Table>
             </Box>
           </>

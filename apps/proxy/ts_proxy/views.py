@@ -19,6 +19,7 @@ from apps.m3u.models import M3UAccount, M3UAccountProfile
 from apps.accounts.models import User
 from core.models import UserAgent, CoreSettings, PROXY_PROFILE_NAME
 from rest_framework.decorators import api_view, permission_classes
+from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from apps.accounts.permissions import (
     IsAdmin,
@@ -555,16 +556,19 @@ def _stream_ts_impl(request, channel_id, user=None, force_redirect=False):
 
 
 @api_view(["GET"])
+@permission_classes([AllowAny])
 def stream_ts(request, channel_id, user=None):
     return _stream_ts_impl(request, channel_id, user=user, force_redirect=False)
 
 
 @api_view(["GET"])
+@permission_classes([AllowAny])
 def stream_ts_redirect(request, channel_id, user=None):
     return _stream_ts_impl(request, channel_id, user=user, force_redirect=True)
 
 
 @api_view(["GET"])
+@permission_classes([AllowAny])
 def stream_xc(request, username, password, channel_id):
     user = get_object_or_404(User, username=username)
 

@@ -12,6 +12,7 @@ from django.urls import reverse
 import django_filters
 import logging
 import os
+import time
 import requests
 from urllib.parse import urlparse, urlunparse
 from apps.accounts.permissions import (
@@ -210,6 +211,10 @@ def _build_series_relation_display_name_map(series_ids, category_value):
         )
 
     return display_names
+# Negative cache for remote VOD logo URLs that failed to fetch.
+# Prevents repeated blocking requests to unreachable hosts.
+_vod_logo_fetch_failures = {}
+_VOD_LOGO_FAIL_TTL = 300  # seconds
 
 
 class VODPagination(PageNumberPagination):
@@ -1105,51 +1110,82 @@ class VODLogoViewSet(viewsets.ModelViewSet):
                 return HttpResponse(status=500)
         else:
             # It's a remote URL - proxy it
-            try:
-                response = requests.get(
-                    logo.url,
-                    headers=REMOTE_IMAGE_REQUEST_HEADERS,
-                    stream=True,
-                    timeout=10,
-                )
-                response.raise_for_status()
-            except requests.exceptions.SSLError as e:
-                fallback_url = _http_fallback_url(logo.url)
-                if not fallback_url:
-                    logger.error(f"Error fetching remote VOD logo {logo.url}: {str(e)}")
-                    return HttpResponse(status=404)
-
-                logger.warning(
-                    "Retrying remote VOD logo over HTTP after SSL error for %s: %s",
-                    logo.url,
-                    e,
-                )
-                try:
-                    response = requests.get(
-                        fallback_url,
-                        headers=REMOTE_IMAGE_REQUEST_HEADERS,
-                        stream=True,
-                        timeout=10,
-                    )
-                    response.raise_for_status()
-                except requests.exceptions.RequestException as fallback_error:
-                    logger.error(
-                        "Error fetching remote VOD logo %s after HTTP fallback %s: %s",
-                        logo.url,
-                        fallback_url,
-                        fallback_error,
-                    )
-                    return HttpResponse(status=404)
-            except requests.exceptions.RequestException as e:
-                logger.error(f"Error fetching remote VOD logo {logo.url}: {str(e)}")
+            # Skip URLs that recently failed to avoid blocking workers
+            fail_expiry = _vod_logo_fetch_failures.get(logo.url)
+            if fail_expiry and time.monotonic() < fail_expiry:
                 return HttpResponse(status=404)
 
-            content_type = response.headers.get('Content-Type', 'image/png')
+            try:
+                _LOGO_TOTAL_TIMEOUT = 10  # seconds
+                _LOGO_MAX_BYTES = 5 * 1024 * 1024  # 5 MB
 
-            return StreamingHttpResponse(
-                response.iter_content(chunk_size=8192),
-                content_type=content_type
-            )
+                remote_url = logo.url
+                try:
+                    remote_response = requests.get(
+                        remote_url,
+                        headers=REMOTE_IMAGE_REQUEST_HEADERS,
+                        stream=True,
+                        timeout=(3, 5),  # (connect_timeout, read_timeout per chunk)
+                    )
+                except requests.exceptions.SSLError as e:
+                    fallback_url = _http_fallback_url(remote_url)
+                    if not fallback_url:
+                        raise
+
+                    logger.warning(
+                        "Retrying remote VOD logo over HTTP after SSL error for %s: %s",
+                        remote_url,
+                        e,
+                    )
+                    remote_url = fallback_url
+                    remote_response = requests.get(
+                        remote_url,
+                        headers=REMOTE_IMAGE_REQUEST_HEADERS,
+                        stream=True,
+                        timeout=(3, 5),
+                    )
+
+                if remote_response.status_code != 200:
+                    now = time.monotonic()
+                    _vod_logo_fetch_failures[logo.url] = now + _VOD_LOGO_FAIL_TTL
+                    return HttpResponse(status=404)
+
+                # Eagerly read the full image with a total time + size cap
+                # so the greenlet is released quickly.
+                chunks = []
+                total = 0
+                deadline = time.monotonic() + _LOGO_TOTAL_TIMEOUT
+                for chunk in remote_response.iter_content(chunk_size=8192):
+                    total += len(chunk)
+                    if total > _LOGO_MAX_BYTES:
+                        remote_response.close()
+                        return HttpResponse(status=404)
+                    if time.monotonic() > deadline:
+                        remote_response.close()
+                        now = time.monotonic()
+                        _vod_logo_fetch_failures[logo.url] = now + _VOD_LOGO_FAIL_TTL
+                        return HttpResponse(status=404)
+                    chunks.append(chunk)
+                body = b"".join(chunks)
+
+                _vod_logo_fetch_failures.pop(logo.url, None)
+
+                content_type = remote_response.headers.get('Content-Type', 'image/png')
+                response = HttpResponse(body, content_type=content_type)
+                response["Content-Length"] = str(len(body))
+                if remote_response.headers.get("Cache-Control"):
+                    response["Cache-Control"] = remote_response.headers.get("Cache-Control")
+                if remote_response.headers.get("Last-Modified"):
+                    response["Last-Modified"] = remote_response.headers.get("Last-Modified")
+                response["Content-Disposition"] = 'inline; filename="{}"'.format(
+                    os.path.basename(remote_url)
+                )
+                return response
+            except requests.exceptions.RequestException as e:
+                now = time.monotonic()
+                _vod_logo_fetch_failures[logo.url] = now + _VOD_LOGO_FAIL_TTL
+                logger.error(f"Error fetching remote VOD logo {logo.url}: {str(e)}")
+                return HttpResponse(status=404)
 
     @action(detail=False, methods=["delete"], url_path="bulk-delete")
     def bulk_delete(self, request):
