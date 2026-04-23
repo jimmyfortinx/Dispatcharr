@@ -150,6 +150,7 @@ const AccountInfoModal = ({ isOpen, onClose, profile, onRefresh }) => {
       (value) => value !== undefined && value !== null && value !== ''
     );
   const supportsProviderRefresh =
+    currentProfile?.account?.is_xtream_codes ||
     currentProfile?.account?.account_type === 'XC' ||
     currentProfile?.account?.account_type === 'STALKER';
   const hasTrialInfo =
