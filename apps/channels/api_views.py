@@ -62,13 +62,14 @@ from rest_framework.filters import SearchFilter, OrderingFilter
 from apps.epg.models import EPGData
 from apps.vod.models import Movie, Series
 from django.db.models import Q
-from django.http import HttpResponse, StreamingHttpResponse, FileResponse, Http404
+from django.http import HttpResponse, StreamingHttpResponse, FileResponse, Http404, JsonResponse, HttpResponseRedirect
 from django.utils import timezone
 import mimetypes
 from django.conf import settings
 
 from rest_framework.pagination import PageNumberPagination
 
+from dispatcharr.utils import network_access_allowed
 
 
 logger = logging.getLogger(__name__)
@@ -797,16 +798,20 @@ class ChannelViewSet(viewsets.ModelViewSet):
                 if to_remove:
                     channel.channelstream_set.filter(stream_id__in=to_remove).delete()
 
+                to_update = []
                 for order, stream_id in enumerate(normalized_ids):
                     if stream_id in current_links:
                         cs = current_links[stream_id]
                         if cs.order != order:
                             cs.order = order
-                            cs.save(update_fields=["order"])
+                            to_update.append(cs)
                     else:
                         ChannelStream.objects.create(
                             channel=channel, stream_id=stream_id, order=order
                         )
+
+                if to_update:
+                    ChannelStream.objects.bulk_update(to_update, ["order"])
 
         # Return the updated objects (already in memory)
         serialized_channels = ChannelSerializer(
@@ -2232,6 +2237,99 @@ class GetChannelStreamsAPIView(APIView):
         return Response(serializer.data)
 
 
+class GetChannelStreamStatsAPIView(APIView):
+    """Returns a stats delta for a channel's streams (id, stream_stats,
+    stream_stats_updated_at). Supports `since` (ISO 8601) and `ids`
+    (comma-separated) query params."""
+
+    def get_permissions(self):
+        try:
+            return [
+                perm() for perm in permission_classes_by_method[self.request.method]
+            ]
+        except KeyError:
+            return [Authenticated()]
+
+    @extend_schema(
+        description=(
+            "Return a minimal stats delta for the streams attached to a "
+            "channel. Used by the channel table to refresh `stream_stats` "
+            "on row expand and after a preview closes without re-pulling "
+            "full stream rows."
+        ),
+        parameters=[
+            OpenApiParameter(
+                name="since",
+                type=OpenApiTypes.DATETIME,
+                location=OpenApiParameter.QUERY,
+                required=False,
+                description=(
+                    "ISO 8601 timestamp. Returns only streams whose "
+                    "`stream_stats_updated_at` is strictly newer than this "
+                    "value. Omit to return all streams for the channel."
+                ),
+            ),
+            OpenApiParameter(
+                name="ids",
+                type=OpenApiTypes.STR,
+                location=OpenApiParameter.QUERY,
+                required=False,
+                description=(
+                    "Comma-separated stream IDs to restrict the response "
+                    "to. Combined with `since` via AND."
+                ),
+            ),
+        ],
+        responses={
+            200: inline_serializer(
+                name="ChannelStreamStatsDelta",
+                fields={
+                    "id": serializers.IntegerField(),
+                    "stream_stats": serializers.JSONField(allow_null=True),
+                    "stream_stats_updated_at": serializers.DateTimeField(allow_null=True),
+                },
+                many=True,
+            ),
+            400: inline_serializer(
+                name="ChannelStreamStatsErrorResponse",
+                fields={"detail": serializers.CharField()},
+            ),
+        },
+    )
+    def get(self, request, channel_id):
+        from django.utils.dateparse import parse_datetime
+
+        get_object_or_404(Channel, id=channel_id)
+
+        qs = Stream.objects.filter(channels=channel_id)
+
+        since_raw = request.query_params.get("since")
+        if since_raw:
+            since_dt = parse_datetime(since_raw)
+            if since_dt is None:
+                return Response(
+                    {"detail": "Invalid 'since' value. Expected ISO 8601."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            qs = qs.filter(stream_stats_updated_at__gt=since_dt)
+
+        ids_raw = request.query_params.get("ids")
+        if ids_raw:
+            try:
+                ids = [int(x) for x in ids_raw.split(",") if x.strip()]
+            except ValueError:
+                return Response(
+                    {"detail": "Invalid 'ids' value. Expected comma-separated integers."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            qs = qs.filter(id__in=ids)
+
+        data = list(
+            qs.values("id", "stream_stats", "stream_stats_updated_at")
+        )
+        return Response(data)
+
+
 class UpdateChannelMembershipAPIView(APIView):
     permission_classes = [IsOwnerOfObject]
 
@@ -2440,12 +2538,57 @@ class RecordingViewSet(viewsets.ModelViewSet):
 
     def get_permissions(self):
         # Allow unauthenticated playback of recording files (like other streaming endpoints)
-        if self.action == 'file':
+        if self.action in ('file', 'hls'):
             return [AllowAny()]
         try:
             return [perm() for perm in permission_classes_by_action[self.action]]
         except KeyError:
             return [Authenticated()]
+
+    def _user_can_play_recording(self, request, recording):
+        """Authorization gate for recording playback (file/hls actions).
+
+        Mirrors how live stream endpoints authorize non-admin users, but
+        unlike the XC-style endpoints these URLs carry no credentials of
+        their own, so we require an authenticated session/JWT:
+          * Unauthenticated requests → denied.
+          * Admins (user_level >= 10) → allowed.
+          * Authenticated non-admins → allowed only if the recording's
+            source channel is visible under their channel-profile
+            assignments and within their user_level.
+
+        The network_access_allowed(request, "STREAMS") check applied
+        before this is a network-perimeter gate (e.g. block external IPs
+        from streaming at all); it is not a substitute for per-user
+        authorization.
+        """
+        user = getattr(request, "user", None)
+        if not user or not getattr(user, "is_authenticated", False):
+            return False
+        if getattr(user, "user_level", 0) >= 10:
+            return True
+
+        channel = getattr(recording, "channel", None)
+        if channel is None:
+            # Recording with no source channel, only admins can play.
+            return False
+
+        try:
+            user_profile_count = user.channel_profiles.count()
+        except Exception:
+            user_profile_count = 0
+
+        filters = {
+            "id": channel.id,
+            "user_level__lte": user.user_level,
+        }
+        if user_profile_count > 0:
+            filters["channelprofilemembership__enabled"] = True
+            filters["channelprofilemembership__channel_profile__in"] = (
+                user.channel_profiles.all()
+            )
+            return Channel.objects.filter(**filters).distinct().exists()
+        return Channel.objects.filter(**filters).exists()
 
     @action(detail=True, methods=["post"], url_path="comskip")
     def comskip(self, request, pk=None):
@@ -2460,14 +2603,32 @@ class RecordingViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=["get"], url_path="file")
     def file(self, request, pk=None):
-        """Stream a recorded file with HTTP Range support for seeking."""
+        """Stream a completed recording file with HTTP Range support for seeking.
+
+        For in-progress recordings, file_url in custom_properties points to
+        /hls/index.m3u8.  If a client hits this endpoint while the recording
+        is still running (or the MKV is not yet produced), it is redirected to
+        the HLS playlist endpoint.
+        """
+        if not network_access_allowed(request, "STREAMS"):
+            return JsonResponse({"error": "Forbidden"}, status=403)
         recording = get_object_or_404(Recording, pk=pk)
+        if not self._user_can_play_recording(request, recording):
+            return JsonResponse({"error": "Forbidden"}, status=403)
         cp = recording.custom_properties or {}
         file_path = cp.get("file_path")
         file_name = cp.get("file_name") or "recording"
 
-        if not file_path or not os.path.exists(file_path):
-            raise Http404("Recording file not found")
+        if not file_path or not os.path.exists(file_path) or os.path.getsize(file_path) == 0:
+            # Redirect to HLS if recording is still in progress
+            hls_dir = cp.get("_hls_dir")
+            if hls_dir and os.path.isdir(hls_dir):
+                hls_url = request.build_absolute_uri(
+                    f"/api/channels/recordings/{pk}/hls/index.m3u8"
+                )
+                return HttpResponseRedirect(hls_url)
+            if not file_path or not os.path.exists(file_path):
+                raise Http404("Recording file not found")
 
         # Guess content type
         ext = os.path.splitext(file_path)[1].lower()
@@ -2527,6 +2688,74 @@ class RecordingViewSet(viewsets.ModelViewSet):
         response["Accept-Ranges"] = "bytes"
         response["Content-Disposition"] = f"inline; filename=\"{file_name}\""
         return response
+
+    @action(detail=True, methods=["get"], url_path="hls/(?P<seg_path>.+)")
+    def hls(self, request, pk=None, seg_path=None):
+        """Serve HLS playlist and segment files for an in-progress (or completed) recording.
+
+        Clients connecting during recording should use the m3u8 URL returned in
+        custom_properties.file_url.  Segment URLs inside the playlist are rewritten
+        to route through this endpoint so authentication and path isolation are
+        preserved.
+        """
+        if not network_access_allowed(request, "STREAMS"):
+            return JsonResponse({"error": "Forbidden"}, status=403)
+        recording = get_object_or_404(Recording, pk=pk)
+        if not self._user_can_play_recording(request, recording):
+            return JsonResponse({"error": "Forbidden"}, status=403)
+        cp = recording.custom_properties or {}
+        hls_dir = cp.get("_hls_dir")
+
+        if not hls_dir or not os.path.isdir(hls_dir):
+            # HLS dir is gone, recording is likely complete.  Redirect to the
+            # permanent MKV endpoint for .m3u8 requests so clients that still
+            # have the HLS URL bookmarked get a useful response.
+            cp = recording.custom_properties or {}
+            file_path = cp.get("file_path")
+            if seg_path.endswith(".m3u8") and file_path and os.path.exists(file_path) and os.path.getsize(file_path) > 0:
+                return HttpResponseRedirect(
+                    request.build_absolute_uri(f"/api/channels/recordings/{pk}/file/")
+                )
+            raise Http404("HLS content not available for this recording")
+
+        # Security: prevent path traversal outside the HLS directory
+        safe_dir = os.path.realpath(hls_dir)
+        requested = os.path.realpath(os.path.join(hls_dir, seg_path))
+        if not requested.startswith(safe_dir + os.sep) and requested != safe_dir:
+            return Response({"error": "Forbidden"}, status=403)
+
+        if not os.path.isfile(requested):
+            raise Http404(f"HLS file not found: {seg_path}")
+
+        if seg_path.endswith(".m3u8"):
+            # Rewrite relative segment lines to absolute URLs through this API
+            base_url = request.build_absolute_uri(
+                f"/api/channels/recordings/{pk}/hls/"
+            )
+            lines = []
+            with open(requested) as _f:
+                for line in _f:
+                    stripped = line.strip()
+                    if stripped and not stripped.startswith("#"):
+                        lines.append(f"{base_url}{stripped}\n")
+                    else:
+                        lines.append(line)
+            return HttpResponse("".join(lines), content_type="application/x-mpegURL")
+
+        if seg_path.endswith(".ts"):
+            # Refresh the viewer heartbeat in Redis so the Celery task knows an
+            # active client is still fetching segments.  TTL is 20 s, enough for
+            # three 4-second segments plus network margin.
+            try:
+                from core.utils import RedisClient
+                _rv = RedisClient.get_client(max_retries=1, retry_interval=0)
+                if _rv:
+                    _rv.set(f"dvr:hls_viewer:{pk}", "1", ex=20)
+            except Exception:
+                pass
+            return FileResponse(open(requested, "rb"), content_type="video/mp2t")
+
+        raise Http404("Unsupported HLS file type")
 
     @action(detail=True, methods=["post"], url_path="stop")
     def stop(self, request, pk=None):
@@ -2834,7 +3063,7 @@ class RecordingViewSet(viewsets.ModelViewSet):
         cp = instance.custom_properties or {}
         rec_status = cp.get("status", "")
         file_path = cp.get("file_path")
-        temp_ts_path = cp.get("_temp_file_path")
+        hls_dir = cp.get("_hls_dir")
         channel_uuid = str(instance.channel.uuid)
 
         # 1. Delete the DB record (also fires post_delete → revoke_task_on_delete)
@@ -2867,6 +3096,41 @@ class RecordingViewSet(viewsets.ModelViewSet):
             except Exception as ex:
                 logger.warning(f"Failed to delete recording artifact {path}: {ex}")
 
+        def _safe_rmtree(path: str):
+            if not path or not isinstance(path, str):
+                return
+            try:
+                import shutil as _shutil
+                if any(path.startswith(root) for root in allowed_roots) and os.path.isdir(path):
+                    _shutil.rmtree(path)
+                    logger.info(f"Deleted recording HLS directory: {path}")
+            except Exception as ex:
+                logger.warning(f"Failed to delete HLS directory {path}: {ex}")
+
+        # Clean up empty parent directories up to the recordings root to prevent orphaned folders from accumulating over time.
+        recordings_root = os.path.normpath('/data/recordings')
+
+        def _prune_empty_parents(path: str):
+            if not path or not isinstance(path, str):
+                return
+            try:
+                parent = os.path.dirname(os.path.normpath(path))
+                while (
+                    parent
+                    and parent != recordings_root
+                    and parent.startswith(recordings_root + os.sep)
+                    and os.path.isdir(parent)
+                    and not os.listdir(parent)
+                ):
+                    try:
+                        os.rmdir(parent)
+                        logger.info(f"Removed empty recording directory: {parent}")
+                    except OSError:
+                        break
+                    parent = os.path.dirname(parent)
+            except Exception as ex:
+                logger.debug(f"Unable to prune empty parents for {path}: {ex}")
+
         def _background_cancel():
             # Only stop the DVR client if the recording was actively streaming.
             # Stopping for completed/upcoming recordings would kill an unrelated
@@ -2884,7 +3148,13 @@ class RecordingViewSet(viewsets.ModelViewSet):
             # Best-effort file cleanup in case run_recording already exited
             # before the DB delete.
             _safe_remove(file_path)
-            _safe_remove(temp_ts_path)
+            _safe_rmtree(hls_dir)
+
+            # If removing the file/HLS dir leaves the show/season folder
+            # empty, clean those up too.  Both paths share the same parent
+            # in normal layouts, but run the prune for each just in case.
+            _prune_empty_parents(file_path)
+            _prune_empty_parents(hls_dir)
 
             try:
                 from django.db import connection as _conn

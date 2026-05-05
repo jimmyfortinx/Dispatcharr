@@ -18,9 +18,20 @@ from django.views import View
 from django.utils.decorators import method_decorator
 from django.contrib.auth.decorators import login_required
 from django.views.decorators.csrf import csrf_exempt
+from dispatcharr.utils import network_access_allowed
 
 # Configure logger
 logger = logging.getLogger(__name__)
+
+
+def _hdhr_network_check(request):
+    """Return a 403 JsonResponse if the client IP is not allowed by the
+    M3U_EPG network access policy. HDHR discovery endpoints expose channel
+    inventory and stream URLs, so they share the same allowlist as M3U/EPG.
+    """
+    if not network_access_allowed(request, "M3U_EPG"):
+        return JsonResponse({"error": "Forbidden"}, status=403)
+    return None
 
 
 @login_required
@@ -53,6 +64,10 @@ class DiscoverAPIView(APIView):
         description="Retrieve HDHomeRun device discovery information",
     )
     def get(self, request, profile=None):
+        blocked = _hdhr_network_check(request)
+        if blocked is not None:
+            return blocked
+
         uri_parts = ["hdhr"]
         if profile is not None:
             uri_parts.append(profile)
@@ -106,6 +121,10 @@ class LineupAPIView(APIView):
         description="Retrieve the available channel lineup",
     )
     def get(self, request, profile=None):
+        blocked = _hdhr_network_check(request)
+        if blocked is not None:
+            return blocked
+
         if profile is not None:
             channel_profile = ChannelProfile.objects.get(name=profile)
             channels = Channel.objects.filter(
@@ -147,6 +166,10 @@ class LineupStatusAPIView(APIView):
         description="Retrieve the HDHomeRun lineup status",
     )
     def get(self, request, profile=None):
+        blocked = _hdhr_network_check(request)
+        if blocked is not None:
+            return blocked
+
         data = {
             "ScanInProgress": 0,
             "ScanPossible": 0,
@@ -165,6 +188,10 @@ class HDHRDeviceXMLAPIView(APIView):
         description="Retrieve the HDHomeRun device XML configuration",
     )
     def get(self, request):
+        blocked = _hdhr_network_check(request)
+        if blocked is not None:
+            return blocked
+
         base_url = request.build_absolute_uri("/hdhr/").rstrip("/")
 
         xml_response = f"""<?xml version="1.0" encoding="utf-8"?>

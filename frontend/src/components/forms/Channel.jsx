@@ -293,7 +293,8 @@ const ChannelForm = ({ channel = null, isOpen, onClose }) => {
 
   const defaultValues = useMemo(
     () => getChannelFormDefaultValues(channel, channelGroups),
-    [channel, channelGroups]
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [channel]
   );
 
   const {

@@ -23,7 +23,18 @@ class ChannelService:
     """Service class for channel operations"""
 
     @staticmethod
-    def initialize_channel(channel_id, stream_url, user_agent, input_headers=None, transcode=False, stream_profile_value=None, stream_id=None, m3u_profile_id=None):
+    def initialize_channel(
+        channel_id,
+        stream_url,
+        user_agent,
+        input_headers=None,
+        transcode=False,
+        stream_profile_value=None,
+        stream_id=None,
+        m3u_profile_id=None,
+        channel_name=None,
+        stream_name=None,
+    ):
         """
         Initialize a channel with the given parameters.
 
@@ -36,6 +47,8 @@ class ChannelService:
             stream_profile_value: Stream profile value to store in metadata
             stream_id: ID of the stream being used
             m3u_profile_id: ID of the M3U profile being used
+            channel_name: Channel name (avoids DB lookup if already known)
+            stream_name: Stream name (avoids DB lookup if already known)
 
         Returns:
             bool: Success status
@@ -89,6 +102,23 @@ class ChannelService:
             if input_headers:
                 update_data[ChannelMetadataField.INPUT_HEADERS] = json.dumps(input_headers)
 
+            # Store channel name and stream name so stats workers don't need DB calls
+            try:
+                if not channel_name:
+                    from apps.channels.models import Channel
+                    channel_name = Channel.objects.filter(uuid=channel_id).values_list('name', flat=True).first()
+                if channel_name:
+                    update_data[ChannelMetadataField.CHANNEL_NAME] = channel_name
+                else:
+                    # No channel name means stream preview mode, use stream name as display fallback
+                    if stream_id and not stream_name:
+                        from apps.channels.models import Stream
+                        stream_name = Stream.objects.filter(id=stream_id).values_list('name', flat=True).first()
+                    if stream_name:
+                        update_data[ChannelMetadataField.STREAM_NAME] = stream_name
+            except Exception as e:
+                logger.warning(f"Failed to store channel/stream names in Redis for {channel_id}: {e}")
+
             if update_data:
                 proxy_server.redis_client.hset(metadata_key, mapping=update_data)
 
@@ -120,6 +150,7 @@ class ChannelService:
 
         # If no direct URL is provided but a target stream is, get URL from target stream
         stream_id = None
+        stream_name = None
         if not new_url and target_stream_id:
             stream_info = get_stream_info_for_switch(channel_id, target_stream_id)
             if 'error' in stream_info:
@@ -131,6 +162,7 @@ class ChannelService:
             user_agent = stream_info['user_agent']
             input_headers = stream_info.get('input_headers') or {}
             stream_id = target_stream_id
+            stream_name = stream_info.get('stream_name')
             # Extract M3U profile ID from stream info if available
             if 'm3u_profile_id' in stream_info:
                 m3u_profile_id = stream_info['m3u_profile_id']
@@ -241,6 +273,7 @@ class ChannelService:
                             input_headers,
                             stream_id,
                             m3u_profile_id,
+                            stream_name,
                         )
                     else:
                         ChannelService._update_channel_metadata(
@@ -646,7 +679,15 @@ class ChannelService:
     # Helper methods for Redis operations
 
     @staticmethod
-    def _update_channel_metadata(channel_id, url, user_agent=None, input_headers=None, stream_id=None, m3u_profile_id=None):
+    def _update_channel_metadata(
+        channel_id,
+        url,
+        user_agent=None,
+        input_headers=None,
+        stream_id=None,
+        m3u_profile_id=None,
+        stream_name=None,
+    ):
         """Update channel metadata in Redis"""
         proxy_server = ProxyServer.get_instance()
 
@@ -667,6 +708,14 @@ class ChannelService:
             metadata[ChannelMetadataField.INPUT_HEADERS] = json.dumps(input_headers or {})
         if stream_id:
             metadata[ChannelMetadataField.STREAM_ID] = str(stream_id)
+            if not stream_name:
+                try:
+                    from apps.channels.models import Stream
+                    stream_name = Stream.objects.filter(id=stream_id).values_list('name', flat=True).first()
+                except Exception as e:
+                    logger.warning(f"Failed to update stream name in Redis for stream {stream_id}: {e}")
+            if stream_name:
+                metadata[ChannelMetadataField.STREAM_NAME] = stream_name
         if m3u_profile_id:
             metadata[ChannelMetadataField.M3U_PROFILE] = str(m3u_profile_id)
 

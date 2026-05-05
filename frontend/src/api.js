@@ -637,6 +637,77 @@ export default class API {
     }
   }
 
+  /**
+   * PATCHes only the stream order for a channel
+   * without triggering requeryStreams or requeryChannels. The caller is
+   * responsible for optimistic UI updates.
+   */
+  static async reorderChannelStreams(channelId, streamIds) {
+    try {
+      await request(`${host}/api/channels/channels/${channelId}/`, {
+        method: 'PATCH',
+        body: { id: channelId, streams: streamIds },
+      });
+      // Update the channelsTable store in-place with the new stream order
+      const store = useChannelsTableStore.getState();
+      const channel = store.channels.find((c) => c.id === channelId);
+      if (channel) {
+        // Reorder the existing stream objects to match streamIds
+        const streamMap = new Map(channel.streams.map((s) => [s.id, s]));
+        const reorderedStreams = streamIds
+          .map((id) => streamMap.get(id))
+          .filter(Boolean);
+        store.updateChannel({ ...channel, streams: reorderedStreams });
+      }
+    } catch (e) {
+      errorNotification('Failed to reorder streams', e);
+      // On failure, requery to restore correct state
+      await API.requeryChannels();
+    }
+  }
+
+  /**
+   * PATCHes the channel with the
+   * combined stream list and updates the channelsTable store in-place
+   * using the stream objects the caller already has. Skips requeryStreams
+   * (stream data doesn't change) and requeryChannels (we build the
+   * result locally).
+   *
+   * @param {number} channelId
+   * @param {Array} existingStreams - current channel.streams (full objects)
+   * @param {Array} newStreams      - stream objects to append
+   */
+  static async addStreamsToChannel(channelId, existingStreams, newStreams) {
+    try {
+      const existing = existingStreams || [];
+      // Deduplicate by ID, preserving order (existing first, new appended)
+      const seen = new Set(existing.map((s) => s.id));
+      const merged = [...existing];
+      for (const s of newStreams) {
+        if (!seen.has(s.id)) {
+          seen.add(s.id);
+          merged.push(s);
+        }
+      }
+
+      await request(`${host}/api/channels/channels/${channelId}/`, {
+        method: 'PATCH',
+        body: { id: channelId, streams: merged.map((s) => s.id) },
+      });
+
+      // Update the channelsTable store in-place with the merged streams
+      const store = useChannelsTableStore.getState();
+      const channel = store.channels.find((c) => c.id === channelId);
+      if (channel) {
+        store.updateChannel({ ...channel, streams: merged });
+      }
+    } catch (e) {
+      errorNotification('Failed to add streams to channel', e);
+      // On failure, requery to restore correct state
+      await API.requeryChannels();
+    }
+  }
+
   static async updateChannels(ids, values) {
     const body = [];
     for (const id of ids) {
@@ -869,7 +940,6 @@ export default class API {
         useChannelsStore.getState().addChannel(response);
       }
 
-      await API.requeryStreams();
       return response;
     } catch (e) {
       errorNotification('Failed to create channel', e);
@@ -934,6 +1004,27 @@ export default class API {
       return response;
     } catch (e) {
       errorNotification('Failed to retrieve channel streams', e);
+    }
+  }
+
+  /**
+   * Fetches a stats delta for a channel's streams. Errors are swallowed
+   * since this is a background refresh.
+   */
+  static async getChannelStreamStats(channelId, since, ids) {
+    try {
+      const params = new URLSearchParams();
+      if (since) params.set('since', since);
+      if (Array.isArray(ids) && ids.length > 0) {
+        params.set('ids', ids.join(','));
+      }
+      const qs = params.toString();
+      const response = await request(
+        `${host}/api/channels/channels/${channelId}/streams/stats/${qs ? `?${qs}` : ''}`
+      );
+      return Array.isArray(response) ? response : [];
+    } catch (e) {
+      return [];
     }
   }
 

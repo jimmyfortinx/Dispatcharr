@@ -714,17 +714,13 @@ def head_vod(request, content_type, content_id, session_id=None, profile_id=None
         logger.error(f"[VOD-HEAD] Error in HEAD request: {e}", exc_info=True)
         return HttpResponse(f"HEAD error: {str(e)}", status=500)
 
-@api_view(["GET"])
-@permission_classes([IsAdmin])
-def vod_stats(request):
-    """Get current VOD connection statistics"""
+def build_vod_stats_data(redis_client):
+    """
+    Build the full VOD stats payload (with DB lookups) from Redis connection data.
+    Returns a dict: {'vod_connections': [...], 'total_connections': N, 'timestamp': T}
+    Used by both the vod_stats API view and the WebSocket push in _do_vod_stats_update.
+    """
     try:
-        connection_manager = MultiWorkerVODConnectionManager.get_instance()
-        redis_client = connection_manager.redis_client
-
-        if not redis_client:
-            return JsonResponse({'error': 'Redis not available'}, status=500)
-
         # Get all VOD persistent connections (consolidated data)
         pattern = "vod_persistent_connection:*"
         cursor = 0
@@ -966,11 +962,29 @@ def vod_stats(request):
             content_stats[content_key]['connection_count'] += 1
             content_stats[content_key]['connections'].append(conn)
 
-        return JsonResponse({
+        return {
             'vod_connections': list(content_stats.values()),
             'total_connections': len(connections),
             'timestamp': current_time
-        })
+        }
+
+    except Exception as e:
+        logger.error(f"Error building VOD stats: {e}")
+        return {'vod_connections': [], 'total_connections': 0, 'timestamp': time.time()}
+
+
+@api_view(["GET"])
+@permission_classes([IsAdmin])
+def vod_stats(request):
+    """Get current VOD connection statistics"""
+    try:
+        connection_manager = MultiWorkerVODConnectionManager.get_instance()
+        redis_client = connection_manager.redis_client
+
+        if not redis_client:
+            return JsonResponse({'error': 'Redis not available'}, status=500)
+
+        return JsonResponse(build_vod_stats_data(redis_client))
 
     except Exception as e:
         logger.error(f"Error getting VOD stats: {e}")

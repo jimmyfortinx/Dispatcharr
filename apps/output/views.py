@@ -21,6 +21,7 @@ from django.db.models import Exists, OuterRef
 from django.db.models.functions import Lower
 import os
 from apps.m3u.utils import calculate_tuner_count
+from apps.proxy.utils import get_user_active_connections
 import regex
 from core.utils import log_system_event
 import hashlib
@@ -2029,6 +2030,13 @@ def xc_get_info(request, full=False):
         hostname = raw_host
         port = "443" if request.is_secure() else "80"
 
+    if user.stream_limit and user.stream_limit > 0:
+        active_cons = len(get_user_active_connections(user.id))
+        max_connections = user.stream_limit
+    else:
+        active_cons = len(get_user_active_connections(None))
+        max_connections = calculate_tuner_count(minimum=1, unlimited_default=50)
+
     info = {
         "user_info": {
             "username": request.GET.get("username"),
@@ -2037,7 +2045,8 @@ def xc_get_info(request, full=False):
             "auth": 1,
             "status": "Active",
             "exp_date": str(int(time.time()) + (90 * 24 * 60 * 60)),
-            "max_connections": str(calculate_tuner_count(minimum=1, unlimited_default=50)),
+            "active_cons": str(active_cons),
+            "max_connections": str(max_connections),
             "allowed_output_formats": [
                 "ts",
             ],

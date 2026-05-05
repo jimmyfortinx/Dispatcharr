@@ -8,7 +8,7 @@ import {
   getCoreRowModel,
   flexRender,
 } from '@tanstack/react-table';
-import { useCallback, useMemo, useState, useEffect } from 'react';
+import { useCallback, useMemo, useRef, useState, useEffect } from 'react';
 import { ChevronDown, ChevronRight } from 'lucide-react';
 
 const useTable = ({
@@ -17,6 +17,7 @@ const useTable = ({
   bodyCellRenderFns = {},
   expandedRowRenderer = () => <></>,
   onRowSelectionChange = null,
+  onRowExpansionChange = null,
   getExpandedRowHeight = null,
   state = {},
   columnSizing,
@@ -25,6 +26,8 @@ const useTable = ({
   ...options
 }) => {
   const [selectedTableIds, setSelectedTableIds] = useState([]);
+  const selectedTableIdsRef = useRef(selectedTableIds);
+  selectedTableIdsRef.current = selectedTableIds;
   const [expandedRowIds, setExpandedRowIds] = useState([]);
   const [lastClickedId, setLastClickedId] = useState(null);
   const [isShiftKeyDown, setIsShiftKeyDown] = useState(false);
@@ -146,12 +149,15 @@ const useTable = ({
   };
 
   const onRowExpansion = (row) => {
-    let isExpanded = false;
+    const rowId = row.original.id;
+    let newIds;
     setExpandedRowIds((prev) => {
-      isExpanded = prev.includes(row.original.id) ? [] : [row.original.id];
-      return isExpanded;
+      newIds = prev.includes(rowId) ? [] : [rowId];
+      return newIds;
     });
-    updateSelectedTableIds([row.original.id]);
+    if (onRowExpansionChange) {
+      onRowExpansionChange(newIds);
+    }
   };
 
   // Handle the shift+click selection
@@ -174,7 +180,7 @@ const useTable = ({
     const rangeIds = allRowIds.slice(startIndex, endIndex + 1);
 
     // Preserve existing selections outside the range
-    const idsOutsideRange = selectedTableIds.filter(
+    const idsOutsideRange = selectedTableIdsRef.current.filter(
       (id) => !rangeIds.includes(id)
     );
     const newSelection = [...new Set([...rangeIds, ...idsOutsideRange])];
@@ -206,7 +212,7 @@ const useTable = ({
                 // Try to handle with shift-select logic first
                 if (!handleShiftSelect(rowId, isShiftKey)) {
                   // If not handled by shift-select, do regular toggle
-                  const newSet = new Set(selectedTableIds);
+                  const newSet = new Set(selectedTableIdsRef.current);
                   if (e.target.checked) {
                     newSet.add(rowId);
                   } else {

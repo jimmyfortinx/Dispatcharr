@@ -66,6 +66,7 @@ class ProxyServer:
         self.stream_managers = {}
         self.stream_buffers = {}
         self.client_managers = {}
+        self._channel_names = {}
 
         # Generate a unique worker ID
         import socket
@@ -699,7 +700,9 @@ class ProxyServer:
 
             # Log channel start event
             try:
-                channel_obj = Channel.objects.get(uuid=channel_id)
+                _name = Channel.objects.filter(uuid=channel_id).values_list('name', flat=True).first()
+                channel_name = _name if _name else str(channel_id)
+                self._channel_names[channel_id] = channel_name
 
                 # Get stream name if stream_id is available
                 stream_name = None
@@ -713,7 +716,7 @@ class ProxyServer:
                 log_system_event(
                     'channel_start',
                     channel_id=channel_id,
-                    channel_name=channel_obj.name,
+                    channel_name=channel_name,
                     stream_name=stream_name,
                     stream_id=channel_stream_id
                 )
@@ -968,7 +971,7 @@ class ProxyServer:
 
                 # Log channel stop event (after cleanup, before releasing ownership section ends)
                 try:
-                    channel_obj = Channel.objects.get(uuid=channel_id)
+                    channel_name = self._channel_names.pop(channel_id, None) or str(channel_id)
 
                     # Calculate runtime and get total bytes from metadata
                     runtime = None
@@ -994,7 +997,7 @@ class ProxyServer:
                     log_system_event(
                         'channel_stop',
                         channel_id=channel_id,
-                        channel_name=channel_obj.name,
+                        channel_name=channel_name,
                         runtime=runtime,
                         total_bytes=total_bytes
                     )

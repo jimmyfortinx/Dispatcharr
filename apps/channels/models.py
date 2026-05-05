@@ -56,7 +56,7 @@ class Stream(models.Model):
     Represents a single stream (e.g. from an M3U source or custom URL).
     """
 
-    name = models.CharField(max_length=255, default="Default Stream")
+    name = models.CharField(max_length=512, default="Default Stream", db_index=True)
     url = models.URLField(max_length=4096, blank=True, null=True)
     m3u_account = models.ForeignKey(
         M3UAccount,
@@ -300,7 +300,7 @@ class ChannelManager(models.Manager):
 
 class Channel(models.Model):
     channel_number = models.FloatField(db_index=True)
-    name = models.CharField(max_length=255)
+    name = models.CharField(max_length=512)
     logo = models.ForeignKey(
         "Logo",
         on_delete=models.SET_NULL,

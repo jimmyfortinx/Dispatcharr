@@ -43,6 +43,12 @@ class StreamGenerator:
         self.client_user_agent = client_user_agent
         self.channel_initializing = channel_initializing
         self.user = user
+        # Cache channel name once to avoid repeated DB queries for logging
+        try:
+            _name = Channel.objects.filter(uuid=channel_id).values_list('name', flat=True).first()
+            self.channel_name = _name if _name else str(channel_id)
+        except Exception:
+            self.channel_name = str(channel_id)
 
         # Performance and state tracking
         self.stream_start_time = time.time()
@@ -59,6 +65,11 @@ class StreamGenerator:
         # TTL refresh tracking
         self.last_ttl_refresh = time.time()
         self.ttl_refresh_interval = 3  # Refresh TTL every 3 seconds of active streaming
+
+        # Throttle per-client stats writes to Redis.
+        # channels with many viewers.
+        self.last_stats_write = 0.0
+        self.stats_write_interval = 1.0
 
         # Cached proxy server reference
         self.proxy_server = None
@@ -107,11 +118,10 @@ class StreamGenerator:
 
             # Log client connect event
             try:
-                channel_obj = Channel.objects.get(uuid=self.channel_id)
                 log_system_event(
                     'client_connect',
                     channel_id=self.channel_id,
-                    channel_name=channel_obj.name,
+                    channel_name=self.channel_name,
                     client_ip=self.client_ip,
                     client_id=self.client_id,
                     user_agent=self.client_user_agent[:100] if self.client_user_agent else None,
@@ -443,9 +453,12 @@ class StreamGenerator:
                     logger.debug(f"[{self.client_id}] Stats: {self.chunks_sent} chunks, {self.bytes_sent/1024:.1f} KB, "
                                 f"avg: {avg_rate:.1f} KB/s, current: {self.current_rate:.1f} KB/s")
 
-                # Store stats in Redis client metadata
-                if proxy_server.redis_client:
+                # Store stats in Redis client metadata, throttled to avoid an
+                # hset on every chunk. Frontend stats panels poll on the order
+                # of seconds, so 1s resolution is sufficient.
+                if proxy_server.redis_client and (current_time - self.last_stats_write) >= self.stats_write_interval:
                     try:
+                        self.last_stats_write = current_time
                         client_key = RedisKeys.client_metadata(self.channel_id, self.client_id)
                         stats = {
                             ChannelMetadataField.CHUNKS_SENT: str(self.chunks_sent),
@@ -586,11 +599,10 @@ class StreamGenerator:
 
             # Log client disconnect event
             try:
-                channel_obj = Channel.objects.get(uuid=self.channel_id)
                 log_system_event(
                     'client_disconnect',
                     channel_id=self.channel_id,
-                    channel_name=channel_obj.name,
+                    channel_name=self.channel_name,
                     client_ip=self.client_ip,
                     client_id=self.client_id,
                     user_agent=self.client_user_agent[:100] if self.client_user_agent else None,

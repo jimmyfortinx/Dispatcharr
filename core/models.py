@@ -406,6 +406,8 @@ class SystemEvent(models.Model):
         ('logout', 'User Logged Out'),
         ('m3u_blocked', 'M3U Download Blocked'),
         ('epg_blocked', 'EPG Download Blocked'),
+        ('vod_start', 'VOD Started'),
+        ('vod_stop', 'VOD Stopped'),
     ]
 
     event_type = models.CharField(max_length=50, choices=EVENT_TYPES, db_index=True)

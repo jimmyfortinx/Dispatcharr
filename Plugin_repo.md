@@ -55,12 +55,17 @@ This is the simplest valid repo manifest - one plugin with enough info to show i
         "name": "Weather Display",
         "description": "Shows weather info on the dashboard",
         "author": "Acme Labs",
+        "maintainers": ["alice", "bob"],
         "license": "MIT",
+        "deprecated": false,
+        "repo_url": "https://github.com/acmelabs/dispatcharr-weather",
+        "discord_thread": "https://discord.com/channels/123456/789012",
         "latest_version": "1.2.5",
         "last_updated": "2025-01-20T15:30:00Z",
         "manifest_url": "plugins/weather_display/manifest.json",
         "latest_url": "plugins/weather_display/releases/weather_display-1.2.5.zip",
         "latest_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "latest_size": 142,
         "icon_url": "plugins/weather_display/logo.png",
         "min_dispatcharr_version": "2.5.0",
         "max_dispatcharr_version": null
@@ -128,13 +133,18 @@ If the name contains any of these, the repo will be rejected on add and skipped 
 | `name` | **Yes** | Human-readable display name. |
 | `description` | No | Short description shown on the plugin card. |
 | `author` | No | Author or organization name. |
+| `maintainers` | No | Array of maintainer GitHub usernames (e.g. `["alice", "bob"]`). Shown in the detail view. |
 | `license` | No | SPDX license identifier (e.g. `MIT`, `GPL-3.0`). Displayed as a link to the SPDX license page. |
+| `deprecated` | No | Boolean. When `true`, marks the plugin as deprecated in the store UI. Omit or set to `false` for active plugins. |
+| `repo_url` | No | URL to the plugin's source code repository (e.g. GitHub). |
+| `discord_thread` | No | URL to a Discord thread or channel for plugin support. Must start with `http://` or `https://`. |
 | `latest_version` | No | Current latest version string (semver: `1.2.3` or `v1.2.3`). Drives update detection. |
 | `last_updated` | No | ISO 8601 timestamp of the latest release. Shown as "Built" date in the detail view. |
 | `manifest_url` | No | URL (or relative path) to the per-plugin manifest with full version history. See [Per-Plugin Manifest](#per-plugin-manifest). |
 | `latest_url` | No | Direct download URL (or relative path) to the latest release zip. |
 | `latest_sha256` | No | SHA256 checksum of the latest release zip (lowercase hex, 64 chars). |
 | `latest_md5` | No | MD5 checksum of the latest release zip. Informational only - not validated by Dispatcharr. |
+| `latest_size` | No | Size of the latest release zip in kilobytes. Informational only. |
 | `icon_url` | No | URL (or relative path) to a logo image (PNG recommended). |
 | `min_dispatcharr_version` | No | Minimum Dispatcharr version required. Install is blocked if the running version is older. |
 | `max_dispatcharr_version` | No | Maximum Dispatcharr version supported. Install is blocked if the running version is newer. |
@@ -216,11 +226,14 @@ Use the wrapped format if you want to GPG-sign the per-plugin manifest.
   "author": "Acme Labs",
   "license": "MIT",
   "latest_version": "1.2.5",
+  "registry_name": "Acme Labs Plugins",
+  "registry_url": "https://github.com/acmelabs/dispatcharr-plugins",
   "versions": [
     {
       "version": "1.2.5",
       "url": "releases/weather_display-1.2.5.zip",
       "checksum_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "size": 142,
       "build_timestamp": "2025-01-20T15:30:00Z",
       "commit_sha": "4e8f1b108c1e84f60520710d13e54eb2fb519648",
       "commit_sha_short": "4e8f1b1",
@@ -231,6 +244,7 @@ Use the wrapped format if you want to GPG-sign the per-plugin manifest.
       "version": "1.2.5-rc.1",
       "url": "releases/weather_display-1.2.5-rc.1.zip",
       "checksum_sha256": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
+      "size": 141,
       "prerelease": true,
       "build_timestamp": "2025-01-18T09:00:00Z",
       "min_dispatcharr_version": "2.5.0"
@@ -239,6 +253,7 @@ Use the wrapped format if you want to GPG-sign the per-plugin manifest.
       "version": "1.2.4",
       "url": "releases/weather_display-1.2.4.zip",
       "checksum_sha256": "d4d967a67a4947e55183308cece206b30dda3e1b4fe00aae60f45a49c83b7ed6",
+      "size": 138,
       "build_timestamp": "2025-01-15T10:00:00Z",
       "min_dispatcharr_version": "2.4.0"
     }
@@ -246,7 +261,9 @@ Use the wrapped format if you want to GPG-sign the per-plugin manifest.
   "latest": {
     "version": "1.2.5",
     "url": "releases/weather_display-1.2.5.zip",
+    "latest_url": "releases/weather_display-latest.zip",
     "checksum_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "size": 142,
     "build_timestamp": "2025-01-20T15:30:00Z",
     "min_dispatcharr_version": "2.5.0"
   }
@@ -263,8 +280,10 @@ Use the wrapped format if you want to GPG-sign the per-plugin manifest.
 | `author` | No | Author/org name shown in the detail modal. |
 | `license` | No | SPDX license identifier. |
 | `latest_version` | No | Latest version string. |
+| `registry_name` | No | Registry name inherited from the parent repo manifest. Injected automatically by the official publish tooling. |
+| `registry_url` | No | Registry URL inherited from the parent repo manifest. Used by the store to build commit links. Injected automatically by the official publish tooling. |
 | `versions` | No | Array of version objects (newest first recommended). |
-| `latest` | No | Object mirroring the latest version entry for quick access. |
+| `latest` | No | Object mirroring the latest version entry for quick access. Accepts all the same fields as a version object. Additionally, `latest_url` may appear here pointing to a stable symlink (e.g. `plugin-latest.zip`) that always resolves to the newest release. |
 
 ### Version Object Fields
 
@@ -277,6 +296,7 @@ Use the wrapped format if you want to GPG-sign the per-plugin manifest.
 | `build_timestamp` | No | ISO 8601 build timestamp. Shown as "Built" in the version detail. |
 | `commit_sha` | No | Full Git commit SHA. Used to build a commit link if `registry_url` is set. |
 | `commit_sha_short` | No | Abbreviated commit SHA. Displayed in the version detail table as a clickable link. |
+| `size` | No | Size of this version's zip in kilobytes. Informational only. |
 | `min_dispatcharr_version` | No | Minimum compatible Dispatcharr version. |
 | `max_dispatcharr_version` | No | Maximum compatible Dispatcharr version. |
 
@@ -536,12 +556,18 @@ You can host release zips as GitHub Release assets and reference them with absol
         "name": "string (required)",
         "description": "string",
         "author": "string",
+        "maintainers": ["string"],
         "license": "string (SPDX)",
+        "deprecated": "boolean",
+        "repo_url": "string (URL)",
+        "discord_thread": "string (URL)",
         "latest_version": "string (semver)",
         "last_updated": "string (ISO 8601)",
         "manifest_url": "string (URL or relative path)",
         "latest_url": "string (URL or relative path)",
         "latest_sha256": "string (64-char hex)",
+        "latest_md5": "string",
+        "latest_size": "number (KB)",
         "icon_url": "string (URL or relative path)",
         "min_dispatcharr_version": "string (semver)",
         "max_dispatcharr_version": "string (semver) or null"
@@ -562,11 +588,15 @@ You can host release zips as GitHub Release assets and reference them with absol
   "author": "string",
   "license": "string (SPDX)",
   "latest_version": "string (semver)",
+  "registry_name": "string",
+  "registry_url": "string (URL)",
   "versions": [
     {
       "version": "string (required)",
       "url": "string (required, URL or relative path)",
       "checksum_sha256": "string (64-char hex)",
+      "size": "number (KB)",
+      "prerelease": "boolean",
       "build_timestamp": "string (ISO 8601)",
       "commit_sha": "string",
       "commit_sha_short": "string",
@@ -577,7 +607,9 @@ You can host release zips as GitHub Release assets and reference them with absol
   "latest": {
     "version": "string",
     "url": "string",
+    "latest_url": "string (stable symlink URL)",
     "checksum_sha256": "string",
+    "size": "number (KB)",
     "build_timestamp": "string",
     "min_dispatcharr_version": "string",
     "max_dispatcharr_version": "string or null"

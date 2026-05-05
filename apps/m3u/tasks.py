@@ -1182,6 +1182,8 @@ def process_m3u_batch_direct(account_id, batch, groups, hash_keys):
     streams_to_update = []
     stream_hashes = {}
 
+    name_max_length = Stream._meta.get_field('name').max_length
+
     def build_stalker_identity(attributes):
         stalker_channel_id = str(attributes.get("stalker_channel_id") or attributes.get("id") or "").strip()
         if stalker_channel_id:
@@ -1219,6 +1221,11 @@ def process_m3u_batch_direct(account_id, batch, groups, hash_keys):
             if url and len(url) > 4096:
                 logger.warning(f"Skipping stream '{name}': URL too long ({len(url)} characters, max 4096)")
                 continue
+
+            # Truncate name if it exceeds the model field limit
+            if name and len(name) > name_max_length:
+                logger.warning(f"Stream name too long ({len(name)} > {name_max_length}), truncating: {name[:80]}...")
+                name = name[:name_max_length]
 
             tvg_id, tvg_logo = get_case_insensitive_attr(
                 stream_info["attributes"], "tvg-id", ""
@@ -2654,12 +2661,11 @@ def sync_auto_channels(account_id, scan_start_time=None):
             ).values_list('channel_id', flat=True)
         )
 
-        orphaned_count = orphaned_channels.count()
-        if orphaned_count > 0:
-            orphaned_channels.delete()
-            channels_deleted += orphaned_count
+        deleted_total, _ = orphaned_channels.delete()
+        if deleted_total:
+            channels_deleted += deleted_total
             logger.info(
-                f"Deleted {orphaned_count} orphaned auto channels with no valid streams"
+                f"Deleted {deleted_total} orphaned auto channels with no valid streams"
             )
 
         logger.info(
@@ -3649,16 +3655,17 @@ def send_m3u_update(account_id, action, progress, **kwargs):
         "action": action,
     }
 
-    # Add the status and message if not already in kwargs
-    try:
-        account = M3UAccount.objects.get(id=account_id)
-        if account:
+    # Only fetch the account when we actually need to fill in missing fields.
+    # Many callers in tight loops already pass status/message; skip the DB hit then.
+    if "status" not in kwargs or "message" not in kwargs:
+        try:
+            account = M3UAccount.objects.only("status", "last_message").get(id=account_id)
             if "status" not in kwargs:
                 data["status"] = account.status
             if "message" not in kwargs and account.last_message:
                 data["message"] = account.last_message
-    except:
-        pass  # If account can't be retrieved, continue without these fields
+        except Exception:
+            pass
 
     # Add the additional key-value pairs from kwargs
     data.update(kwargs)

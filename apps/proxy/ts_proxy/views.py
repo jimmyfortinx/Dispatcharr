@@ -370,6 +370,7 @@ def _stream_ts_impl(request, channel_id, user=None, force_redirect=False):
                 profile_value,
                 stream_id,
                 m3u_profile_id,
+                channel_name=channel.name,
             )
 
             if not success:

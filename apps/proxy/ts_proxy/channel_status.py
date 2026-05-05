@@ -148,9 +148,7 @@ class ChannelStatus:
             }
 
             if 'connected_at' in client_data:
-                connected_at = float(client_data['connected_at'])
-                client_info['connected_at'] = connected_at
-                client_info['connection_duration'] = time.time() - connected_at
+                client_info['connected_at'] = float(client_data['connected_at'])
 
             if 'last_active' in client_data:
                 last_active = float(client_data['last_active'])
@@ -399,23 +397,20 @@ class ChannelStatus:
                 'uptime': uptime
             }
 
-            # Add stream ID and name information
+            channel_name = metadata.get(ChannelMetadataField.CHANNEL_NAME)
+            if channel_name:
+                info['channel_name'] = channel_name
+
             stream_id_bytes = metadata.get(ChannelMetadataField.STREAM_ID)
             if stream_id_bytes:
                 try:
-                    stream_id = int(stream_id_bytes)
-                    info['stream_id'] = stream_id
-
-                    # Look up stream name from database
-                    try:
-                        from apps.channels.models import Stream
-                        stream = Stream.objects.filter(id=stream_id).first()
-                        if stream:
-                            info['stream_name'] = stream.name
-                    except (ImportError, DatabaseError) as e:
-                        logger.warning(f"Failed to get stream name for ID {stream_id}: {e}")
+                    info['stream_id'] = int(stream_id_bytes)
                 except ValueError:
                     logger.warning(f"Invalid stream_id format in Redis: {stream_id_bytes}")
+
+            stream_name = metadata.get(ChannelMetadataField.STREAM_NAME)
+            if stream_name:
+                info['stream_name'] = stream_name
 
             # Add data throughput information to basic info
             total_bytes_bytes = proxy_server.redis_client.hget(metadata_key, ChannelMetadataField.TOTAL_BYTES)
@@ -472,8 +467,7 @@ class ChannelStatus:
 
                     connected_at_bytes = proxy_server.redis_client.hget(client_key, 'connected_at')
                     if connected_at_bytes:
-                        connected_at = float(connected_at_bytes)
-                        client_info['connected_since'] = time.time() - connected_at
+                        client_info['connected_at'] = float(connected_at_bytes)
 
                     user_id_bytes = proxy_server.redis_client.hget(client_key, 'user_id')
                     if user_id_bytes:
@@ -485,21 +479,11 @@ class ChannelStatus:
             info['clients'] = clients
             info['client_count'] = client_count
 
-            # Add M3U profile information
+            # Add M3U profile ID from Redis metadata (name resolved on frontend from playlists store)
             m3u_profile_id = metadata.get(ChannelMetadataField.M3U_PROFILE)
             if m3u_profile_id:
                 try:
-                    m3u_profile_id = int(m3u_profile_id)
-                    info['m3u_profile_id'] = m3u_profile_id
-
-                    # Look up M3U profile name from database
-                    try:
-                        from apps.m3u.models import M3UAccountProfile
-                        m3u_profile = M3UAccountProfile.objects.filter(id=m3u_profile_id).first()
-                        if m3u_profile:
-                            info['m3u_profile_name'] = m3u_profile.name
-                    except (ImportError, DatabaseError) as e:
-                        logger.warning(f"Failed to get M3U profile name for ID {m3u_profile_id}: {e}")
+                    info['m3u_profile_id'] = int(m3u_profile_id)
                 except ValueError:
                     logger.warning(f"Invalid m3u_profile_id format in Redis: {m3u_profile_id}")
 

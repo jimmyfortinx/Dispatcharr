@@ -93,14 +93,14 @@ class M3UAccountProfileSerializer(serializers.ModelSerializer):
 
     def update(self, instance, validated_data):
         if instance.is_default:
-            # For default profiles, only allow updating name, custom_properties, and exp_date
-            allowed_fields = {'name', 'custom_properties', 'exp_date'}
+            # For default profiles, only allow updating name, custom_properties, exp_date, and patterns
+            allowed_fields = {'name', 'custom_properties', 'exp_date', 'search_pattern', 'replace_pattern'}
 
             # Remove any fields that aren't allowed for default profiles
             disallowed_fields = set(validated_data.keys()) - allowed_fields
             if disallowed_fields:
                 raise serializers.ValidationError(
-                    f"Default profiles can only modify name, notes, and expiration. "
+                    f"Default profiles can only modify name, notes, expiration, and URL patterns. "
                     f"Cannot modify: {', '.join(disallowed_fields)}"
                 )
 
