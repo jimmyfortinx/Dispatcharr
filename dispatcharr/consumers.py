@@ -1,5 +1,6 @@
 import json
 from channels.generic.websocket import AsyncWebsocketConsumer
+from asgiref.sync import sync_to_async
 import regex, logging
 
 logger = logging.getLogger(__name__)
@@ -16,7 +17,6 @@ class MyWebSocketConsumer(AsyncWebsocketConsumer):
         try:
             await self.accept()
             await self.channel_layer.group_add(self.room_name, self.channel_name)
-            # Send a connection confirmation to the client with consistent format
             await self.send(text_data=json.dumps({
                 'type': 'connection_established',
                 'data': {
@@ -24,13 +24,22 @@ class MyWebSocketConsumer(AsyncWebsocketConsumer):
                     'message': 'WebSocket connection established successfully'
                 }
             }))
-        except Exception as e:
-            import logging
-            logger = logging.getLogger(__name__)
-            logger.error(f"Error in WebSocket connect: {str(e)}")
-            # If an error occurs during connection, attempt to close
+            # If the IP lookup already completed before the client connected,
+            # push the cached result immediately so the Skeleton resolves.
             try:
-                await self.close(code=1011)  # Internal server error
+                from django.core.cache import cache
+                from core.api_views import _IP_CACHE_KEY
+                cached_ip = await sync_to_async(cache.get)(_IP_CACHE_KEY)
+                if cached_ip:
+                    await self.send(text_data=json.dumps({
+                        'data': {'type': 'ip_lookup_complete', **cached_ip}
+                    }))
+            except Exception as e:
+                logger.warning(f"Could not push cached IP result on connect: {e}")
+        except Exception as e:
+            logger.error(f"Error in WebSocket connect: {str(e)}")
+            try:
+                await self.close(code=1011)
             except:
                 pass
 
@@ -46,7 +55,7 @@ class MyWebSocketConsumer(AsyncWebsocketConsumer):
         data = json.loads(text_data)
 
         if data["type"] == "m3u_profile_test":
-            from apps.proxy.ts_proxy.url_utils import transform_url
+            from apps.proxy.live_proxy.url_utils import transform_url
 
             def replace_with_mark(match):
                 # Wrap the match in <mark> tags

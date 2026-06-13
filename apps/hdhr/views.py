@@ -15,6 +15,7 @@ from django.views import View
 from django.utils.decorators import method_decorator
 from django.contrib.auth.decorators import login_required
 from django.views.decorators.csrf import csrf_exempt
+from core.utils import build_absolute_uri_with_port
 
 
 @login_required
@@ -46,7 +47,7 @@ class DiscoverAPIView(APIView):
         description="Retrieve HDHomeRun device discovery information",
     )
     def get(self, request):
-        base_url = request.build_absolute_uri("/hdhr/").rstrip("/")
+        base_url = build_absolute_uri_with_port(request, "/hdhr/").rstrip("/")
         device = HDHRDevice.objects.first()
 
         if not device:
@@ -84,15 +85,29 @@ class LineupAPIView(APIView):
         description="Retrieve the available channel lineup",
     )
     def get(self, request):
-        channels = Channel.objects.all().order_by("channel_number")
-        lineup = [
-            {
-                "GuideNumber": str(ch.channel_number),
-                "GuideName": ch.name,
-                "URL": request.build_absolute_uri(f"/proxy/ts/stream/{ch.uuid}"),
-            }
-            for ch in channels
-        ]
+        from apps.channels.managers import with_effective_values
+        from apps.channels.utils import format_channel_number
+
+        channels = (
+            with_effective_values(Channel.objects.all())
+            .exclude(hidden_from_output=True)
+            .order_by("effective_channel_number")
+        )
+        _stream_url_prefix = build_absolute_uri_with_port(request, "/proxy/ts/stream/")
+
+        lineup = []
+        for ch in channels:
+            formatted = format_channel_number(ch.effective_channel_number, empty=None)
+            if formatted is None:
+                continue
+            formatted_channel_number = str(formatted)
+            lineup.append(
+                {
+                    "GuideNumber": formatted_channel_number,
+                    "GuideName": ch.effective_name,
+                    "URL": f"{_stream_url_prefix}{ch.uuid}",
+                }
+            )
         return JsonResponse(lineup, safe=False)
 
 
@@ -121,7 +136,7 @@ class HDHRDeviceXMLAPIView(APIView):
         description="Retrieve the HDHomeRun device XML configuration",
     )
     def get(self, request):
-        base_url = request.build_absolute_uri("/hdhr/").rstrip("/")
+        base_url = build_absolute_uri_with_port(request, "/hdhr/").rstrip("/")
 
         xml_response = f"""<?xml version="1.0" encoding="utf-8"?>
         <root>

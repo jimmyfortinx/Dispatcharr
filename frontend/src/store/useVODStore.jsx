@@ -240,13 +240,13 @@ const useVODStore = create((set, get) => ({
     }
   },
 
-  fetchMovieDetailsFromProvider: async (movieId) => {
+  fetchMovieDetailsFromProvider: async (movieId, relationId = null) => {
     set({ loading: true, error: null });
     try {
       const category = get().filters.category;
       const response = category
-        ? await api.getMovieProviderInfo(movieId, category)
-        : await api.getMovieProviderInfo(movieId);
+        ? await api.getMovieProviderInfo(movieId, category, relationId)
+        : await api.getMovieProviderInfo(movieId, '', relationId);
 
       // Transform the response data to match our expected format
       const movieDetails = getMovieDetailsWithProvider(response, movieId);
@@ -355,13 +355,13 @@ const useVODStore = create((set, get) => ({
       return { content: updatedContent };
     }),
 
-  fetchSeriesInfo: async (seriesId) => {
+  fetchSeriesInfo: async (seriesId, relationId = null) => {
     set({ loading: true, error: null });
     try {
       const category = get().filters.category;
       const response = category
-        ? await api.getSeriesInfo(seriesId, category)
-        : await api.getSeriesInfo(seriesId);
+        ? await api.getSeriesInfo(seriesId, category, relationId)
+        : await api.getSeriesInfo(seriesId, '', relationId);
 
       // Transform the response data to match our expected format
       const seriesInfo = getSeriesDetails(response, seriesId);

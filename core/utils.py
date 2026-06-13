@@ -312,35 +312,116 @@ class TaskLockRenewer:
         return False
 
 
-def send_websocket_update(group_name, event_type, data, collect_garbage=False):
-    """
-    Standardized function to send WebSocket updates with proper memory management.
-
-    In uWSGI + gevent deployments, async_to_sync creates an asyncio event loop
-    whose native EpollSelector blocks the entire OS thread, freezing all gevent
-    greenlets in the worker.  To avoid this, the actual send is offloaded to a
-    real OS thread from gevent's native threadpool when monkey-patching is active.
-    """
-    channel_layer = get_channel_layer()
-    message = {'type': event_type, 'data': data}
-
-    def _do_send():
-        try:
-            async_to_sync(channel_layer.group_send)(group_name, message)
-        except Exception as e:
-            logger.warning(f"Failed to send WebSocket update: {e}")
-
+def _is_gevent_monkey_patched():
     try:
         import gevent.monkey
-        if gevent.monkey.is_module_patched('threading'):
-            from gevent import get_hub
-            get_hub().threadpool.spawn(_do_send)
-            return
+        return gevent.monkey.is_module_patched('threading')
     except Exception:
-        pass
+        return False
 
-    # Not in a gevent-patched environment — call directly
-    _do_send()
+
+def _is_celery_worker_context():
+    """True when executing inside an active Celery task (prefork worker)."""
+    try:
+        from celery import current_task
+        request = getattr(current_task, 'request', None)
+        return bool(request and getattr(request, 'id', None))
+    except Exception:
+        return False
+
+
+def _should_use_sync_websocket_send():
+    """
+    Use synchronous Redis delivery when gevent is monkey-patched but no gevent
+    hub is driving the process — e.g. Celery prefork workers that inherit
+    gevent patching from uWSGI imports. gevent.spawn in that context schedules
+    coroutines that never run.
+    """
+    return _is_gevent_monkey_patched() and _is_celery_worker_context()
+
+
+def _gevent_ws_send(group_name, message):
+    """
+    Publishes a WebSocket group message synchronously through Redis.
+
+    gevent's monkey-patching removes select.epoll, which breaks asyncio event
+    loop creation in threadpool threads. This function replicates channels_redis
+    4.x group_send directly via a sync Redis client, avoiding asyncio entirely.
+
+    Matches channels_redis 4.x defaults: prefix="asgi", expiry=60,
+    group_expiry=86400, msgpack serializer with 12-byte random prefix.
+    """
+    try:
+        import msgpack
+        redis = RedisClient.get_buffer()  # decode_responses=False for binary values
+
+        prefix = "asgi"
+        group_expiry = 86400
+        channel_expiry = 60
+        rand_len = 12
+
+        group_key = f"{prefix}:group:{group_name}"
+        now = time.time()
+
+        redis.zremrangebyscore(group_key, 0, now - group_expiry)
+        raw = redis.zrange(group_key, 0, -1)
+        if not raw:
+            return
+
+        channels = [m.decode('utf-8') if isinstance(m, bytes) else m for m in raw]
+
+        # Group channels by non-local name (prefix up to and including "!") so
+        # specific channels sharing a prefix share one Redis sorted-set key.
+        nonlocal_map = {}
+        for ch in channels:
+            pos = ch.find("!")
+            nl = ch[:pos + 1] if pos >= 0 else ch
+            nonlocal_map.setdefault(nl, []).append(ch)
+
+        pipe = redis.pipeline(transaction=False)
+        for nl, chs in nonlocal_map.items():
+            channel_key = prefix + nl
+            msg = dict(message)
+            msg["__asgi_channel__"] = chs
+            serialized = os.urandom(rand_len) + msgpack.packb(msg)
+            pipe.zadd(channel_key, {serialized: now})
+            pipe.expire(channel_key, channel_expiry)
+        pipe.execute()
+    except Exception as e:
+        logger.warning(f"Failed to send WebSocket update: {e}")
+
+
+def send_websocket_update_sync(group_name, event_type, data):
+    """Send a WebSocket group message synchronously via Redis (channels_redis wire format)."""
+    message = {'type': event_type, 'data': data}
+    _gevent_ws_send(group_name, message)
+
+
+def send_websocket_update(group_name, event_type, data, collect_garbage=False):
+    """
+    Sends a WebSocket group message.
+
+    In gevent-patched uWSGI workers, asyncio event loop creation fails because
+    monkey-patching removes select.epoll. For those contexts a synchronous Redis
+    path is used instead, matching the channels_redis 4.x wire format.
+
+    Celery prefork workers may inherit gevent monkey-patching without a running
+    gevent hub; in that case gevent.spawn would never execute, so delivery is
+    synchronous via Redis instead.
+    """
+    message = {'type': event_type, 'data': data}
+
+    if _should_use_sync_websocket_send():
+        _gevent_ws_send(group_name, message)
+    elif _is_gevent_monkey_patched():
+        import gevent
+        gevent.spawn(_gevent_ws_send, group_name, message)
+    else:
+        # Not gevent-patched (plain Celery, tests) — use asyncio channel layer
+        try:
+            async_to_sync(get_channel_layer().group_send)(group_name, message)
+        except Exception as e:
+            logger.warning(f"Failed to send WebSocket update: {e}")
 
     if collect_garbage:
         gc.collect()
@@ -635,6 +716,25 @@ def log_system_event(event_type, channel_id=None, channel_name=None, **details):
         logger.error(f"Failed to log system event {event_type}: {e}")
 
 
+def _send_async(channel_layer, group, message):
+    """Send a channel layer group message without blocking the gevent hub."""
+    def _do():
+        try:
+            async_to_sync(channel_layer.group_send)(group, message)
+        except Exception as e:
+            logger.warning(f"Failed WebSocket group_send to '{group}': {e}")
+
+    try:
+        import gevent.monkey
+        if gevent.monkey.is_module_patched("threading"):
+            import gevent
+            gevent.spawn(_gevent_ws_send, group, message)
+            return
+    except Exception:
+        pass
+    _do()
+
+
 def send_websocket_notification(notification):
     """
     Send a system notification to all connected WebSocket clients.
@@ -667,7 +767,8 @@ def send_websocket_notification(notification):
         else:
             notification_data = notification
 
-        async_to_sync(channel_layer.group_send)(
+        _send_async(
+            channel_layer,
             'updates',
             {
                 'type': 'update',
@@ -682,6 +783,76 @@ def send_websocket_notification(notification):
         logger.error(f"Failed to send WebSocket notification: {e}")
 
 
+def get_host_and_port(request):
+    """
+    Returns (host, port) for building absolute URIs.
+    - Prefers X-Forwarded-Host/X-Forwarded-Port (nginx).
+    - Falls back to Host header.
+    - Returns None for port if using standard ports (80/443) to omit from URLs.
+    - In dev, uses 5656 as a guess if port cannot be determined.
+    """
+    scheme = request.META.get("HTTP_X_FORWARDED_PROTO", request.scheme)
+    standard_port = "443" if scheme == "https" else "80"
+
+    # 1. Try X-Forwarded-Host (may include port) - set by our nginx
+    xfh = request.META.get("HTTP_X_FORWARDED_HOST")
+    if xfh:
+        if ":" in xfh:
+            host, port = xfh.split(":", 1)
+            if port == standard_port:
+                return host, None
+            return host, port
+        else:
+            host = xfh
+
+        port = request.META.get("HTTP_X_FORWARDED_PORT")
+        if port:
+            return host, None if port == standard_port else port
+        if request.META.get("HTTP_X_FORWARDED_PROTO"):
+            return host, None
+
+    # 2. Try Host header
+    raw_host = request.get_host()
+    if ":" in raw_host:
+        host, port = raw_host.split(":", 1)
+        return host, None if port == standard_port else port
+    else:
+        host = raw_host
+
+    # 3. Check for X-Forwarded-Port (when Host header has no port but we're behind a reverse proxy)
+    port = request.META.get("HTTP_X_FORWARDED_PORT")
+    if port:
+        return host, None if port == standard_port else port
+
+    # 4. Behind a reverse proxy with no port info - assume standard port
+    if request.META.get("HTTP_X_FORWARDED_PROTO") or request.META.get("HTTP_X_FORWARDED_FOR"):
+        return host, None
+
+    # 5. Try SERVER_PORT from META (only if NOT behind reverse proxy)
+    port = request.META.get("SERVER_PORT")
+    if port:
+        return host, None if port == standard_port else port
+
+    # 6. Dev fallback
+    if os.environ.get("DISPATCHARR_ENV") == "dev" or host in ("localhost", "127.0.0.1"):
+        return host, "5656"
+
+    # 7. Final fallback: assume standard port for scheme
+    return host, None
+
+
+def build_absolute_uri_with_port(request, path):
+    """
+    Build an absolute URI with optional port.
+    Port is omitted from URL if None (standard port for scheme).
+    """
+    host, port = get_host_and_port(request)
+    scheme = request.META.get("HTTP_X_FORWARDED_PROTO", request.scheme)
+    if port:
+        return f"{scheme}://{host}:{port}{path}"
+    return f"{scheme}://{host}{path}"
+
+
 def send_notification_dismissed(notification_key):
     """
     Notify all connected clients that a notification was dismissed.
@@ -693,7 +864,8 @@ def send_notification_dismissed(notification_key):
     try:
         channel_layer = get_channel_layer()
 
-        async_to_sync(channel_layer.group_send)(
+        _send_async(
+            channel_layer,
             'updates',
             {
                 'type': 'update',

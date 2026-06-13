@@ -3,6 +3,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import usePlaylistsStore from '../../store/playlists.jsx';
 import useSettingsStore from '../../store/settings.jsx';
 import useUsersStore from '../../store/users.jsx';
+import useOutputProfilesStore from '../../store/outputProfiles.jsx';
 import {
   ActionIcon,
   Badge,
@@ -10,7 +11,6 @@ import {
   Card,
   Center,
   Group,
-  Progress,
   Select,
   Stack,
   Text,
@@ -18,18 +18,16 @@ import {
   useMantineTheme,
 } from '@mantine/core';
 import {
-  ChevronDown,
-  ChevronRight,
   CirclePlay,
   Gauge,
   HardDriveDownload,
   HardDriveUpload,
-  Radio,
   SquareX,
   Timer,
   Users,
   Video,
 } from 'lucide-react';
+import ProgramPreview from '../ProgramPreview';
 import {
   toFriendlyDuration,
   formatExactDuration,
@@ -54,51 +52,8 @@ import {
   switchStream,
 } from '../../utils/cards/StreamConnectionCardUtils.js';
 import useVideoStore from '../../store/useVideoStore';
+import { buildLiveStreamUrl } from '../../utils/components/FloatingVideoUtils.js';
 
-const formatProgramTime = (seconds) => {
-  const absSeconds = Math.abs(seconds);
-  const hours = Math.floor(absSeconds / 3600);
-  const minutes = Math.floor((absSeconds % 3600) / 60);
-  const secs = Math.floor(absSeconds % 60);
-  if (hours > 0) {
-    return `${hours}:${minutes.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
-  }
-  return `${minutes}:${secs.toString().padStart(2, '0')}`;
-};
-
-const ProgramProgress = ({ currentProgram }) => {
-  const now = new Date();
-  const startTime = new Date(currentProgram.start_time);
-  const endTime = new Date(currentProgram.end_time);
-  const totalDuration = (endTime - startTime) / 1000; // in seconds
-  const elapsed = (now - startTime) / 1000; // in seconds
-  const remaining = (endTime - now) / 1000; // in seconds
-  const percentage = Math.min(
-    100,
-    Math.max(0, (elapsed / totalDuration) * 100)
-  );
-
-  return (
-    <Stack gap="xs" mt={4}>
-      <Group justify="space-between" align="center">
-        <Text size="xs" c="dimmed">
-          {formatProgramTime(elapsed)} elapsed
-        </Text>
-        <Text size="xs" c="dimmed">
-          {formatProgramTime(remaining)} remaining
-        </Text>
-      </Group>
-      <Progress
-        value={percentage}
-        size="sm"
-        color="#3BA882"
-        style={{
-          backgroundColor: 'rgba(255, 255, 255, 0.1)',
-        }}
-      />
-    </Stack>
-  );
-};
 
 // Create a separate component for each channel card to properly handle the hook
 const StreamConnectionCard = ({
@@ -118,7 +73,7 @@ const StreamConnectionCard = ({
   const [currentM3UProfile, setCurrentM3UProfile] = useState(null); // Add state for current M3U profile
   const [data, setData] = useState([]);
   const [previewedStream, setPreviewedStream] = useState(null);
-  const [isProgramDescExpanded, setIsProgramDescExpanded] = useState(false);
+
 
   const theme = useMantineTheme();
 
@@ -454,9 +409,19 @@ const StreamConnectionCard = ({
       actions: renderBodyCell,
     },
     getExpandedRowHeight: (row) => {
-      return 20 + 28 * row.original.streams.length;
+      return (
+        20 +
+        28 * row.original.streams.length +
+        (row.original.output_format ? 28 : 0) +
+        (row.original.output_profile_id ? 28 : 0)
+      );
     },
     expandedRowRenderer: ({ row }) => {
+      const outputProfileId = row.original.output_profile_id;
+      const outputProfiles = useOutputProfilesStore.getState().profiles;
+      const outputProfileName = outputProfileId
+        ? (outputProfiles.find((p) => p.id === outputProfileId)?.name ?? null)
+        : null;
       return (
         <Box p="xs">
           <Group spacing="xs" align="flex-start">
@@ -465,6 +430,22 @@ const StreamConnectionCard = ({
             </Text>
             <Text size="xs">{row.original.user_agent || 'Unknown'}</Text>
           </Group>
+          {row.original.output_format && (
+            <Group spacing="xs" align="flex-start" mt={4}>
+              <Text size="xs" fw={500} color="dimmed">
+                Container:
+              </Text>
+              <Text size="xs">{row.original.output_format}</Text>
+            </Group>
+          )}
+          {outputProfileName && (
+            <Group spacing="xs" align="flex-start" mt={4}>
+              <Text size="xs" fw={500} color="dimmed">
+                Output Profile:
+              </Text>
+              <Text size="xs">{outputProfileName}</Text>
+            </Group>
+          )}
         </Box>
       );
     },
@@ -531,7 +512,7 @@ const StreamConnectionCard = ({
     const actualChannel = channels[channelDbId];
     if (!actualChannel?.uuid) return;
 
-    const uri = `/proxy/ts/stream/${actualChannel.uuid}`;
+    const uri = buildLiveStreamUrl(`/proxy/ts/stream/${actualChannel.uuid}`);
     let url = `${window.location.protocol}//${window.location.host}${uri}`;
     if (env_mode === 'dev') {
       url = `${window.location.protocol}//${window.location.hostname}:5656${uri}`;
@@ -587,7 +568,7 @@ const StreamConnectionCard = ({
 
           <Group mt={10}>
             <Box>
-              <Tooltip label={getStartDate(uptime)}>
+              <Tooltip label={getStartDate(channel.started_at)}>
                 <Center>
                   <Timer pr={5} />
                   {toFriendlyDuration(uptime, 'seconds')}
@@ -635,47 +616,10 @@ const StreamConnectionCard = ({
 
         {/* Display current program on its own line */}
         {currentProgram && (
-          <Group gap={5} mt={-9} wrap="nowrap">
-            <Radio size="14" style={{ color: '#22c55e', flexShrink: 0 }} />
-            <Text size="xs" fw={500} c="green.5" style={{ flexShrink: 0 }}>
-              Now Playing:
-            </Text>
-            <Text size="xs" c="dimmed" truncate>
-              {currentProgram.title}
-            </Text>
-            <ActionIcon
-              size="xs"
-              variant="subtle"
-              onClick={() => setIsProgramDescExpanded(!isProgramDescExpanded)}
-              style={{ flexShrink: 0 }}
-            >
-              {isProgramDescExpanded ? (
-                <ChevronDown size="14" />
-              ) : (
-                <ChevronRight size="14" />
-              )}
-            </ActionIcon>
-          </Group>
+          <Box mt={-9}>
+            <ProgramPreview program={currentProgram} />
+          </Box>
         )}
-
-        {/* Expandable program description */}
-        {currentProgram &&
-          isProgramDescExpanded &&
-          currentProgram.description && (
-            <Box mt={4} ml={24}>
-              <Text size="xs" c="dimmed" style={{ fontStyle: 'italic' }}>
-                {currentProgram.description}
-              </Text>
-            </Box>
-          )}
-
-        {/* Program progress bar */}
-        {currentProgram &&
-          isProgramDescExpanded &&
-          currentProgram.start_time &&
-          currentProgram.end_time && (
-            <ProgramProgress currentProgram={currentProgram} />
-          )}
 
         {/* Add stream selection dropdown and preview button */}
         {availableStreams.length > 0 && (

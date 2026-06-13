@@ -2,6 +2,7 @@ import API from '../../api.js';
 import useChannelsStore from '../../store/channels.jsx';
 import defaultLogo from '../../images/logo.png';
 import { formatSeasonEpisode } from '../guideUtils.js';
+import { buildLiveStreamUrl } from '../components/FloatingVideoUtils.js';
 
 export const removeRecording = (id) => {
   // Optimistically remove immediately from UI
@@ -63,7 +64,7 @@ export const getShowVideoUrl = (channel, env_mode) => {
   if (env_mode === 'dev') {
     url = `${window.location.protocol}//${window.location.hostname}:5656${url}`;
   }
-  return url;
+  return buildLiveStreamUrl(url);
 };
 
 export const runComSkip = async (recording) => {
@@ -84,21 +85,19 @@ export const extendRecordingById = async (recordingId, extraMinutes) => {
 
 export const deleteSeriesAndRule = async (seriesInfo) => {
   const { tvg_id, title } = seriesInfo;
-  if (tvg_id) {
-    try {
-      await API.bulkRemoveSeriesRecordings({
-        tvg_id,
-        title,
-        scope: 'title',
-      });
-    } catch (error) {
-      console.error('Failed to remove series recordings', error);
-    }
-    try {
-      await API.deleteSeriesRule(tvg_id);
-    } catch (error) {
-      console.error('Failed to delete series rule', error);
-    }
+  try {
+    await API.bulkRemoveSeriesRecordings({
+      tvg_id: tvg_id || '',
+      title,
+      scope: 'title',
+    });
+  } catch (error) {
+    console.error('Failed to remove series recordings', error);
+  }
+  try {
+    await API.deleteSeriesRule(tvg_id, title);
+  } catch (error) {
+    console.error('Failed to delete series rule', error);
   }
 };
 

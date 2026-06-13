@@ -19,6 +19,7 @@ vi.mock('../../../store/channels');
 describe('RecordingCardUtils', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    localStorage.clear();
   });
 
   describe('removeRecording', () => {
@@ -147,19 +148,32 @@ describe('RecordingCardUtils', () => {
   });
 
   describe('getShowVideoUrl', () => {
-    it('returns proxy URL for channel', () => {
+    it('returns proxy URL with mpegts output format for channel', () => {
       const channel = { uuid: 'channel-123' };
       const result = getShowVideoUrl(channel, 'production');
 
-      expect(result).toBe('/proxy/ts/stream/channel-123');
+      expect(result).toBe('/proxy/ts/stream/channel-123?output_format=mpegts');
     });
 
-    it('prepends dev server URL in dev mode', () => {
+    it('includes output_profile when set in player prefs', () => {
+      localStorage.setItem(
+        'dispatcharr-player-prefs',
+        JSON.stringify({ webPlayerOutputProfileId: 5 })
+      );
+      const channel = { uuid: 'channel-123' };
+      const result = getShowVideoUrl(channel, 'production');
+
+      expect(result).toBe(
+        '/proxy/ts/stream/channel-123?output_format=mpegts&output_profile=5'
+      );
+    });
+
+    it('prepends dev server URL in dev mode with output params', () => {
       const channel = { uuid: 'channel-123' };
       const result = getShowVideoUrl(channel, 'dev');
 
       expect(result).toMatch(
-        /^https?:\/\/.*:5656\/proxy\/ts\/stream\/channel-123$/
+        /^https?:\/\/.*:5656\/proxy\/ts\/stream\/channel-123\?output_format=mpegts$/
       );
     });
   });
@@ -198,16 +212,28 @@ describe('RecordingCardUtils', () => {
         title: 'Test Series',
         scope: 'title',
       });
-      expect(API.deleteSeriesRule).toHaveBeenCalledWith('series-123');
+      expect(API.deleteSeriesRule).toHaveBeenCalledWith(
+        'series-123',
+        'Test Series'
+      );
     });
 
-    it('does nothing when tvg_id is not provided', async () => {
-      const seriesInfo = { title: 'Test Series' };
+    it('works for title-only rules with no tvg_id', async () => {
+      API.bulkRemoveSeriesRecordings.mockResolvedValue();
+      API.deleteSeriesRule.mockResolvedValue();
+      const seriesInfo = { tvg_id: undefined, title: 'Title-Only Show' };
 
       await deleteSeriesAndRule(seriesInfo);
 
-      expect(API.bulkRemoveSeriesRecordings).not.toHaveBeenCalled();
-      expect(API.deleteSeriesRule).not.toHaveBeenCalled();
+      expect(API.bulkRemoveSeriesRecordings).toHaveBeenCalledWith({
+        tvg_id: '',
+        title: 'Title-Only Show',
+        scope: 'title',
+      });
+      expect(API.deleteSeriesRule).toHaveBeenCalledWith(
+        undefined,
+        'Title-Only Show'
+      );
     });
 
     it('handles bulk remove error gracefully', async () => {

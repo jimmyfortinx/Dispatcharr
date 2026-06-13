@@ -33,12 +33,10 @@ import { useElementSize } from '@mantine/hooks';
 import { VariableSizeList } from 'react-window';
 import {
   buildChannelIdMap,
-  calculateDesiredScrollPosition,
   calculateEarliestProgramStart,
   calculateEnd,
   calculateHourTimeline,
   calculateLatestProgramEnd,
-  calculateLeftScrollPosition,
   calculateNowPosition,
   calculateScrollPosition,
   calculateScrollPositionByTimeClick,
@@ -47,7 +45,6 @@ import {
   computeRowHeights,
   createRecording,
   createSeriesRule,
-  evaluateSeriesRule,
   fetchPrograms,
   fetchRules,
   filterGuideChannels,
@@ -66,6 +63,7 @@ import {
   PX_PER_MS,
   calcProgressPct,
   sortChannels,
+  evaluateSeriesRulesByTvgId,
 } from '../utils/guideUtils';
 import API from '../api';
 import { getShowVideoUrl } from '../utils/cards/RecordingCardUtils.js';
@@ -116,6 +114,7 @@ export default function TVChannelGuide({ startDate, endDate }) {
   const [recordChoiceProgram, setRecordChoiceProgram] = useState(null);
   const [recordChoiceChannel, setRecordChoiceChannel] = useState(null);
   const [existingRuleMode, setExistingRuleMode] = useState(null);
+  const [existingRule, setExistingRule] = useState(null);
   const [rulesOpen, setRulesOpen] = useState(false);
   const [rules, setRules] = useState([]);
   const [initialScrollComplete, setInitialScrollComplete] = useState(false);
@@ -718,6 +717,7 @@ export default function TVChannelGuide({ startDate, endDate }) {
         const rules = await fetchRules();
         const rule = getRuleByProgram(rules, program);
         setExistingRuleMode(rule ? rule.mode : null);
+        setExistingRule(rule || null);
       } catch (error) {
         console.warn('Failed to fetch series rules metadata', error);
       }
@@ -727,26 +727,32 @@ export default function TVChannelGuide({ startDate, endDate }) {
     [recordingsByProgramId]
   );
 
-  const recordOne = useCallback(
-    async (program, channel) => {
-      if (!channel) {
-        showNotification({
-          title: 'Unable to schedule recording',
-          message: 'No channel found for this program.',
-          color: 'red.6',
-        });
-        return;
-      }
+  const recordOne = useCallback(async (program, channel) => {
+    if (!channel) {
+      showNotification({
+        title: 'Unable to schedule recording',
+        message: 'No channel found for this program.',
+        color: 'red.6',
+      });
+      return;
+    }
 
-      await createRecording(channel, program);
-      showNotification({ title: 'Recording scheduled' });
-    },
-    []
-  );
+    await createRecording({
+      channel: `${channel.id}`,
+      start_time: program.start_time,
+      end_time: program.end_time,
+      custom_properties: { program },
+    });
+    showNotification({ title: 'Recording scheduled' });
+  }, []);
 
   const saveSeriesRule = useCallback(async (program, mode) => {
-    await createSeriesRule(program, mode);
-    await evaluateSeriesRule(program);
+    await createSeriesRule({
+      tvg_id: program.tvg_id,
+      mode,
+      title: program.title,
+    });
+    await evaluateSeriesRulesByTvgId(program.tvg_id);
     // recordings_refreshed WS event triggers the debounced fetchRecordings()
     showNotification({
       title: mode === 'new' ? 'Record new episodes' : 'Record all episodes',
@@ -1464,7 +1470,10 @@ export default function TVChannelGuide({ startDate, endDate }) {
               program={recordChoiceProgram}
               recording={recordingForProgram}
               existingRuleMode={existingRuleMode}
-              onRecordOne={() => recordOne(recordChoiceProgram, recordChoiceChannel)}
+              existingRule={existingRule}
+              onRecordOne={() =>
+                recordOne(recordChoiceProgram, recordChoiceChannel)
+              }
               onRecordSeriesAll={() =>
                 saveSeriesRule(recordChoiceProgram, 'all')
               }

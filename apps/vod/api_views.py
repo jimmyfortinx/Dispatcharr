@@ -336,24 +336,43 @@ class MovieViewSet(viewsets.ReadOnlyModelViewSet):
         """Get detailed movie information from the original provider, throttled to 24h."""
         movie = self.get_object()
 
-        enabled_category_relations = M3UVODCategoryRelation.objects.filter(
-            m3u_account_id=OuterRef("m3u_account_id"),
-            category_id=OuterRef("category_id"),
-            enabled=True,
-        )
-        relations = M3UMovieRelation.objects.filter(
+        relation_id = request.query_params.get('relation_id')
+        if relation_id is not None:
+            try:
+                relation_id = int(relation_id)
+            except (TypeError, ValueError):
+                return Response(
+                    {'error': 'Invalid relation_id'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+        qs = M3UMovieRelation.objects.filter(
             movie=movie,
             m3u_account__is_active=True
-        ).select_related('m3u_account').annotate(
-            category_enabled=Exists(enabled_category_relations)
-        ).filter(
-            Q(category__isnull=True) | Q(category_enabled=True)
-        )
-        relations = _filter_relations_by_category(
-            relations,
+        ).select_related('m3u_account', 'category').annotate(
+            category_enabled=Exists(
+                M3UVODCategoryRelation.objects.filter(
+                    m3u_account_id=OuterRef("m3u_account_id"),
+                    category_id=OuterRef("category_id"),
+                    enabled=True,
+                )
+            )
+        ).filter(Q(category__isnull=True) | Q(category_enabled=True))
+
+        qs = _filter_relations_by_category(
+            qs,
             request.query_params.get("category"),
         )
-        relation = relations.order_by('-m3u_account__priority', 'id').first()
+
+        if relation_id is not None:
+            relation = qs.filter(id=relation_id).first()
+            if not relation:
+                return Response(
+                    {'error': 'Relation not found or not active'},
+                    status=status.HTTP_404_NOT_FOUND
+                )
+        else:
+            relation = qs.order_by('-m3u_account__priority', 'id').first()
 
         if not relation:
             return Response(
@@ -598,16 +617,36 @@ class SeriesViewSet(viewsets.ReadOnlyModelViewSet):
         series = self.get_object()
         logger.debug(f"Retrieved series: {series.name} (ID: {series.id})")
 
-        # Get the highest priority active relation
-        relation = M3USeriesRelation.objects.filter(
+        relation_id = request.query_params.get('relation_id')
+        if relation_id is not None:
+            try:
+                relation_id = int(relation_id)
+            except (TypeError, ValueError):
+                return Response(
+                    {'error': 'Invalid relation_id'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+        qs = M3USeriesRelation.objects.filter(
             series=series,
             m3u_account__is_active=True
         ).select_related('m3u_account', 'category')
-        relation = _filter_relations_by_category(
-            relation,
+
+        qs = _filter_relations_by_category(
+            qs,
             request.query_params.get("category"),
-        ).order_by('-m3u_account__priority', 'id')
-        relation = get_enabled_series_relations_queryset(relation).first()
+        )
+        qs = get_enabled_series_relations_queryset(qs)
+
+        if relation_id is not None:
+            relation = qs.filter(id=relation_id).first()
+            if not relation:
+                return Response(
+                    {'error': 'Relation not found or not active'},
+                    status=status.HTTP_404_NOT_FOUND
+                )
+        else:
+            relation = qs.order_by('-m3u_account__priority', 'id').first()
 
         if not relation:
             return Response(

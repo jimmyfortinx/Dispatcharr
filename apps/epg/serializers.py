@@ -1,7 +1,7 @@
-from core.utils import validate_flexible_url
+from core.utils import validate_flexible_url, build_absolute_uri_with_port
 from rest_framework import serializers
 from .models import EPGSource, EPGData, ProgramData
-from apps.channels.models import Channel
+from apps.channels.models import Channel, Stream
 
 class EPGSourceSerializer(serializers.ModelSerializer):
     epg_data_count = serializers.SerializerMethodField()
@@ -22,7 +22,8 @@ class EPGSourceSerializer(serializers.ModelSerializer):
             'name',
             'source_type',
             'url',
-            'api_key',
+            'username',
+            'password',
             'is_active',
             'file_path',
             'refresh_interval',
@@ -36,6 +37,7 @@ class EPGSourceSerializer(serializers.ModelSerializer):
             'epg_data_count',
             'has_channels',
         ]
+        extra_kwargs = {'password': {'write_only': True}}
 
     def get_epg_data_count(self, obj):
         """Return the count of EPG data entries instead of all IDs to prevent large payloads"""
@@ -66,6 +68,8 @@ class EPGSourceSerializer(serializers.ModelSerializer):
                 cron_expr = f'{ct.minute} {ct.hour} {ct.day_of_month} {ct.month_of_year} {ct.day_of_week}'
         instance._cron_expression = cron_expr
         for attr, value in validated_data.items():
+            if attr == 'password' and not value:
+                continue
             setattr(instance, attr, value)
         instance.save()
         return instance
@@ -142,6 +146,20 @@ class ProgramDetailSerializer(ProgramDataSerializer):
         previously_shown = cp.get('previously_shown_details') or {}
         data['original_air_date'] = previously_shown.get('start')
 
+        # Content advisory (SD)
+        data['content_advisory'] = cp.get('content_advisory') or []
+
+        # Full content ratings array (SD — all regional ratings)
+        data['content_ratings'] = cp.get('content_ratings') or []
+
+        # Sports event details (SD)
+        data['event_details'] = cp.get('event_details')
+
+        # Runtime (duration without commercials)
+        length = cp.get('length') or {}
+        data['runtime'] = length.get('value') if length else None
+        data['runtime_units'] = length.get('units') if length else None
+
         # External IDs
         data['imdb_id'] = cp.get('imdb.com_id')
         data['tmdb_id'] = cp.get('themoviedb.org_id')
@@ -150,6 +168,17 @@ class ProgramDetailSerializer(ProgramDataSerializer):
         # Images
         data['icon'] = cp.get('icon')
         data['images'] = cp.get('images') or []
+
+        # SD poster: expose as absolute proxy URL so frontend/img tags never need SD auth
+        if cp.get('sd_icon'):
+            poster_path = f"/api/epg/programs/{obj.id}/poster/"
+            request = self.context.get('request')
+            if request:
+                data['poster_url'] = build_absolute_uri_with_port(request, poster_path)
+            else:
+                data['poster_url'] = poster_path
+        else:
+            data['poster_url'] = None
 
         return data
 
@@ -170,3 +199,72 @@ class EPGDataSerializer(serializers.ModelSerializer):
             'icon_url',
             'epg_source',
         ]
+
+
+class ProgramSearchChannelSerializer(serializers.ModelSerializer):
+    """Lightweight channel info for search results."""
+    channel_group = serializers.CharField(source='channel_group.name', default=None)
+
+    class Meta:
+        model = Channel
+        fields = ['id', 'name', 'channel_number', 'channel_group', 'tvg_id']
+
+
+class ProgramSearchStreamSerializer(serializers.ModelSerializer):
+    """Lightweight stream info for search results."""
+    channel_group = serializers.CharField(source='channel_group.name', default=None)
+    m3u_account = serializers.CharField(source='m3u_account.name', default=None)
+
+    class Meta:
+        model = Stream
+        fields = ['id', 'name', 'channel_group', 'tvg_id', 'm3u_account']
+
+
+class ProgramSearchResultSerializer(serializers.ModelSerializer):
+    """Full program data with associated channels and streams for search results."""
+    epg_source = serializers.CharField(source='epg.epg_source.name', default=None)
+    epg_name = serializers.CharField(source='epg.name', default=None)
+    epg_icon_url = serializers.URLField(source='epg.icon_url', default=None)
+    channels = serializers.SerializerMethodField()
+    streams = serializers.SerializerMethodField()
+
+    class Meta:
+        model = ProgramData
+        fields = [
+            'id', 'title', 'sub_title', 'description',
+            'start_time', 'end_time', 'tvg_id', 'custom_properties',
+            'epg_source', 'epg_name', 'epg_icon_url',
+            'channels', 'streams',
+        ]
+
+    def _accessible_channels(self, obj):
+        """Return prefetched channels filtered to those the requesting user can access."""
+        channels = list(obj.epg.channels.all()) if obj.epg else []
+        user = self.context.get('user')
+        if user is None or user.user_level >= 10:
+            return channels
+        custom_props = user.custom_properties or {}
+        hide_adult = custom_props.get('hide_adult_content', False)
+        return [
+            ch for ch in channels
+            if ch.user_level <= user.user_level and (not hide_adult or not ch.is_adult)
+        ]
+
+    def get_channels(self, obj):
+        fields = self.context.get('fields')
+        if fields is not None and 'channels' not in fields:
+            return []
+        return ProgramSearchChannelSerializer(self._accessible_channels(obj), many=True).data
+
+    def get_streams(self, obj):
+        fields = self.context.get('fields')
+        if fields is not None and 'streams' not in fields:
+            return []
+        stream_ids = set()
+        streams = []
+        for ch in self._accessible_channels(obj):
+            for s in ch.streams.all():
+                if s.id not in stream_ids:
+                    stream_ids.add(s.id)
+                    streams.append(s)
+        return ProgramSearchStreamSerializer(streams, many=True).data
