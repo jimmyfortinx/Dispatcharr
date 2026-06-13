@@ -64,6 +64,7 @@ def reverse_move(apps, schema_editor):
 
 class Migration(migrations.Migration):
     dependencies = [
+        ("core", "0024_merge_core_0023_leaves"),
         ("core", "0024_outputprofile"),
     ]
 

@@ -301,10 +301,12 @@ USE_TZ = True
 STATIC_URL = "/static/"
 STATIC_ROOT = BASE_DIR / "static"  # Directory where static files will be collected
 
-# Adjust STATICFILES_DIRS to include the paths to the directories that contain your static files.
-STATICFILES_DIRS = [
-    os.path.join(BASE_DIR, "frontend/dist"),  # React build static files
-]
+# Only include the built frontend bundle when it exists. This avoids
+# noisy startup warnings in backend-only and test environments.
+_frontend_dist_dir = BASE_DIR / "frontend" / "dist"
+STATICFILES_DIRS = []
+if _frontend_dist_dir.exists():
+    STATICFILES_DIRS.append(str(_frontend_dist_dir))
 
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
