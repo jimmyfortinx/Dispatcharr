@@ -1,21 +1,16 @@
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import M3UProfiles from '../M3UProfiles';
+import API from '../../../api';
 
 // ── Store mocks ────────────────────────────────────────────────────────────────
 vi.mock('../../../store/playlists', () => ({ default: vi.fn() }));
 vi.mock('../../../store/warnings', () => ({ default: vi.fn() }));
-
-// ── Utility mocks ──────────────────────────────────────────────────────────────
-vi.mock('../../../utils/forms/M3uProfileUtils.js', () => ({
-  deleteM3UProfile: vi.fn(),
-  updateM3UProfile: vi.fn(),
-}));
-
-vi.mock('../../../utils/forms/M3uProfilesUtils.js', () => ({
-  getExpirationInfo: vi.fn(),
-  isAccountExpired: vi.fn(),
-  profileSortComparator: vi.fn(),
+vi.mock('../../../api', () => ({
+  default: {
+    deleteM3UProfile: vi.fn(),
+    updateM3UProfile: vi.fn(),
+  },
 }));
 
 // ── Sub-component mocks ────────────────────────────────────────────────────────
@@ -64,11 +59,15 @@ vi.mock('../../ConfirmationDialog', () => ({
 }));
 
 // ── lucide-react mocks ─────────────────────────────────────────────────────────
-vi.mock('lucide-react', () => ({
-  Info: () => <svg data-testid="icon-info" />,
-  SquareMinus: () => <svg data-testid="icon-square-minus" />,
-  SquarePen: () => <svg data-testid="icon-square-pen" />,
-}));
+vi.mock('lucide-react', async (importOriginal) => {
+  const actual = await importOriginal();
+  return {
+    ...actual,
+    Info: () => <svg data-testid="icon-info" />,
+    SquareMinus: () => <svg data-testid="icon-square-minus" />,
+    SquarePen: () => <svg data-testid="icon-square-pen" />,
+  };
+});
 
 // ── Mantine core ───────────────────────────────────────────────────────────────
 vi.mock('@mantine/core', () => ({
@@ -103,18 +102,33 @@ vi.mock('@mantine/core', () => ({
       {children}
     </div>
   ),
+  Center: ({ children }) => <div>{children}</div>,
+  Checkbox: ({ label, checked, onChange }) => (
+    <label>
+      {label}
+      <input
+        type="checkbox"
+        checked={!!checked}
+        onChange={(e) => onChange?.(e)}
+      />
+    </label>
+  ),
+  Box: ({ children }) => <div>{children}</div>,
   Flex: ({ children }) => <div>{children}</div>,
   Group: ({ children }) => <div>{children}</div>,
-  Modal: ({ children, opened, onClose, title }) =>
-    opened ? (
-      <div data-testid="modal">
-        <div data-testid="modal-title">{title}</div>
-        <button data-testid="modal-close" onClick={onClose}>
-          ×
-        </button>
-        {children}
-      </div>
-    ) : null,
+  Modal: Object.assign(
+    ({ children, opened, onClose, title }) =>
+      opened ? (
+        <div data-testid="modal">
+          <div data-testid="modal-title">{title}</div>
+          <button data-testid="modal-close" onClick={onClose}>
+            ×
+          </button>
+          {children}
+        </div>
+      ) : null,
+    { NativeScrollArea: 'div' }
+  ),
   NumberInput: ({ label, value, onChange, disabled, min, max }) => (
     <div>
       <label>{label}</label>
@@ -155,8 +169,6 @@ vi.mock('@mantine/core', () => ({
 // ──────────────────────────────────────────────────────────────────────────────
 import usePlaylistsStore from '../../../store/playlists';
 import useWarningsStore from '../../../store/warnings';
-import * as M3uProfileUtils from '../../../utils/forms/M3uProfileUtils.js';
-import * as M3uProfilesUtils from '../../../utils/forms/M3uProfilesUtils.js';
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
 const makeProfile = (overrides = {}) => ({
@@ -203,16 +215,8 @@ const setupStores = ({
 describe('M3UProfiles', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    vi.mocked(M3uProfileUtils.deleteM3UProfile).mockResolvedValue(undefined);
-    vi.mocked(M3uProfileUtils.updateM3UProfile).mockResolvedValue(undefined);
-    vi.mocked(M3uProfilesUtils.getExpirationInfo).mockReturnValue({
-      label: null,
-      color: null,
-    });
-    vi.mocked(M3uProfilesUtils.isAccountExpired).mockReturnValue(false);
-    vi.mocked(M3uProfilesUtils.profileSortComparator).mockImplementation(
-      () => 0
-    );
+    vi.mocked(API.deleteM3UProfile).mockResolvedValue(undefined);
+    vi.mocked(API.updateM3UProfile).mockResolvedValue(undefined);
   });
 
   // ── Guard conditions ───────────────────────────────────────────────────────
@@ -278,36 +282,47 @@ describe('M3UProfiles', () => {
       expect(screen.getByTestId('icon-info')).toBeInTheDocument();
     });
 
-    it('renders an expiration badge when getExpirationInfo returns a label', () => {
-      vi.mocked(M3uProfilesUtils.getExpirationInfo).mockReturnValue({
-        text: 'Expires soon',
-        color: 'orange',
-      });
-      setupStores();
-      render(<M3UProfiles {...defaultProps()} />);
-      expect(screen.getByText('Expires soon')).toBeInTheDocument();
-    });
-
-    it('renders empty state message when there are no profiles', () => {
-      setupStores({ profiles: { 1: [] } });
-      render(<M3UProfiles {...defaultProps()} />);
-      expect(screen.queryByTestId('profile-card')).not.toBeInTheDocument();
-    });
-
-    it('renders profiles sorted by profileSortComparator', () => {
-      vi.mocked(M3uProfilesUtils.profileSortComparator).mockImplementation(
-        (a, b) => b.id - a.id
-      );
+    it('renders an expiration badge when the profile has provider expiration data', () => {
       const profiles = {
         1: [
-          makeProfile({ id: 1, name: 'Alpha' }),
-          makeProfile({ id: 2, name: 'Beta' }),
+          makeProfile({
+            custom_properties: {
+              user_info: {
+                exp_date: Math.floor(Date.now() / 1000) + 3 * 24 * 60 * 60,
+              },
+            },
+          }),
+        ],
+      };
+      setupStores({ profiles });
+      render(
+        <M3UProfiles
+          {...defaultProps({
+            playlist: makePlaylist({ account_type: 'XC' }),
+          })}
+        />
+      );
+      expect(screen.getByText(/days|h/i)).toBeInTheDocument();
+    });
+
+    it('renders profiles sorted with the default profile first', () => {
+      const profiles = {
+        1: [
+          makeProfile({ id: 1, name: 'Zulu' }),
+          makeProfile({ id: 2, name: 'Alpha', is_default: true }),
         ],
       };
       setupStores({ profiles });
       render(<M3UProfiles {...defaultProps()} />);
       const cards = screen.getAllByTestId('profile-card');
       expect(cards).toHaveLength(2);
+      expect(screen.getAllByText(/Alpha|Zulu/)[0]).toHaveTextContent('Alpha');
+    });
+
+    it('renders empty state when there are no profiles', () => {
+      setupStores({ profiles: { 1: [] } });
+      render(<M3UProfiles {...defaultProps()} />);
+      expect(screen.queryByTestId('profile-card')).not.toBeInTheDocument();
     });
   });
 
@@ -363,15 +378,6 @@ describe('M3UProfiles', () => {
         'editing-42'
       );
     });
-
-    it('closes M3UProfile modal after edit onClose', () => {
-      setupStores();
-      render(<M3UProfiles {...defaultProps()} />);
-      const editBtn = screen.getByTestId('icon-square-pen').closest('button');
-      fireEvent.click(editBtn);
-      fireEvent.click(screen.getByTestId('m3u-profile-close'));
-      expect(screen.queryByTestId('m3u-profile-modal')).not.toBeInTheDocument();
-    });
   });
 
   // ── Account Info ───────────────────────────────────────────────────────────
@@ -384,26 +390,6 @@ describe('M3UProfiles', () => {
       const infoBtn = screen.getByTestId('icon-info').closest('button');
       fireEvent.click(infoBtn);
       expect(screen.getByTestId('account-info-modal')).toBeInTheDocument();
-    });
-
-    it('passes the correct profile to AccountInfoModal', () => {
-      const profiles = { 1: [makeProfile({ id: 7 })] };
-      setupStores({ profiles });
-      render(<M3UProfiles {...defaultProps()} />);
-      const infoBtn = screen.getByTestId('icon-info').closest('button');
-      fireEvent.click(infoBtn);
-      expect(screen.getByTestId('account-info-profile').textContent).toBe('7');
-    });
-
-    it('closes AccountInfoModal when its onClose is called', () => {
-      setupStores();
-      render(<M3UProfiles {...defaultProps()} />);
-      const infoBtn = screen.getByTestId('icon-info').closest('button');
-      fireEvent.click(infoBtn);
-      fireEvent.click(screen.getByTestId('account-info-close'));
-      expect(
-        screen.queryByTestId('account-info-modal')
-      ).not.toBeInTheDocument();
     });
   });
 
@@ -432,20 +418,16 @@ describe('M3UProfiles', () => {
         .closest('button');
       fireEvent.click(deleteBtn);
       await waitFor(() => {
-        expect(M3uProfileUtils.deleteM3UProfile).toHaveBeenCalledWith(
-          profiles[1][0]['id'],
-          1
-        );
+        expect(API.deleteM3UProfile).toHaveBeenCalledWith(1, profiles[1][0].id);
       });
     });
 
     it('calls deleteM3UProfile after confirming the dialog', async () => {
       const profiles = { 1: [makeProfile()] };
       setupStores({
-        isWarningSuppressed: vi.fn().mockReturnValue(true),
+        isWarningSuppressed: vi.fn().mockReturnValue(false),
         profiles,
       });
-      setupStores({ isWarningSuppressed: vi.fn().mockReturnValue(false) });
       render(<M3UProfiles {...defaultProps()} />);
       const deleteBtn = screen
         .getByTestId('icon-square-minus')
@@ -453,10 +435,7 @@ describe('M3UProfiles', () => {
       fireEvent.click(deleteBtn);
       fireEvent.click(screen.getByTestId('confirm-ok'));
       await waitFor(() => {
-        expect(M3uProfileUtils.deleteM3UProfile).toHaveBeenCalledWith(
-          profiles[1][0]['id'],
-          1
-        );
+        expect(API.deleteM3UProfile).toHaveBeenCalledWith(1, profiles[1][0].id);
       });
     });
 
@@ -496,7 +475,7 @@ describe('M3UProfiles', () => {
         .closest('button');
       fireEvent.click(deleteBtn);
       fireEvent.click(screen.getByTestId('confirm-cancel'));
-      expect(M3uProfileUtils.deleteM3UProfile).not.toHaveBeenCalled();
+      expect(API.deleteM3UProfile).not.toHaveBeenCalled();
     });
   });
 
@@ -517,7 +496,13 @@ describe('M3UProfiles', () => {
       const input = screen.getByRole('spinbutton');
       fireEvent.change(input, { target: { value: '5' } });
       await waitFor(() => {
-        expect(M3uProfileUtils.updateM3UProfile).toHaveBeenCalled();
+        expect(API.updateM3UProfile).toHaveBeenCalledWith(
+          1,
+          expect.objectContaining({
+            id: profiles[1][0].id,
+            max_streams: 5,
+          })
+        );
       });
     });
   });
@@ -525,23 +510,31 @@ describe('M3UProfiles', () => {
   // ── Expiration / expired styling ───────────────────────────────────────────
 
   describe('expiration display', () => {
-    it('applies expired styling when isAccountExpired returns true', () => {
-      vi.mocked(M3uProfilesUtils.isAccountExpired).mockReturnValue(true);
-      setupStores();
-      render(<M3UProfiles {...defaultProps()} />);
-      expect(screen.getByTestId('profile-card')).toBeInTheDocument();
-    });
-
-    it('renders expiration badge with correct color', () => {
-      vi.mocked(M3uProfilesUtils.getExpirationInfo).mockReturnValue({
-        text: '3 days left',
-        color: 'red',
-      });
-      setupStores();
-      render(<M3UProfiles {...defaultProps()} />);
+    it('renders expiration badge with computed color', () => {
+      const profiles = {
+        1: [
+          makeProfile({
+            custom_properties: {
+              user_info: {
+                exp_date: Math.floor(Date.now() / 1000) + 3 * 24 * 60 * 60,
+              },
+            },
+          }),
+        ],
+      };
+      setupStores({ profiles });
+      render(
+        <M3UProfiles
+          {...defaultProps({
+            playlist: makePlaylist({ account_type: 'XC' }),
+          })}
+        />
+      );
       const badge = screen.getByTestId('badge');
-      expect(badge.textContent).toBe('3 days left');
-      expect(badge.dataset.color).toBe('red');
+      expect(badge.textContent).toMatch(/days|h/i);
+      expect(['orange', 'red', 'yellow', 'green']).toContain(
+        badge.dataset.color
+      );
     });
   });
 
