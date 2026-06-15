@@ -85,9 +85,13 @@ def _resolve_output_profile(request, user):
     return None
 
 
-@api_view(["GET"])
-@permission_classes([AllowAny])
-def stream_ts(request, channel_id, user=None, force_output_format=None):
+def _stream_ts_impl(
+    request,
+    channel_id,
+    user=None,
+    force_output_format=None,
+    force_redirect=False,
+):
     if not network_access_allowed(request, "STREAMS"):
         return JsonResponse({"error": "Forbidden"}, status=403)
 

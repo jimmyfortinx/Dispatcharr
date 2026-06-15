@@ -290,10 +290,7 @@ class StalkerClient:
 
     def _discover_candidate(self, portal_url):
         self.handshake(portal_url)
-        used_authentication = False
-        if self.username or self.password:
-            self.authenticate(portal_url)
-            used_authentication = True
+        used_authentication = self._authenticate_portal(portal_url)
         profile = self.get_profile(portal_url)
         genres = self.get_genres(portal_url)
 
@@ -317,10 +314,7 @@ class StalkerClient:
 
     def _discover_channels_candidate(self, portal_url):
         self.handshake(portal_url)
-        used_authentication = False
-        if self.username or self.password:
-            self.authenticate(portal_url)
-            used_authentication = True
+        used_authentication = self._authenticate_portal(portal_url)
 
         profile = self.get_profile(portal_url)
         genres = self.get_genres(portal_url)
@@ -362,12 +356,7 @@ class StalkerClient:
 
     def _discover_account_info_candidate(self, portal_url):
         self.handshake(portal_url)
-        used_authentication = False
-        if self.username or self.password:
-            self.authenticate(portal_url)
-            used_authentication = True
-        elif self._should_use_device_id_auth():
-            self.authenticate_with_device_ids(portal_url)
+        used_authentication = self._authenticate_portal(portal_url)
 
         profile = self.get_profile(portal_url)
         try:
@@ -398,12 +387,7 @@ class StalkerClient:
 
     def _discover_vod_candidate(self, portal_url):
         self.handshake(portal_url)
-        used_authentication = False
-        if self.username or self.password:
-            self.authenticate(portal_url)
-            used_authentication = True
-        elif self._should_use_device_id_auth():
-            self.authenticate_with_device_ids(portal_url)
+        used_authentication = self._authenticate_portal(portal_url)
         profile = self.get_profile(portal_url)
 
         profile_name = (
@@ -474,12 +458,7 @@ class StalkerClient:
 
     def _discover_vod_categories_candidate(self, portal_url):
         self.handshake(portal_url)
-        used_authentication = False
-        if self.username or self.password:
-            self.authenticate(portal_url)
-            used_authentication = True
-        elif self._should_use_device_id_auth():
-            self.authenticate_with_device_ids(portal_url)
+        used_authentication = self._authenticate_portal(portal_url)
         profile = self.get_profile(portal_url)
 
         profile_name = (
@@ -612,6 +591,25 @@ class StalkerClient:
             raise StalkerError(str(text))
 
         return js
+
+    def _authenticate_portal(self, portal_url):
+        if self.username or self.password:
+            try:
+                self.authenticate(portal_url)
+                return True
+            except StalkerError:
+                if not self._should_use_device_id_auth():
+                    raise
+                logger.info(
+                    "Stalker username/password auth failed for %s; retrying with configured device identity.",
+                    portal_url,
+                )
+
+        if self._should_use_device_id_auth():
+            self.authenticate_with_device_ids(portal_url)
+            return True
+
+        return False
 
     def get_profile(self, portal_url):
         query = {
@@ -855,10 +853,7 @@ class StalkerClient:
 
     def prepare_authenticated_session(self, portal_url):
         self.handshake(portal_url)
-        if self.username or self.password:
-            self.authenticate(portal_url)
-        elif self._should_use_device_id_auth():
-            self.authenticate_with_device_ids(portal_url)
+        self._authenticate_portal(portal_url)
 
     def prepare_playback_session(self, portal_url):
         self.prepare_authenticated_session(portal_url)

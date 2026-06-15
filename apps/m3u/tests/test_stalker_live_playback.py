@@ -210,6 +210,78 @@ class StalkerPhase5PreviewTests(TestCase):
             "stale",
         )
 
+    def test_resolve_playback_url_falls_back_to_device_id_auth_after_credential_failure(self):
+        client = StalkerClient(
+            server_url="http://portal.example.com/stalker_portal/portal.php",
+            mac="00:1A:79:00:00:40",
+            username="demo",
+            password="secret",
+            custom_properties={
+                "device_id": "device-1",
+                "device_id2": "device-2",
+            },
+        )
+
+        with patch.object(client, "handshake"), patch.object(
+            client,
+            "authenticate",
+            side_effect=StalkerError("Portal rejected the provided credentials."),
+        ) as mock_authenticate, patch.object(
+            client,
+            "authenticate_with_device_ids",
+            return_value={"id": "1"},
+        ) as mock_device_auth, patch.object(
+            client, "watchdog_update", return_value={}
+        ), patch.object(
+            client,
+            "create_link",
+            return_value="http://resolved.example.com/live.ts",
+        ) as mock_create_link:
+            resolved = client.resolve_playback_url(
+                "http://portal.example.com/stalker_portal/portal.php",
+                {"stalker_channel_id": "5001", "cmd": "stale"},
+            )
+
+        self.assertEqual(resolved, "http://resolved.example.com/live.ts")
+        mock_authenticate.assert_called_once_with(
+            "http://portal.example.com/stalker_portal/portal.php"
+        )
+        mock_device_auth.assert_called_once_with(
+            "http://portal.example.com/stalker_portal/portal.php"
+        )
+        mock_create_link.assert_called_once_with(
+            "http://portal.example.com/stalker_portal/portal.php",
+            "stale",
+        )
+
+    def test_prepare_authenticated_session_does_not_fallback_without_device_ids(self):
+        client = StalkerClient(
+            server_url="http://portal.example.com/stalker_portal/portal.php",
+            mac="00:1A:79:00:00:40",
+            username="demo",
+            password="secret",
+        )
+
+        with patch.object(client, "handshake"), patch.object(
+            client,
+            "authenticate",
+            side_effect=StalkerError("Portal rejected the provided credentials."),
+        ) as mock_authenticate, patch.object(
+            client, "authenticate_with_device_ids"
+        ) as mock_device_auth:
+            with self.assertRaisesMessage(
+                StalkerError,
+                "Portal rejected the provided credentials.",
+            ):
+                client.prepare_authenticated_session(
+                    "http://portal.example.com/stalker_portal/portal.php"
+                )
+
+        mock_authenticate.assert_called_once_with(
+            "http://portal.example.com/stalker_portal/portal.php"
+        )
+        mock_device_auth.assert_not_called()
+
     def test_resolve_playback_url_refreshes_channel_cmd_after_cached_link_failure(self):
         client = StalkerClient(
             server_url="http://portal.example.com/stalker_portal/portal.php",
