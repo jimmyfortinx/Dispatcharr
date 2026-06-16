@@ -8,6 +8,7 @@ import random
 import logging
 import requests
 from urllib.parse import urlencode
+from django.db import close_old_connections
 from django.http import StreamingHttpResponse, JsonResponse, Http404, HttpResponse
 from django.shortcuts import get_object_or_404
 from django.views.decorators.csrf import csrf_exempt
@@ -16,7 +17,6 @@ from apps.vod.resolvers import resolve_vod_stream_context
 from apps.m3u.models import M3UAccount, M3UAccountProfile
 from apps.proxy.vod_proxy.multi_worker_connection_manager import MultiWorkerVODConnectionManager, infer_content_type_from_url, get_vod_client_stop_key
 from .utils import get_client_info, create_vod_response
-from rest_framework.decorators import api_view, permission_classes
 from rest_framework.decorators import api_view, authentication_classes, permission_classes
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
@@ -26,6 +26,7 @@ from rest_framework_simplejwt.authentication import JWTAuthentication
 from apps.accounts.authentication import ApiKeyAuthentication, QueryParamJWTAuthentication
 from apps.proxy.utils import check_user_stream_limits
 from dispatcharr.utils import network_access_allowed
+from core.utils import dispatcharr_user_agent
 
 logger = logging.getLogger(__name__)
 

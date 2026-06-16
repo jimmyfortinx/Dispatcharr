@@ -2,6 +2,7 @@
 import { useState, useEffect } from 'react';
 import API from '../../api';
 import useUserAgentsStore from '../../store/userAgents';
+import useServerGroupsStore from '../../store/serverGroups';
 import M3UProfiles from './M3UProfiles';
 import {
   LoadingOverlay,
@@ -32,6 +33,7 @@ import useVODStore from '../../store/useVODStore';
 import M3UFilters from './M3UFilters';
 import ScheduleInput from './ScheduleInput';
 import { DateTimePicker } from '@mantine/dates';
+import ServerGroupsManagerModal from '../ServerGroupsManagerModal';
 
 const M3U = ({
   m3uAccount = null,
@@ -40,6 +42,7 @@ const M3U = ({
   playlistCreated = false,
 }) => {
   const userAgents = useUserAgentsStore((s) => s.userAgents);
+  const serverGroups = useServerGroupsStore((s) => s.serverGroups);
   const fetchChannelGroups = useChannelsStore((s) => s.fetchChannelGroups);
   const fetchEPGs = useEPGsStore((s) => s.fetchEPGs);
   const fetchCategories = useVODStore((s) => s.fetchCategories);
@@ -54,6 +57,9 @@ const M3U = ({
   const [showCredentialFields, setShowCredentialFields] = useState(false);
   const [scheduleType, setScheduleType] = useState('interval');
   const [showAdvancedDeviceFields, setShowAdvancedDeviceFields] = useState(false);
+  const [serverGroupsManagerOpen, setServerGroupsManagerOpen] = useState(false);
+  const [serverGroupsCreateOnOpen, setServerGroupsCreateOnOpen] =
+    useState(false);
 
   const form = useForm({
     mode: 'uncontrolled',
@@ -61,6 +67,7 @@ const M3U = ({
       name: '',
       server_url: '',
       user_agent: '0',
+      server_group: '0',
       is_active: true,
       max_streams: 0,
       refresh_interval: 24,
@@ -95,6 +102,9 @@ const M3U = ({
         server_url: m3uAccount.server_url,
         max_streams: m3uAccount.max_streams,
         user_agent: m3uAccount.user_agent ? `${m3uAccount.user_agent}` : '0',
+        server_group: m3uAccount.server_group
+          ? `${m3uAccount.server_group}`
+          : '0',
         is_active: m3uAccount.is_active,
         refresh_interval: m3uAccount.refresh_interval,
         cron_expression: m3uAccount.cron_expression || '',
@@ -216,6 +226,10 @@ const M3U = ({
 
     if (values.user_agent == '0') {
       values.user_agent = null;
+    }
+
+    if (values.server_group == '0') {
+      values.server_group = null;
     }
 
     let newPlaylist;
@@ -606,6 +620,43 @@ const M3U = ({
               />
 
               <Select
+                id="server_group"
+                name="server_group"
+                label="Server Group"
+                description="Share login limits across accounts in a server group. Set max streams on each profile (unlimited profiles skip group enforcement)."
+                key={form.key('server_group')}
+                value={form.getValues().server_group}
+                onChange={(value) => {
+                  if (value === '__new__') {
+                    setServerGroupsCreateOnOpen(true);
+                    setServerGroupsManagerOpen(true);
+                    return;
+                  }
+                  form.setFieldValue('server_group', value);
+                }}
+                data={[
+                  { value: '0', label: '(None)' },
+                  ...serverGroups.map((group) => ({
+                    label: group.name,
+                    value: `${group.id}`,
+                  })),
+                  { value: '__new__', label: '+ Add server group...' },
+                ]}
+              />
+
+              <Button
+                variant="subtle"
+                size="compact-xs"
+                onClick={() => {
+                  setServerGroupsCreateOnOpen(false);
+                  setServerGroupsManagerOpen(true);
+                }}
+                style={{ alignSelf: 'flex-start' }}
+              >
+                Manage server groups
+              </Button>
+
+              <Select
                 id="user_agent"
                 name="user_agent"
                 label="User-Agent"
@@ -736,6 +787,19 @@ const M3U = ({
           />
         </>
       )}
+      <ServerGroupsManagerModal
+        isOpen={serverGroupsManagerOpen}
+        onClose={() => {
+          setServerGroupsManagerOpen(false);
+          setServerGroupsCreateOnOpen(false);
+        }}
+        openCreateOnMount={serverGroupsCreateOnOpen}
+        onGroupCreated={(group) => {
+          if (group?.id) {
+            form.setFieldValue('server_group', `${group.id}`);
+          }
+        }}
+      />
     </>
   );
 };
