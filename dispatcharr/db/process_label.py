@@ -12,7 +12,18 @@ def _is_uwsgi_worker() -> bool:
         import uwsgi
     except ImportError:
         return False
-    return uwsgi.worker_id() > 0
+
+    worker_id = getattr(uwsgi, "worker_id", None)
+    if worker_id is None:
+        return False
+
+    try:
+        return worker_id() > 0
+    except TypeError:
+        unbound = getattr(worker_id, "__func__", None)
+        if unbound is None:
+            raise
+        return unbound() > 0
 
 
 def get_process_role(argv: list[str] | None = None) -> str:
