@@ -590,14 +590,26 @@ def _stream_ts_impl(
 
 @api_view(["GET"])
 @permission_classes([AllowAny])
-def stream_ts(request, channel_id, user=None):
-    return _stream_ts_impl(request, channel_id, user=user, force_redirect=False)
+def stream_ts(request, channel_id, user=None, force_output_format=None):
+    return _stream_ts_impl(
+        request,
+        channel_id,
+        user=user,
+        force_output_format=force_output_format,
+        force_redirect=False,
+    )
 
 
 @api_view(["GET"])
 @permission_classes([AllowAny])
-def stream_ts_redirect(request, channel_id, user=None):
-    return _stream_ts_impl(request, channel_id, user=user, force_redirect=True)
+def stream_ts_redirect(request, channel_id, user=None, force_output_format=None):
+    return _stream_ts_impl(
+        request,
+        channel_id,
+        user=user,
+        force_output_format=force_output_format,
+        force_redirect=True,
+    )
 
 
 @api_view(["GET"])
