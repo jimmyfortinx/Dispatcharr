@@ -29,6 +29,8 @@ DEFAULT_DEVICE_ID = "fffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
 DEFAULT_DEVICE_ID2 = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
 DEFAULT_SIGNATURE = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
 DEFAULT_TIMEZONE = "UTC"
+AUTH_MODE_CREDENTIALS = "credentials"
+AUTH_MODE_DEVICE = "device"
 DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 "
     "(KHTML, like Gecko) MAG200 stbapp ver: 4 rev: 2116 Mobile Safari/533.3"
@@ -136,6 +138,7 @@ class StalkerClient:
             DEFAULT_SIGNATURE,
         )
         self.timezone = self.custom_properties.get("timezone") or DEFAULT_TIMEZONE
+        self.last_auth_mode = None
 
         self.session = requests.Session()
         adapter = requests.adapters.HTTPAdapter(
@@ -593,23 +596,48 @@ class StalkerClient:
         return js
 
     def _authenticate_portal(self, portal_url):
-        if self.username or self.password:
+        attempted_modes = []
+        preferred_mode = self._preferred_auth_mode()
+        if preferred_mode:
+            attempted_modes.append(preferred_mode)
+        if (self.username or self.password) and AUTH_MODE_CREDENTIALS not in attempted_modes:
+            attempted_modes.append(AUTH_MODE_CREDENTIALS)
+        if self._should_use_device_id_auth() and AUTH_MODE_DEVICE not in attempted_modes:
+            attempted_modes.append(AUTH_MODE_DEVICE)
+
+        last_error = None
+        for index, mode in enumerate(attempted_modes):
             try:
-                self.authenticate(portal_url)
+                if mode == AUTH_MODE_CREDENTIALS:
+                    self.authenticate(portal_url)
+                elif mode == AUTH_MODE_DEVICE:
+                    self.authenticate_with_device_ids(portal_url)
+                else:
+                    continue
+                self.last_auth_mode = mode
                 return True
-            except StalkerError:
-                if not self._should_use_device_id_auth():
-                    raise
-                logger.info(
-                    "Stalker username/password auth failed for %s; retrying with configured device identity.",
-                    portal_url,
-                )
+            except StalkerError as exc:
+                last_error = exc
+                if index + 1 < len(attempted_modes):
+                    next_mode = attempted_modes[index + 1]
+                    logger.info(
+                        "Stalker %s auth failed for %s; retrying with %s auth.",
+                        mode,
+                        portal_url,
+                        next_mode,
+                    )
 
-        if self._should_use_device_id_auth():
-            self.authenticate_with_device_ids(portal_url)
-            return True
-
+        if last_error is not None:
+            raise last_error
         return False
+
+    def _preferred_auth_mode(self):
+        mode = str(self.custom_properties.get("stalker_auth_mode") or "").strip().lower()
+        if mode == AUTH_MODE_CREDENTIALS and (self.username or self.password):
+            return AUTH_MODE_CREDENTIALS
+        if mode == AUTH_MODE_DEVICE and self._should_use_device_id_auth():
+            return AUTH_MODE_DEVICE
+        return None
 
     def get_profile(self, portal_url):
         query = {

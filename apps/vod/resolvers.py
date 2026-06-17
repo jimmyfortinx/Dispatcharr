@@ -147,6 +147,13 @@ def _persist_stalker_runtime_state(
         updated_properties["token"] = client.token
         changed = True
 
+    if (
+        client.last_auth_mode
+        and updated_properties.get("stalker_auth_mode") != client.last_auth_mode
+    ):
+        updated_properties["stalker_auth_mode"] = client.last_auth_mode
+        changed = True
+
     if changed:
         m3u_account.custom_properties = updated_properties
         m3u_account.save(update_fields=["custom_properties"])

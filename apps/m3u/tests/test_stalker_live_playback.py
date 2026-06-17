@@ -253,6 +253,49 @@ class StalkerPhase5PreviewTests(TestCase):
             "http://portal.example.com/stalker_portal/portal.php",
             "stale",
         )
+        self.assertEqual(client.last_auth_mode, "device")
+
+    def test_resolve_playback_url_prefers_persisted_device_auth_mode(self):
+        client = StalkerClient(
+            server_url="http://portal.example.com/stalker_portal/portal.php",
+            mac="00:1A:79:00:00:40",
+            username="demo",
+            password="secret",
+            custom_properties={
+                "device_id": "device-1",
+                "device_id2": "device-2",
+                "stalker_auth_mode": "device",
+            },
+        )
+
+        with patch.object(client, "handshake"), patch.object(
+            client,
+            "authenticate",
+        ) as mock_authenticate, patch.object(
+            client,
+            "authenticate_with_device_ids",
+            return_value={"id": "1"},
+        ) as mock_device_auth, patch.object(
+            client, "watchdog_update", return_value={}
+        ), patch.object(
+            client,
+            "create_link",
+            return_value="http://resolved.example.com/live.ts",
+        ) as mock_create_link:
+            resolved = client.resolve_playback_url(
+                "http://portal.example.com/stalker_portal/portal.php",
+                {"stalker_channel_id": "5001", "cmd": "stale"},
+            )
+
+        self.assertEqual(resolved, "http://resolved.example.com/live.ts")
+        mock_authenticate.assert_not_called()
+        mock_device_auth.assert_called_once_with(
+            "http://portal.example.com/stalker_portal/portal.php"
+        )
+        mock_create_link.assert_called_once_with(
+            "http://portal.example.com/stalker_portal/portal.php",
+            "stale",
+        )
 
     def test_prepare_authenticated_session_does_not_fallback_without_device_ids(self):
         client = StalkerClient(

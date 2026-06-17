@@ -1826,6 +1826,8 @@ def refresh_m3u_groups(account_id, use_cache=False, full_refresh=False, scan_sta
         updated_props = dict(custom_props)
         updated_props["token"] = discovery.token
         updated_props["stalker_portal_url"] = discovery.normalized_portal_url
+        if client.last_auth_mode:
+            updated_props["stalker_auth_mode"] = client.last_auth_mode
         account.custom_properties = updated_props
         account.save(update_fields=["custom_properties"])
 
@@ -3221,6 +3223,8 @@ def refresh_stalker_account_profiles(account, client=None, profiles=None):
     updated_props = dict(account.custom_properties or {})
     updated_props["token"] = result.token
     updated_props["stalker_portal_url"] = result.normalized_portal_url
+    if client.last_auth_mode:
+        updated_props["stalker_auth_mode"] = client.last_auth_mode
     account.custom_properties = updated_props
     account.save(update_fields=["custom_properties"])
 

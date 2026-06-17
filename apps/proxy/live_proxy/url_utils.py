@@ -60,8 +60,15 @@ def _resolve_live_stream_context(stream: Stream) -> dict:
     resolved_url = client.resolve_playback_url(portal_url, custom_properties)
     input_headers = client.build_media_headers(resolved_url)
 
+    if (
+        client.last_auth_mode
+        and account_properties.get("stalker_auth_mode") != client.last_auth_mode
+    ):
+        account_properties["stalker_auth_mode"] = client.last_auth_mode
+
     if client.token and account_properties.get("token") != client.token:
         account_properties["token"] = client.token
+    if m3u_account.custom_properties != account_properties:
         m3u_account.custom_properties = account_properties
         m3u_account.save(update_fields=["custom_properties"])
 
