@@ -281,11 +281,14 @@ class StreamGenerator:
                         f"index {self.local_index} (buffer head at {current_buffer_index})"
                     )
         else:
-            # 0 = start at live (buffer head)
-            self.local_index = current_buffer_index
+            # Even in "live" mode, start slightly behind the head so TS clients
+            # have a better chance of landing on a decodable GOP immediately.
+            initial_behind = ConfigHelper.initial_behind_chunks()
+            self.local_index = max(0, current_buffer_index - initial_behind)
             logger.info(
-                f"[{self.client_id}] Starting at live (behind_seconds=0): "
-                f"index {self.local_index} (buffer head at {current_buffer_index})"
+                f"[{self.client_id}] Starting near live (behind_seconds=0): "
+                f"index {self.local_index} (buffer head at {current_buffer_index}, "
+                f"initial_behind={initial_behind})"
             )
 
         # Store important objects as instance variables
