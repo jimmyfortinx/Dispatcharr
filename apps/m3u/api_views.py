@@ -43,6 +43,14 @@ import json
 from .stalker import StalkerClient, StalkerError
 
 
+def _coerce_request_bool(value):
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
+
+
 class M3UAccountViewSet(viewsets.ModelViewSet):
     """Handles CRUD operations for M3U accounts"""
 
@@ -210,7 +218,9 @@ class M3UAccountViewSet(viewsets.ModelViewSet):
         response = super().update(request, *args, **kwargs)
 
         # Check if VOD setting changed and trigger refresh if needed
-        new_vod_enabled = request.data.get("enable_vod", old_vod_enabled)
+        new_vod_enabled = _coerce_request_bool(
+            request.data.get("enable_vod", old_vod_enabled)
+        )
 
         if not old_vod_enabled and new_vod_enabled:
             ensure_default_vod_category_relations(instance)
@@ -222,6 +232,14 @@ class M3UAccountViewSet(viewsets.ModelViewSet):
                 from apps.vod.tasks import refresh_vod_content
 
                 refresh_vod_content.delay(instance.id)
+        elif old_vod_enabled and not new_vod_enabled:
+            if instance.account_type in (
+                M3UAccount.Types.XC,
+                M3UAccount.Types.STALKER,
+            ):
+                from apps.vod.tasks import remove_account_vod_relations
+
+                remove_account_vod_relations(instance.id)
 
         # After the instance is updated, return the response
         return response

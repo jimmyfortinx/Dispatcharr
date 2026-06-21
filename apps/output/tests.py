@@ -174,6 +174,7 @@ class OutputXtreamVodVisibilityTest(TestCase):
             name="vod-account",
             account_type=M3UAccount.Types.XC,
             is_active=True,
+            custom_properties={"enable_vod": True},
         )
 
         self.enabled_movie_category = VODCategory.objects.create(
@@ -322,6 +323,36 @@ class OutputXtreamVodVisibilityTest(TestCase):
                 vod_id=self.disabled_movie.id,
             )
 
+    def test_xtream_output_excludes_accounts_with_vod_disabled(self):
+        disabled_account = M3UAccount.objects.create(
+            name="vod-disabled-account",
+            account_type=M3UAccount.Types.STALKER,
+            is_active=True,
+            custom_properties={"enable_vod": False},
+        )
+        category = VODCategory.objects.create(name="Hidden Movies", category_type="movie")
+        movie = Movie.objects.create(name="Hidden Movie")
+        M3UVODCategoryRelation.objects.create(
+            m3u_account=disabled_account,
+            category=category,
+            enabled=True,
+        )
+        M3UMovieRelation.objects.create(
+            m3u_account=disabled_account,
+            movie=movie,
+            category=category,
+            stream_id="hidden-movie",
+            last_advanced_refresh=timezone.now(),
+        )
+
+        request = self.factory.get("/player_api.php")
+
+        categories = xc_get_vod_categories(user=None)
+        streams = xc_get_vod_streams(request, user=None)
+
+        self.assertNotIn("Hidden Movies", {row["category_name"] for row in categories})
+        self.assertNotIn("Hidden Movie", {row["name"] for row in streams})
+
 
 class OutputXtreamRelationSelectionTest(TestCase):
     def setUp(self):
@@ -331,6 +362,7 @@ class OutputXtreamRelationSelectionTest(TestCase):
             account_type=M3UAccount.Types.STALKER,
             is_active=True,
             priority=100,
+            custom_properties={"enable_vod": True},
         )
         self.user = User.objects.create_user(
             username="xtream-user",

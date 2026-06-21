@@ -8,7 +8,13 @@ from rest_framework.test import APIClient
 from apps.m3u.models import M3UAccount
 from apps.m3u.serializers import M3UAccountSerializer
 from apps.m3u.stalker import StalkerClient, StalkerVodDiscoveryResult
-from apps.vod.models import M3UVODCategoryRelation
+from apps.vod.models import (
+    M3UMovieRelation,
+    M3USeriesRelation,
+    M3UVODCategoryRelation,
+    Movie,
+    Series,
+)
 
 
 User = get_user_model()
@@ -127,6 +133,55 @@ class StalkerPhase10DiscoveryTests(TestCase):
             self.account.custom_properties["stalker_vod_protocol_samples"]["vod_link"],
             "http://media.example.com/movie.mp4",
         )
+
+
+class StalkerPhase10DisableVodCleanupTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username="admin-disable-vod",
+            password="testpass123",
+            user_level=10,
+        )
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.user)
+        self.account = M3UAccount.objects.create(
+            name="Stalker Disable VOD",
+            account_type=M3UAccount.Types.STALKER,
+            server_url="http://portal.example.com/c/",
+            custom_properties={
+                "mac": "00:1A:79:00:00:64",
+                "enable_vod": True,
+            },
+        )
+        self.movie = Movie.objects.create(name="Movie To Remove")
+        self.series = Series.objects.create(name="Series To Remove")
+        M3UMovieRelation.objects.create(
+            m3u_account=self.account,
+            movie=self.movie,
+            stream_id="movie-1",
+        )
+        M3USeriesRelation.objects.create(
+            m3u_account=self.account,
+            series=self.series,
+            external_series_id="series-1",
+        )
+
+    def test_disabling_vod_removes_existing_catalog_relations(self):
+        response = self.client.patch(
+            f"/api/m3u/accounts/{self.account.id}/",
+            {"enable_vod": False},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertFalse(
+            M3UMovieRelation.objects.filter(m3u_account=self.account).exists()
+        )
+        self.assertFalse(
+            M3USeriesRelation.objects.filter(m3u_account=self.account).exists()
+        )
+        self.assertFalse(Movie.objects.filter(id=self.movie.id).exists())
+        self.assertFalse(Series.objects.filter(id=self.series.id).exists())
 
 
 class StalkerPhase10ClientTests(TestCase):

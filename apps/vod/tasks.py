@@ -38,6 +38,28 @@ def lookup_by_name_year(model, name_year_pairs):
     return found
 
 
+def remove_account_vod_relations(account_id):
+    """Remove all VOD relations for one account, then prune newly orphaned rows."""
+    logger.info("Removing VOD relations for account %s", account_id)
+
+    deleted_movie_relations, _ = M3UMovieRelation.objects.filter(
+        m3u_account_id=account_id
+    ).delete()
+    deleted_series_relations, _ = M3USeriesRelation.objects.filter(
+        m3u_account_id=account_id
+    ).delete()
+
+    cleanup_result = cleanup_orphaned_vod_content(
+        account_id=account_id,
+        scan_start_time=timezone.now(),
+    )
+
+    return (
+        f"Removed {deleted_movie_relations} movie relations and "
+        f"{deleted_series_relations} series relations. {cleanup_result}"
+    )
+
+
 @shared_task
 def refresh_vod_content(account_id):
     """Refresh VOD content for an M3U account with batch processing for improved performance"""

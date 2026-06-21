@@ -42,6 +42,7 @@ from .tasks import (
 )
 from django.utils import timezone
 from datetime import timedelta
+from apps.m3u.models import M3UAccount
 
 logger = logging.getLogger(__name__)
 
@@ -117,6 +118,17 @@ def _extract_relation_display_name(relation, fallback):
     return fallback
 
 
+def _vod_enabled_account_filters(prefix="m3u_account__"):
+    return {
+        f"{prefix}is_active": True,
+        f"{prefix}account_type__in": (
+            M3UAccount.Types.XC,
+            M3UAccount.Types.STALKER,
+        ),
+        f"{prefix}custom_properties__enable_vod": True,
+    }
+
+
 def _parse_category_filter_value(category_value):
     text = str(category_value or "").strip()
     if not text:
@@ -159,9 +171,9 @@ def _build_movie_relation_display_name_map(movie_ids, category_value):
     relations = (
         M3UMovieRelation.objects.filter(
             movie_id__in=movie_ids,
-            m3u_account__is_active=True,
             category__name=category_name,
             category__isnull=False,
+            **_vod_enabled_account_filters(),
         )
         .annotate(category_enabled=Exists(enabled_category_relations))
         .filter(category_enabled=True)
@@ -189,9 +201,9 @@ def _build_series_relation_display_name_map(series_ids, category_value):
 
     relations = M3USeriesRelation.objects.filter(
         series_id__in=series_ids,
-        m3u_account__is_active=True,
         category__name=category_name,
         category__isnull=False,
+        **_vod_enabled_account_filters(),
     ).select_related("series", "category").order_by(
         "series_id",
         "-m3u_account__priority",
@@ -282,7 +294,7 @@ class MovieViewSet(viewsets.ReadOnlyModelViewSet):
     def get_queryset(self):
         # Only return movies that have active M3U relations
         return Movie.objects.filter(
-            m3u_relations__m3u_account__is_active=True
+            **_vod_enabled_account_filters("m3u_relations__m3u_account__")
         ).distinct().select_related('logo').prefetch_related('m3u_relations__m3u_account')
 
     def list(self, request, *args, **kwargs):
@@ -313,7 +325,7 @@ class MovieViewSet(viewsets.ReadOnlyModelViewSet):
         )
         relations = M3UMovieRelation.objects.filter(
             movie=movie,
-            m3u_account__is_active=True
+            **_vod_enabled_account_filters()
         ).select_related('m3u_account', 'category').annotate(
             category_enabled=Exists(enabled_category_relations)
         ).filter(
@@ -348,7 +360,7 @@ class MovieViewSet(viewsets.ReadOnlyModelViewSet):
 
         qs = M3UMovieRelation.objects.filter(
             movie=movie,
-            m3u_account__is_active=True
+            **_vod_enabled_account_filters()
         ).select_related('m3u_account', 'category').annotate(
             category_enabled=Exists(
                 M3UVODCategoryRelation.objects.filter(
@@ -541,7 +553,7 @@ class SeriesViewSet(viewsets.ReadOnlyModelViewSet):
         enabled_series_relations = get_enabled_series_relations_queryset(
             M3USeriesRelation.objects.filter(
                 series_id=OuterRef("pk"),
-                m3u_account__is_active=True,
+                **_vod_enabled_account_filters(),
             )
         )
 
@@ -572,7 +584,7 @@ class SeriesViewSet(viewsets.ReadOnlyModelViewSet):
         series = self.get_object()
         relations = M3USeriesRelation.objects.filter(
             series=series,
-            m3u_account__is_active=True
+            **_vod_enabled_account_filters()
         ).select_related('m3u_account', 'category')
         relations = _filter_relations_by_category(
             relations,
@@ -602,7 +614,7 @@ class SeriesViewSet(viewsets.ReadOnlyModelViewSet):
             # Add provider information
             relations = M3UEpisodeRelation.objects.filter(
                 episode=episode,
-                m3u_account__is_active=True
+                **_vod_enabled_account_filters()
             ).select_related('m3u_account')
 
             episode_data['providers'] = M3UEpisodeRelationSerializer(relations, many=True).data
@@ -629,7 +641,7 @@ class SeriesViewSet(viewsets.ReadOnlyModelViewSet):
 
         qs = M3USeriesRelation.objects.filter(
             series=series,
-            m3u_account__is_active=True
+            **_vod_enabled_account_filters()
         ).select_related('m3u_account', 'category')
 
         qs = _filter_relations_by_category(

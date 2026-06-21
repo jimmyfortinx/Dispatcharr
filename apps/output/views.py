@@ -84,6 +84,7 @@ def _get_enabled_movie_relations_queryset():
 
     return M3UMovieRelation.objects.filter(
         m3u_account__is_active=True,
+        m3u_account__custom_properties__enable_vod=True,
         category__isnull=False,
     ).annotate(
         category_enabled=Exists(enabled_category_relations)
@@ -2506,6 +2507,7 @@ def xc_get_vod_categories(user):
 
     enabled_category_relations = M3UMovieRelation.objects.filter(
         m3u_account__is_active=True,
+        m3u_account__custom_properties__enable_vod=True,
         category__isnull=False,
     ).annotate(
         category_enabled=Exists(
@@ -2592,6 +2594,7 @@ def xc_get_series_categories(user):
 
     enabled_category_relations = M3USeriesRelation.objects.filter(
         m3u_account__is_active=True,
+        m3u_account__custom_properties__enable_vod=True,
         category__isnull=False,
     ).annotate(
         category_enabled=Exists(
@@ -2629,6 +2632,7 @@ def xc_get_series(request, user, category_id=None):
 
     series_relations = M3USeriesRelation.objects.filter(
         m3u_account__is_active=True,
+        m3u_account__custom_properties__enable_vod=True,
         category__isnull=False,
     ).annotate(
         category_enabled=Exists(
@@ -2690,7 +2694,11 @@ def xc_get_series_info(request, user, series_id):
         raise Http404()
 
     # All authenticated users get access to series from all active M3U accounts
-    filters = {"id": series_id, "m3u_account__is_active": True}
+    filters = {
+        "id": series_id,
+        "m3u_account__is_active": True,
+        "m3u_account__custom_properties__enable_vod": True,
+    }
     enabled_category_relations = M3UVODCategoryRelation.objects.filter(
         m3u_account_id=OuterRef("m3u_account_id"),
         category_id=OuterRef("category_id"),
