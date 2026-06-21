@@ -657,9 +657,21 @@ def stream_xc(request, username, password, channel_id):
     else:
         channel = get_object_or_404(Channel, id=channel_id)
 
-    if extension.lower() == '.mp4':
+    extension = extension.lower()
+
+    # Some XC clients probe `.m3u8` first even though Dispatcharr's XC live
+    # endpoint serves TS/fMP4, not HLS playlists. Redirect immediately to the
+    # equivalent `.ts` URL so the client reaches a real live stream endpoint
+    # instead of opening a long-lived wrong-format response and timing out.
+    if extension == '.m3u8':
+        ts_path = f"/live/{username}/{password}/{channel.id}.ts"
+        if request.META.get("QUERY_STRING"):
+            ts_path = f"{ts_path}?{request.META['QUERY_STRING']}"
+        return HttpResponseRedirect(ts_path)
+
+    if extension == '.mp4':
         force_format = 'fmp4'
-    elif extension.lower() == '.ts':
+    elif extension == '.ts':
         force_format = 'mpegts'
     else:
         force_format = None
