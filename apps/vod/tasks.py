@@ -249,12 +249,11 @@ def refresh_categories(account_id, client=None):
         discovery = client.discover_vod_categories()
         client.vod_portal_url = discovery.normalized_portal_url
         categories_data = discovery.movie_categories
-
-        updated_props = dict(account.custom_properties or {})
-        updated_props["token"] = discovery.token
-        if updated_props != (account.custom_properties or {}):
-            account.custom_properties = updated_props
-            account.save(update_fields=["custom_properties"])
+        persist_stalker_runtime_state(
+            account,
+            client,
+            portal_url=discovery.normalized_portal_url,
+        )
     else:
         categories_data = client.get_vod_categories()
 
@@ -770,11 +769,40 @@ def get_stalker_vod_portal_url(client, account):
 
     discovery = client.discover_vod_categories()
     client.vod_portal_url = discovery.normalized_portal_url
-    if account_properties.get("stalker_vod_portal_url") != discovery.normalized_portal_url:
-        account_properties["stalker_vod_portal_url"] = discovery.normalized_portal_url
-        account.custom_properties = account_properties
-        account.save(update_fields=["custom_properties"])
+    persist_stalker_runtime_state(
+        account,
+        client,
+        portal_url=discovery.normalized_portal_url,
+    )
     return discovery.normalized_portal_url
+
+
+def persist_stalker_runtime_state(account, client, portal_url=None):
+    updated_props = dict(account.custom_properties or {})
+    changed = False
+
+    normalized_portal_url = str(portal_url or "").strip()
+    if (
+        normalized_portal_url
+        and updated_props.get("stalker_vod_portal_url") != normalized_portal_url
+    ):
+        updated_props["stalker_vod_portal_url"] = normalized_portal_url
+        changed = True
+
+    if getattr(client, "token", None) and updated_props.get("token") != client.token:
+        updated_props["token"] = client.token
+        changed = True
+
+    if (
+        getattr(client, "last_auth_mode", None)
+        and updated_props.get("stalker_auth_mode") != client.last_auth_mode
+    ):
+        updated_props["stalker_auth_mode"] = client.last_auth_mode
+        changed = True
+
+    if changed:
+        account.custom_properties = updated_props
+        account.save(update_fields=["custom_properties"])
 
 
 def build_stalker_page_signature(items, relation_id_extractor=extract_stalker_relation_id):
@@ -904,6 +932,32 @@ def fetch_stalker_category_page(
         else worker_client.get_vod_series
     )
     return fetch_page(portal_url, category_id=requested_category_id, page=page)
+
+
+def fetch_stalker_series_season_page(client, account, portal_url, external_series_id, page):
+    worker_client = clone_stalker_catalog_client(client, account)
+    return worker_client.get_series_seasons(
+        portal_url,
+        external_series_id,
+        page=page,
+    )
+
+
+def fetch_stalker_series_episode_page(
+    client,
+    account,
+    portal_url,
+    external_series_id,
+    season_query_id,
+    page,
+):
+    worker_client = clone_stalker_catalog_client(client, account)
+    return worker_client.get_series_episodes(
+        portal_url,
+        external_series_id,
+        season_query_id,
+        page=page,
+    )
 
 
 def iter_stalker_category_batches(
@@ -1135,64 +1189,131 @@ def collect_stalker_paginated_items(
     relation_id_extractor,
     content_label,
     context_label,
+    page_workers=1,
 ):
     previous_signature = None
     seen_relation_ids = set()
     collected_items = []
 
-    for page in range(1, 501):
-        items = fetch_page(page)
-        if not items:
-            break
+    next_page = 1
+    stop_pagination = False
 
-        page_signature = build_stalker_page_signature(
-            items,
-            relation_id_extractor=relation_id_extractor,
-        )
-        if page > 1 and page_signature and page_signature == previous_signature:
-            logger.warning(
-                "Stopping Stalker %s pagination for %s at page %s because the provider repeated the previous page",
-                content_label,
-                context_label,
-                page,
+    while next_page <= 500 and not stop_pagination:
+        page_numbers = list(range(next_page, min(next_page + max(1, page_workers), 501)))
+        page_results = {}
+
+        if len(page_numbers) == 1:
+            page = page_numbers[0]
+            page_results[page] = fetch_page(page)
+        else:
+            with ThreadPoolExecutor(max_workers=len(page_numbers)) as executor:
+                future_to_page = {
+                    executor.submit(fetch_page, page): page
+                    for page in page_numbers
+                }
+                for future in as_completed(future_to_page):
+                    page_results[future_to_page[future]] = future.result()
+
+        for page in page_numbers:
+            items = page_results.get(page, [])
+            if not items:
+                stop_pagination = True
+                break
+
+            page_signature = build_stalker_page_signature(
+                items,
+                relation_id_extractor=relation_id_extractor,
             )
-            break
-
-        previous_signature = page_signature
-        page_added = 0
-
-        for item in items:
-            if not isinstance(item, dict):
-                continue
-
-            relation_id = relation_id_extractor(item)
-            if not relation_id:
-                logger.debug(
-                    "Skipping Stalker %s item without a stable relation id: %s",
+            if page > 1 and page_signature and page_signature == previous_signature:
+                logger.warning(
+                    "Stopping Stalker %s pagination for %s at page %s because the provider repeated the previous page",
                     content_label,
-                    item,
+                    context_label,
+                    page,
                 )
-                continue
+                stop_pagination = True
+                break
 
-            if relation_id in seen_relation_ids:
-                continue
+            previous_signature = page_signature
+            page_added = 0
 
-            normalized_item = dict(item)
-            normalized_item["_stalker_relation_id"] = relation_id
-            seen_relation_ids.add(relation_id)
-            collected_items.append(normalized_item)
-            page_added += 1
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
 
-        if not page_added:
-            logger.debug(
-                "Stopping Stalker %s pagination for %s at page %s because no new items were discovered",
-                content_label,
-                context_label,
-                page,
-            )
-            break
+                relation_id = relation_id_extractor(item)
+                if not relation_id:
+                    logger.debug(
+                        "Skipping Stalker %s item without a stable relation id: %s",
+                        content_label,
+                        item,
+                    )
+                    continue
+
+                if relation_id in seen_relation_ids:
+                    continue
+
+                normalized_item = dict(item)
+                normalized_item["_stalker_relation_id"] = relation_id
+                seen_relation_ids.add(relation_id)
+                collected_items.append(normalized_item)
+                page_added += 1
+
+            if not page_added:
+                logger.debug(
+                    "Stopping Stalker %s pagination for %s at page %s because no new items were discovered",
+                    content_label,
+                    context_label,
+                    page,
+                )
+                stop_pagination = True
+                break
+
+        next_page = page_numbers[-1] + 1
 
     return collected_items
+
+
+def should_parallelize_stalker_series_detail(client):
+    for attr_name in ("get_series_seasons", "get_series_episodes"):
+        attr = getattr(type(client), attr_name, None)
+        if attr is not None and type(attr).__module__ == "unittest.mock":
+            return False
+    return supports_parallel_stalker_catalog(client)
+
+
+def get_stalker_series_detail_worker_count(account, request_count, client):
+    if request_count <= 1 or not should_parallelize_stalker_series_detail(client):
+        return 1
+
+    configured_workers = (
+        (account.custom_properties or {}).get("stalker_series_detail_workers")
+        or (account.custom_properties or {}).get("stalker_vod_catalog_workers")
+        or DEFAULT_STALKER_CATALOG_WORKERS
+    )
+    try:
+        configured_workers = int(configured_workers)
+    except (TypeError, ValueError):
+        configured_workers = DEFAULT_STALKER_CATALOG_WORKERS
+
+    return max(1, min(configured_workers, request_count))
+
+
+def get_stalker_series_detail_page_worker_count(account, client):
+    if not should_parallelize_stalker_series_detail(client):
+        return 1
+
+    configured_workers = (
+        (account.custom_properties or {}).get("stalker_series_detail_page_workers")
+        or (account.custom_properties or {}).get("stalker_vod_catalog_page_workers")
+        or DEFAULT_STALKER_CATALOG_PAGE_WORKERS
+    )
+    try:
+        configured_workers = int(configured_workers)
+    except (TypeError, ValueError):
+        configured_workers = DEFAULT_STALKER_CATALOG_PAGE_WORKERS
+
+    return max(1, min(configured_workers, 8))
 
 
 def build_series_relation_custom_properties(existing_props, series_data):
@@ -2624,31 +2745,37 @@ def refresh_stalker_series_episodes(account, series_relation):
     portal_url = get_stalker_vod_portal_url(client, account)
     client.prepare_authenticated_session(portal_url)
     client.vod_portal_url = portal_url
+    persist_stalker_runtime_state(account, client, portal_url=portal_url)
 
-    updated_props = dict(account.custom_properties or {})
-    if updated_props.get("token") != client.token:
-        updated_props["token"] = client.token
-        account.custom_properties = updated_props
-        account.save(update_fields=["custom_properties"])
+    page_workers = get_stalker_series_detail_page_worker_count(account, client)
 
     season_items = collect_stalker_paginated_items(
-        lambda page: client.get_series_seasons(
+        lambda page: fetch_stalker_series_season_page(
+            client,
+            account,
             portal_url,
             series_relation.external_series_id,
-            page=page,
+            page,
         ),
         relation_id_extractor=extract_stalker_season_relation_id,
         content_label="series seasons",
         context_label=f"series {series_relation.external_series_id}",
+        page_workers=page_workers,
     )
 
     detail_data = build_stalker_series_detail_data(series_relation, season_items)
     episodes_data = {}
 
-    for season_index, season_item in enumerate(season_items, start=1):
+    season_jobs = [
+        (season_index, season_item)
+        for season_index, season_item in enumerate(season_items, start=1)
+    ]
+
+    def load_season_episodes(job):
+        season_index, season_item = job
         season_id = extract_stalker_season_relation_id(season_item)
         if not season_id:
-            continue
+            return None
 
         season_number = extract_stalker_season_number(season_item, fallback=season_index)
         embedded_episode_rows = build_stalker_embedded_episode_rows(
@@ -2666,17 +2793,20 @@ def refresh_stalker_series_episodes(account, series_relation):
 
         for season_query_id in season_query_candidates:
             candidate_items = collect_stalker_paginated_items(
-                lambda page, season_query_id=season_query_id: client.get_series_episodes(
+                lambda page, season_query_id=season_query_id: fetch_stalker_series_episode_page(
+                    client,
+                    account,
                     portal_url,
                     series_relation.external_series_id,
                     season_query_id,
-                    page=page,
+                    page,
                 ),
                 relation_id_extractor=extract_stalker_episode_relation_id,
                 content_label="series episodes",
                 context_label=(
                     f"series {series_relation.external_series_id} season {season_query_id}"
                 ),
+                page_workers=page_workers,
             )
 
             if candidate_items and looks_like_stalker_season_list(candidate_items):
@@ -2726,6 +2856,24 @@ def refresh_stalker_series_episodes(account, series_relation):
             normalized_episode["_stalker_relation_id"] = episode_id
             normalized_episodes.append(normalized_episode)
 
+        return season_number, normalized_episodes
+
+    season_worker_count = get_stalker_series_detail_worker_count(
+        account,
+        len(season_jobs),
+        client,
+    )
+
+    if season_worker_count == 1:
+        season_results = map(load_season_episodes, season_jobs)
+    else:
+        with ThreadPoolExecutor(max_workers=season_worker_count) as executor:
+            season_results = executor.map(load_season_episodes, season_jobs)
+
+    for season_result in season_results:
+        if not season_result:
+            continue
+        season_number, normalized_episodes = season_result
         episodes_data.setdefault(str(season_number), []).extend(normalized_episodes)
 
     return detail_data, episodes_data

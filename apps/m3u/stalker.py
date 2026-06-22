@@ -139,6 +139,7 @@ class StalkerClient:
         )
         self.timezone = self.custom_properties.get("timezone") or DEFAULT_TIMEZONE
         self.last_auth_mode = None
+        self._prepared_portal_url = None
 
         self.session = requests.Session()
         adapter = requests.adapters.HTTPAdapter(
@@ -880,14 +881,25 @@ class StalkerClient:
         return items
 
     def prepare_authenticated_session(self, portal_url):
+        if (
+            self._prepared_portal_url == portal_url
+            and self.token
+        ):
+            return
+
         self.handshake(portal_url)
         self._authenticate_portal(portal_url)
+        self._prepared_portal_url = portal_url
 
-    def prepare_playback_session(self, portal_url):
+    def prepare_playback_session(self, portal_url, force=False):
+        if force:
+            self._prepared_portal_url = None
         self.prepare_authenticated_session(portal_url)
         self.watchdog_update(portal_url)
 
-    def prepare_vod_playback_session(self, portal_url):
+    def prepare_vod_playback_session(self, portal_url, force=False):
+        if force:
+            self._prepared_portal_url = None
         self.prepare_authenticated_session(portal_url)
 
     def _should_refresh_channel_cmd(self, exc):
@@ -1033,6 +1045,7 @@ class StalkerClient:
                 portal_url,
                 exc,
             )
+            self._prepared_portal_url = None
             return self._resolve_playback_url_once(portal_url, channel_metadata)
 
     def resolve_vod_playback_url(self, portal_url, cmd, series=None):
@@ -1047,7 +1060,26 @@ class StalkerClient:
                 portal_url,
                 exc,
             )
+            self._prepared_portal_url = None
             return self._resolve_vod_playback_url_once(portal_url, cmd, series=series)
+
+    def clone_for_parallel_catalog(self):
+        cloned = type(self)(
+            server_url=self.server_url,
+            mac=self.mac,
+            username=self.username,
+            password=self.password,
+            user_agent=self.user_agent,
+            custom_properties=dict(self.custom_properties or {}),
+            timeout=self.timeout,
+        )
+        cloned.token = self.token
+        cloned.last_auth_mode = self.last_auth_mode
+        cloned._prepared_portal_url = self._prepared_portal_url
+        vod_portal_url = getattr(self, "vod_portal_url", None)
+        if vod_portal_url:
+            cloned.vod_portal_url = vod_portal_url
+        return cloned
 
     def _normalize_channel(self, channel, portal_url, genre_map):
         if not isinstance(channel, dict):
