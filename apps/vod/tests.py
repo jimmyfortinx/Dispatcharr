@@ -7,7 +7,12 @@ from rest_framework.test import APIRequestFactory
 from rest_framework.test import force_authenticate
 
 from apps.m3u.models import M3UAccount
-from apps.vod.api_views import MovieViewSet, UnifiedContentViewSet, VODLogoViewSet
+from apps.vod.api_views import (
+    MovieViewSet,
+    UnifiedContentViewSet,
+    VODCategoryViewSet,
+    VODLogoViewSet,
+)
 from apps.vod.models import (
     M3UMovieRelation,
     M3USeriesRelation,
@@ -199,3 +204,70 @@ class UnifiedContentVisibilityTests(TestCase):
         names = {row["name"] for row in response.data["results"]}
         self.assertIn("Visible Series", names)
         self.assertNotIn("Hidden Series", names)
+
+
+class VODCategoryVisibilityTests(TestCase):
+    def setUp(self):
+        self.factory = APIRequestFactory()
+        self.user = User.objects.create_user(
+            username="vod-category-user",
+            password="testpass123",
+            user_level=10,
+        )
+        self.view = VODCategoryViewSet.as_view({"get": "list"})
+
+    def test_categories_only_include_visible_content(self):
+        enabled_account = M3UAccount.objects.create(
+            name="Category Enabled VOD",
+            account_type=M3UAccount.Types.STALKER,
+            is_active=True,
+            custom_properties={"enable_vod": True, "mac": "00:1A:79:00:00:95"},
+        )
+        disabled_account = M3UAccount.objects.create(
+            name="Category Disabled VOD",
+            account_type=M3UAccount.Types.STALKER,
+            is_active=True,
+            custom_properties={"enable_vod": False, "mac": "00:1A:79:00:00:96"},
+        )
+        visible_category = VODCategory.objects.create(
+            name="Visible Category",
+            category_type="movie",
+        )
+        hidden_category = VODCategory.objects.create(
+            name="Hidden Category",
+            category_type="movie",
+        )
+        visible_movie = Movie.objects.create(name="Visible Category Movie")
+        hidden_movie = Movie.objects.create(name="Hidden Category Movie")
+
+        M3UVODCategoryRelation.objects.create(
+            m3u_account=enabled_account,
+            category=visible_category,
+            enabled=True,
+        )
+        M3UVODCategoryRelation.objects.create(
+            m3u_account=disabled_account,
+            category=hidden_category,
+            enabled=True,
+        )
+        M3UMovieRelation.objects.create(
+            m3u_account=enabled_account,
+            movie=visible_movie,
+            category=visible_category,
+            stream_id="visible-category-movie",
+        )
+        M3UMovieRelation.objects.create(
+            m3u_account=disabled_account,
+            movie=hidden_movie,
+            category=hidden_category,
+            stream_id="hidden-category-movie",
+        )
+
+        request = self.factory.get("/api/vod/categories/")
+        force_authenticate(request, user=self.user)
+        response = self.view(request)
+
+        self.assertEqual(response.status_code, 200)
+        category_names = {row["name"] for row in response.data}
+        self.assertIn("Visible Category", category_names)
+        self.assertNotIn("Hidden Category", category_names)
