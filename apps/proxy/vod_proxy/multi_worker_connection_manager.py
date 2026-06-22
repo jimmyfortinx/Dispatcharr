@@ -401,7 +401,10 @@ class RedisBackedVODConnection:
                 target_url,
                 headers=headers,
                 stream=True,
-                timeout=(10, 10),
+                timeout=(
+                    MultiWorkerVODConnectionManager.UPSTREAM_CONNECT_TIMEOUT_SECONDS,
+                    MultiWorkerVODConnectionManager.UPSTREAM_READ_TIMEOUT_SECONDS,
+                ),
                 allow_redirects=allow_redirects
             )
 
@@ -418,7 +421,10 @@ class RedisBackedVODConnection:
                     state.stream_url,
                     headers=headers,
                     stream=True,
-                    timeout=(10, 10),
+                    timeout=(
+                        MultiWorkerVODConnectionManager.UPSTREAM_CONNECT_TIMEOUT_SECONDS,
+                        MultiWorkerVODConnectionManager.UPSTREAM_READ_TIMEOUT_SECONDS,
+                    ),
                     allow_redirects=True
                 )
 
@@ -747,6 +753,9 @@ class MultiWorkerVODConnectionManager:
     """Enhanced VOD Connection Manager that works across multiple uwsgi workers"""
 
     _instance = None
+    SESSION_REUSE_GRACE_SECONDS = 20
+    UPSTREAM_CONNECT_TIMEOUT_SECONDS = 10
+    UPSTREAM_READ_TIMEOUT_SECONDS = 30
 
     @classmethod
     def get_instance(cls):
@@ -880,6 +889,38 @@ class MultiWorkerVODConnectionManager:
         except Exception as e:
             logger.error(f"Error decrementing profile connections: {e}")
             return None
+
+    def _schedule_idle_cleanup(
+        self,
+        redis_connection,
+        client_id,
+        content_name,
+        content_uuid,
+        client_ip,
+        user,
+        reason,
+    ):
+        grace_period = self.SESSION_REUSE_GRACE_SECONDS
+
+        def delayed_cleanup():
+            time.sleep(grace_period)
+            if not redis_connection.has_active_streams():
+                self._send_vod_event(
+                    'vod_stopped', client_id, content_name,
+                    content_uuid, client_ip,
+                    str(user.id) if user else '0',
+                    user.username if user else None
+                )
+            logger.info(
+                f"[{client_id}] Worker {self.worker_id} - "
+                f"Checking for smart cleanup after {reason} "
+                f"({grace_period}s grace)"
+            )
+            redis_connection.cleanup(current_worker_id=self.worker_id)
+
+        cleanup_thread = threading.Thread(target=delayed_cleanup)
+        cleanup_thread.daemon = True
+        cleanup_thread.start()
 
     def _build_provider_request_headers(self, m3u_profile, client_user_agent, request, input_headers=None):
         headers = {}
@@ -1153,23 +1194,15 @@ class MultiWorkerVODConnectionManager:
                             profile_decremented = True
                             logger.info(f"[{client_id}] Profile counter decremented for profile {profile_id} on normal completion")
 
-                        def delayed_cleanup():
-                            time.sleep(1)  # Wait 1 second
-                            # Re-check active_streams: a seeking/reconnecting client may
-                            # have incremented it within the settle window.
-                            if not redis_connection.has_active_streams():
-                                self._send_vod_event(
-                                    'vod_stopped', client_id, content_name,
-                                    content_uuid, client_ip,
-                                    str(user.id) if user else '0',
-                                    user.username if user else None
-                                )
-                            logger.info(f"[{client_id}] Worker {self.worker_id} - Checking for smart cleanup after normal completion")
-                            redis_connection.cleanup(current_worker_id=self.worker_id)
-
-                        cleanup_thread = threading.Thread(target=delayed_cleanup)
-                        cleanup_thread.daemon = True
-                        cleanup_thread.start()
+                        self._schedule_idle_cleanup(
+                            redis_connection,
+                            client_id,
+                            content_name,
+                            content_uuid,
+                            client_ip,
+                            user,
+                            reason="normal completion",
+                        )
 
                 except GeneratorExit:
                     logger.info(f"[{client_id}] Worker {self.worker_id} - Client disconnected from Redis-backed stream")
@@ -1188,23 +1221,15 @@ class MultiWorkerVODConnectionManager:
                             profile_decremented = True
                             logger.info(f"[{client_id}] Profile counter decremented for profile {profile_id} on client disconnect")
 
-                        def delayed_cleanup():
-                            time.sleep(1)  # Wait 1 second
-                            # Re-check active_streams: a seeking/reconnecting client may
-                            # have incremented it within the settle window.
-                            if not redis_connection.has_active_streams():
-                                self._send_vod_event(
-                                    'vod_stopped', client_id, content_name,
-                                    content_uuid, client_ip,
-                                    str(user.id) if user else '0',
-                                    user.username if user else None
-                                )
-                            logger.info(f"[{client_id}] Worker {self.worker_id} - Checking for smart cleanup after client disconnect")
-                            redis_connection.cleanup(current_worker_id=self.worker_id)
-
-                        cleanup_thread = threading.Thread(target=delayed_cleanup)
-                        cleanup_thread.daemon = True
-                        cleanup_thread.start()
+                        self._schedule_idle_cleanup(
+                            redis_connection,
+                            client_id,
+                            content_name,
+                            content_uuid,
+                            client_ip,
+                            user,
+                            reason="client disconnect",
+                        )
 
                 except Exception as e:
                     logger.error(f"[{client_id}] Worker {self.worker_id} - Error in Redis-backed stream: {e}")
@@ -1242,15 +1267,15 @@ class MultiWorkerVODConnectionManager:
                             # cleanup() re-checks active_streams under lock, so a
                             # reconnecting client that increments active_streams in
                             # time will prevent Redis key deletion.
-                            def delayed_cleanup():
-                                time.sleep(1)
-                                logger.info(f"[{client_id}] Worker {self.worker_id} - Checking for smart cleanup in finally block")
-                                # No connection_manager — profile already decremented above
-                                redis_connection.cleanup(current_worker_id=self.worker_id)
-
-                            cleanup_thread = threading.Thread(target=delayed_cleanup)
-                            cleanup_thread.daemon = True
-                            cleanup_thread.start()
+                            self._schedule_idle_cleanup(
+                                redis_connection,
+                                client_id,
+                                content_name,
+                                content_uuid,
+                                client_ip,
+                                user,
+                                reason="finally block",
+                            )
 
             # Create streaming response
             response = StreamingHttpResponse(
