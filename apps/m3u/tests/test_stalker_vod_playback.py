@@ -129,6 +129,47 @@ class StalkerPhase14MovieResolverTests(TestCase):
             self.account.custom_properties["stalker_vod_portal_url"],
             "http://portal.example.com/stalker_portal/server/load.php",
         )
+    
+    @patch("apps.vod.resolvers.StalkerClient.resolve_vod_playback_url", autospec=True)
+    @patch("apps.vod.resolvers.StalkerClient.discover_vod_categories", autospec=True)
+    def test_resolver_reuses_cached_live_portal_url_for_vod_playback(
+        self,
+        mock_discover_vod_categories,
+        mock_resolve_vod_playback_url,
+    ):
+        self.account.custom_properties["stalker_portal_url"] = (
+            "http://portal.example.com/stalker_portal/server/load.php"
+        )
+        self.account.save(update_fields=["custom_properties"])
+
+        def fake_resolve(client, portal_url, cmd, series=None):
+            self.assertEqual(
+                portal_url,
+                "http://portal.example.com/stalker_portal/server/load.php",
+            )
+            self.assertEqual(
+                cmd,
+                "ffmpeg http://provider.example.com/movie-100.mkv",
+            )
+            self.assertIsNone(series)
+            client.token = "REFRESHED-TOKEN"
+            return "http://resolved.example.com/movie-100.mkv"
+
+        mock_resolve_vod_playback_url.side_effect = fake_resolve
+
+        stream_context = resolve_vod_stream_context(self.relation)
+
+        self.assertEqual(
+            stream_context.url,
+            "http://resolved.example.com/movie-100.mkv",
+        )
+        mock_discover_vod_categories.assert_not_called()
+
+        self.account.refresh_from_db()
+        self.assertEqual(
+            self.account.custom_properties["stalker_vod_portal_url"],
+            "http://portal.example.com/stalker_portal/server/load.php",
+        )
 
     def test_resolver_keeps_xtream_movie_urls_on_existing_route_pattern(self):
         account = M3UAccount.objects.create(

@@ -115,12 +115,17 @@ def _get_stalker_vod_portal_url(relation, client, account_properties) -> str:
 
     portal_url = (
         str(account_properties.get("stalker_vod_portal_url") or "").strip()
+        or str(account_properties.get("stalker_portal_url") or "").strip()
         or str(relation_properties.get("portal_url") or "").strip()
         or str(basic_data.get("portal_url") or "").strip()
         or str(info_data.get("portal_url") or "").strip()
     )
     if portal_url:
         return portal_url
+
+    server_url = str(getattr(getattr(relation, "m3u_account", None), "server_url", "") or "").strip()
+    if server_url.rstrip("/").endswith(("/server/load.php", "/portal.php")):
+        return server_url
 
     discovery = client.discover_vod_categories()
     return discovery.normalized_portal_url
