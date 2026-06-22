@@ -1462,6 +1462,18 @@ export default class API {
       );
       return response;
     } catch (e) {
+      if (e.status === 409) {
+        const message =
+          (typeof e.body === 'object' && e.body?.error) ||
+          'VOD refresh already running.';
+        notifications.show({
+          title: 'VOD refresh already running',
+          message,
+          autoClose: 5000,
+          color: 'yellow',
+        });
+        return e.body;
+      }
       errorNotification('Failed to refresh VOD content', e);
     }
   }

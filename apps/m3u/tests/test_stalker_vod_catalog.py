@@ -469,6 +469,28 @@ class StalkerPhase11CategoryDiscoveryTests(TestCase):
         self.assertEqual(success_update.kwargs["status"], "success")
         self.assertIn("2 movie categories, 1 series categories", success_update.kwargs["message"])
 
+    @patch("apps.m3u.tasks.send_m3u_update")
+    @patch("apps.vod.tasks.acquire_task_lock", return_value=False)
+    def test_refresh_vod_content_skips_when_refresh_already_running(
+        self,
+        mock_acquire_task_lock,
+        mock_send_m3u_update,
+    ):
+        result = refresh_vod_content(self.account.id)
+
+        self.assertEqual(
+            result,
+            f"VOD refresh already running for account {self.account.id}",
+        )
+        mock_acquire_task_lock.assert_called_once_with(
+            "refresh_vod_content",
+            self.account.id,
+        )
+        mock_send_m3u_update.assert_called_once()
+        self.assertEqual(mock_send_m3u_update.call_args.args[0], self.account.id)
+        self.assertEqual(mock_send_m3u_update.call_args.args[1], "vod_refresh")
+        self.assertEqual(mock_send_m3u_update.call_args.kwargs["status"], "warning")
+
 
 class StalkerPhase11CategorySettingsTests(TestCase):
     def setUp(self):
@@ -557,7 +579,25 @@ class StalkerPhase11RefreshEndpointTests(TestCase):
         self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED)
         mock_delay.assert_called_once_with(self.account.id)
 
+    @patch("apps.m3u.api_views.is_task_lock_held", return_value=True)
+    @patch("apps.vod.tasks.refresh_vod_content.delay")
+    def test_refresh_vod_endpoint_rejects_duplicate_refreshes(
+        self,
+        mock_delay,
+        mock_is_task_lock_held,
+    ):
+        response = self.client.post(f"/api/m3u/accounts/{self.account.id}/refresh-vod/")
 
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+        mock_is_task_lock_held.assert_called_once_with(
+            "refresh_vod_content",
+            self.account.id,
+        )
+        mock_delay.assert_not_called()
+
+
+import threading
+import time
 from datetime import timedelta
 from unittest.mock import Mock
 
@@ -576,6 +616,7 @@ from apps.vod.models import (
 from apps.vod.tasks import (
     cleanup_orphaned_vod_content,
     get_stalker_category_requests,
+    iter_stalker_catalog_batches,
     process_movie_batch,
     process_series_batch,
     refresh_movies,
@@ -702,6 +743,167 @@ class StalkerPhase12MovieImportTests(TestCase):
             "ffmpeg http://provider.example.com/movie-b",
         )
 
+    def test_iter_stalker_catalog_batches_fetches_categories_in_parallel(self):
+        class SharedCatalogState:
+            def __init__(self):
+                self.lock = threading.Lock()
+                self.active_calls = 0
+                self.max_active_calls = 0
+
+        class CloneableCatalogClient:
+            def __init__(self, responses, shared_state):
+                self.responses = responses
+                self.shared_state = shared_state
+                self.vod_portal_url = (
+                    "http://portal.example.com/stalker_portal/server/load.php"
+                )
+
+            def clone_for_parallel_catalog(self):
+                return CloneableCatalogClient(self.responses, self.shared_state)
+
+            def get_vod_movies(self, portal_url, category_id=None, page=1):
+                assert (
+                    portal_url
+                    == "http://portal.example.com/stalker_portal/server/load.php"
+                )
+                with self.shared_state.lock:
+                    self.shared_state.active_calls += 1
+                    self.shared_state.max_active_calls = max(
+                        self.shared_state.max_active_calls,
+                        self.shared_state.active_calls,
+                    )
+                try:
+                    time.sleep(0.05)
+                    return self.responses.get((str(category_id), page), [])
+                finally:
+                    with self.shared_state.lock:
+                        self.shared_state.active_calls -= 1
+
+        extra_category = VODCategory.objects.create(
+            name="Drama",
+            category_type="movie",
+        )
+        extra_relation = M3UVODCategoryRelation.objects.create(
+            m3u_account=self.account,
+            category=extra_category,
+            enabled=True,
+            custom_properties={
+                "stalker_category_id": "11",
+                "stalker_category_type": "movie",
+            },
+        )
+        self.account.custom_properties = {
+            **(self.account.custom_properties or {}),
+            "stalker_vod_catalog_workers": 2,
+        }
+        self.account.save(update_fields=["custom_properties"])
+
+        shared_state = SharedCatalogState()
+        client = CloneableCatalogClient(
+            responses={
+                ("10", 1): [{"id": "100", "title": "Alpha"}],
+                ("10", 2): [],
+                ("11", 1): [{"id": "200", "title": "Beta"}],
+                ("11", 2): [],
+            },
+            shared_state=shared_state,
+        )
+
+        batches = list(
+            iter_stalker_catalog_batches(
+                client,
+                self.account,
+                {
+                    "10": self.category,
+                    "11": extra_category,
+                },
+                {
+                    self.category.id: self.category_relation,
+                    extra_category.id: extra_relation,
+                },
+                content_type="movie",
+            )
+        )
+
+        self.assertGreaterEqual(shared_state.max_active_calls, 2)
+        self.assertEqual(
+            [batch[0]["_requested_category_id"] for batch in batches],
+            ["10", "11"],
+        )
+        self.assertEqual(
+            [batch[0]["title"] for batch in batches],
+            ["Alpha", "Beta"],
+        )
+
+    def test_iter_stalker_catalog_batches_pipelines_pages_within_category(self):
+        class SharedCatalogState:
+            def __init__(self):
+                self.lock = threading.Lock()
+                self.active_calls = 0
+                self.max_active_calls = 0
+
+        class CloneableCatalogClient:
+            def __init__(self, responses, shared_state):
+                self.responses = responses
+                self.shared_state = shared_state
+                self.vod_portal_url = (
+                    "http://portal.example.com/stalker_portal/server/load.php"
+                )
+
+            def clone_for_parallel_catalog(self):
+                return CloneableCatalogClient(self.responses, self.shared_state)
+
+            def get_vod_movies(self, portal_url, category_id=None, page=1):
+                assert (
+                    portal_url
+                    == "http://portal.example.com/stalker_portal/server/load.php"
+                )
+                with self.shared_state.lock:
+                    self.shared_state.active_calls += 1
+                    self.shared_state.max_active_calls = max(
+                        self.shared_state.max_active_calls,
+                        self.shared_state.active_calls,
+                    )
+                try:
+                    time.sleep(0.05)
+                    return self.responses.get((str(category_id), page), [])
+                finally:
+                    with self.shared_state.lock:
+                        self.shared_state.active_calls -= 1
+
+        self.account.custom_properties = {
+            **(self.account.custom_properties or {}),
+            "stalker_vod_catalog_workers": 1,
+            "stalker_vod_catalog_page_workers": 2,
+        }
+        self.account.save(update_fields=["custom_properties"])
+
+        shared_state = SharedCatalogState()
+        client = CloneableCatalogClient(
+            responses={
+                ("10", 1): [{"id": "100", "title": "Page 1"}],
+                ("10", 2): [{"id": "101", "title": "Page 2"}],
+                ("10", 3): [],
+            },
+            shared_state=shared_state,
+        )
+
+        batches = list(
+            iter_stalker_catalog_batches(
+                client,
+                self.account,
+                {"10": self.category},
+                {self.category.id: self.category_relation},
+                content_type="movie",
+            )
+        )
+
+        self.assertGreaterEqual(shared_state.max_active_calls, 2)
+        self.assertEqual(
+            [batch[0]["title"] for batch in batches],
+            ["Page 1", "Page 2"],
+        )
+
     def test_stalker_category_requests_prefers_specific_categories_over_all_bucket(self):
         requests = get_stalker_category_requests(
             {
@@ -786,7 +988,6 @@ class StalkerPhase12MovieImportTests(TestCase):
         self.category_relation.save(update_fields=["enabled"])
         client = Mock()
         client.vod_portal_url = "http://portal.example.com/stalker_portal/server/load.php"
-
         refresh_movies(
             client,
             self.account,
@@ -1206,6 +1407,34 @@ class VODCrossChunkDedupTests(TestCase):
             "1001",
         )
 
+    def test_process_movie_batch_handles_name_year_movies_without_external_ids(self):
+        categories = {"1": self.movie_category}
+        relations = {self.movie_category.id: self.movie_category_relation}
+
+        process_movie_batch(
+            self.xc_account,
+            [
+                {
+                    "stream_id": "2001",
+                    "name": "No External IDs",
+                    "year": "2024",
+                    "category_id": "1",
+                }
+            ],
+            categories,
+            relations,
+            scan_start_time=self.scan_start_time,
+            seen_movie_keys=set(),
+        )
+
+        movie = Movie.objects.get()
+        relation = M3UMovieRelation.objects.get()
+
+        self.assertEqual(movie.name, "No External IDs")
+        self.assertEqual(movie.year, 2024)
+        self.assertEqual(relation.stream_id, "2001")
+        self.assertEqual(relation.movie, movie)
+
     def test_process_series_batch_deduplicates_same_series_across_batches(self):
         seen_series_keys = set()
         categories = {"2": self.series_category}
@@ -1254,6 +1483,34 @@ class VODCrossChunkDedupTests(TestCase):
             "2001",
         )
 
+    def test_process_series_batch_handles_name_year_series_without_external_ids(self):
+        categories = {"2": self.series_category}
+        relations = {self.series_category.id: self.series_category_relation}
+
+        process_series_batch(
+            self.xc_account,
+            [
+                {
+                    "series_id": "3001",
+                    "name": "No External Series IDs",
+                    "year": "2024",
+                    "category_id": "2",
+                }
+            ],
+            categories,
+            relations,
+            scan_start_time=self.scan_start_time,
+            seen_series_keys=set(),
+        )
+
+        series = Series.objects.get()
+        relation = M3USeriesRelation.objects.get()
+
+        self.assertEqual(series.name, "No External Series IDs")
+        self.assertEqual(series.year, 2024)
+        self.assertEqual(relation.external_series_id, "3001")
+        self.assertEqual(relation.series, series)
+
 
 from unittest.mock import patch
 
@@ -1274,7 +1531,12 @@ from apps.vod.models import (
     Series,
     VODCategory,
 )
-from apps.vod.tasks import process_series_batch, refresh_series_episodes
+from apps.vod.tasks import (
+    batch_refresh_series_episodes,
+    process_series_batch,
+    refresh_series_episodes,
+    refresh_series_relation_episodes_task,
+)
 
 
 User = get_user_model()
@@ -1367,6 +1629,92 @@ class StalkerPhase13Base(TestCase):
             ]
 
         return []
+
+
+class StalkerPhase13BatchSeriesRefreshTests(TestCase):
+    def setUp(self):
+        self.account = M3UAccount.objects.create(
+            name="Stalker Batch Episodes",
+            account_type=M3UAccount.Types.STALKER,
+            server_url="http://portal.example.com/c/",
+            custom_properties={
+                "mac": "00:1A:79:00:00:95",
+                "enable_vod": True,
+            },
+        )
+        self.category = VODCategory.objects.create(
+            name="Shows",
+            category_type="series",
+        )
+        M3UVODCategoryRelation.objects.create(
+            m3u_account=self.account,
+            category=self.category,
+            enabled=True,
+            custom_properties={
+                "stalker_category_id": "20",
+                "stalker_category_type": "series",
+            },
+        )
+        self.series_a = Series.objects.create(name="Series A")
+        self.series_b = Series.objects.create(name="Series B")
+        self.relation_a = M3USeriesRelation.objects.create(
+            m3u_account=self.account,
+            series=self.series_a,
+            category=self.category,
+            external_series_id="1001",
+        )
+        self.relation_b = M3USeriesRelation.objects.create(
+            m3u_account=self.account,
+            series=self.series_b,
+            category=self.category,
+            external_series_id="1002",
+        )
+
+    @patch("apps.vod.tasks.group")
+    def test_batch_refresh_series_episodes_queues_stalker_relation_tasks(
+        self,
+        mock_group,
+    ):
+        captured_signatures = {}
+        queued_job = Mock()
+        queued_job.id = "group-123"
+        group_result = Mock()
+        group_result.apply_async.return_value = queued_job
+
+        def build_group(signatures):
+            captured_signatures["items"] = list(signatures)
+            return group_result
+
+        mock_group.side_effect = build_group
+        from apps.vod import tasks as vod_tasks
+
+        had_attr = hasattr(vod_tasks.current_app.conf, "task_always_eager")
+        previous_value = getattr(vod_tasks.current_app.conf, "task_always_eager", None)
+        vod_tasks.current_app.conf.task_always_eager = False
+        try:
+            result = batch_refresh_series_episodes(
+                self.account.id,
+                series_ids=[self.series_a.id, self.series_b.id],
+            )
+        finally:
+            if had_attr:
+                vod_tasks.current_app.conf.task_always_eager = previous_value
+            else:
+                delattr(vod_tasks.current_app.conf, "task_always_eager")
+
+        self.assertEqual(mock_group.call_count, 1)
+        self.assertEqual(group_result.apply_async.call_count, 1)
+        self.assertIn("Queued batch episode refresh for 2 series", result)
+        self.assertEqual(
+            [sig.args for sig in captured_signatures["items"]],
+            [(self.relation_a.id,), (self.relation_b.id,)],
+        )
+        self.assertTrue(
+            all(
+                sig.task == refresh_series_relation_episodes_task.name
+                for sig in captured_signatures["items"]
+            )
+        )
 
 
 class StalkerPhase13SeriesImportTests(StalkerPhase13Base):

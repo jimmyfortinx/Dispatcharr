@@ -24,6 +24,7 @@ logger = logging.getLogger(__name__)
 from .models import M3UAccount, M3UFilter, ServerGroup, M3UAccountProfile
 from core.models import UserAgent
 from core.utils import safe_upload_path
+from core.utils import is_task_lock_held
 from apps.channels.models import ChannelGroupM3UAccount
 from core.serializers import UserAgentSerializer
 from apps.vod.models import (
@@ -487,6 +488,16 @@ class M3UAccountViewSet(viewsets.ModelViewSet):
 
         try:
             from apps.vod.tasks import refresh_vod_content
+
+            if is_task_lock_held("refresh_vod_content", account.id):
+                return Response(
+                    {
+                        "error": (
+                            f"VOD refresh already running for account {account.name}"
+                        )
+                    },
+                    status=status.HTTP_409_CONFLICT,
+                )
 
             refresh_vod_content.delay(account.id)
             return Response(

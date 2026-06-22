@@ -1,9 +1,12 @@
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from queue import Queue
 from celery import shared_task, current_app, group
 from django.utils import timezone
 from django.db import transaction, IntegrityError
 from django.db.models import Exists, OuterRef, Q
 from apps.m3u.models import M3UAccount
 from core.xtream_codes import Client as XtreamCodesClient
+from core.utils import TaskLockRenewer, acquire_task_lock, release_task_lock
 from apps.m3u.stalker import StalkerClient
 from .models import (
     VODCategory, Series, Movie, Episode, VODLogo,
@@ -15,6 +18,15 @@ import json
 import re
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_STALKER_CATALOG_WORKERS = 4
+DEFAULT_STALKER_CATALOG_PAGE_WORKERS = 2
+
+
+def supports_parallel_stalker_catalog(client):
+    return isinstance(client, StalkerClient) or callable(
+        getattr(type(client), "clone_for_parallel_catalog", None)
+    )
 
 
 def lookup_by_name_year(model, name_year_pairs):
@@ -66,105 +78,124 @@ def refresh_vod_content(account_id):
     # Import here to avoid circular import
     from apps.m3u.tasks import send_m3u_update
 
+    if not acquire_task_lock("refresh_vod_content", account_id):
+        message = f"VOD refresh already running for account {account_id}"
+        logger.info(message)
+        try:
+            send_m3u_update(
+                account_id,
+                "vod_refresh",
+                100,
+                status="warning",
+                message=message,
+            )
+        except Exception:
+            logger.debug(
+                "Failed to send duplicate VOD refresh warning for account %s",
+                account_id,
+            )
+        return message
+
     try:
-        account = M3UAccount.objects.get(id=account_id, is_active=True)
+        with TaskLockRenewer("refresh_vod_content", account_id):
+            account = M3UAccount.objects.get(id=account_id, is_active=True)
 
-        if account.account_type not in (
-            M3UAccount.Types.XC,
-            M3UAccount.Types.STALKER,
-        ):
-            logger.warning(f"VOD refresh called for unsupported account {account_id}")
-            return "VOD refresh only available for XtreamCodes and Stalker accounts"
+            if account.account_type not in (
+                M3UAccount.Types.XC,
+                M3UAccount.Types.STALKER,
+            ):
+                logger.warning(f"VOD refresh called for unsupported account {account_id}")
+                return "VOD refresh only available for XtreamCodes and Stalker accounts"
 
-        logger.info(f"Starting batch VOD refresh for account {account.name}")
-        start_time = timezone.now()
+            logger.info(f"Starting batch VOD refresh for account {account.name}")
+            start_time = timezone.now()
 
-        # Send start notification
-        send_m3u_update(account_id, "vod_refresh", 0, status="processing")
+            # Send start notification
+            send_m3u_update(account_id, "vod_refresh", 0, status="processing")
 
-        if account.account_type == M3UAccount.Types.XC:
-            with XtreamCodesClient(
-                account.server_url,
-                account.username,
-                account.password,
-                account.get_user_agent().user_agent
-            ) as client:
+            if account.account_type == M3UAccount.Types.XC:
+                with XtreamCodesClient(
+                    account.server_url,
+                    account.username,
+                    account.password,
+                    account.get_user_agent().user_agent
+                ) as client:
 
-                movie_categories, series_categories = refresh_categories(account.id, client)
+                    movie_categories, series_categories = refresh_categories(account.id, client)
 
-                logger.debug("Fetching relations for filtering category filtering")
-                relations = { rel.category_id: rel for rel in M3UVODCategoryRelation.objects
-                    .filter(m3u_account=account)
+                    logger.debug("Fetching relations for filtering category filtering")
+                    relations = { rel.category_id: rel for rel in M3UVODCategoryRelation.objects
+                        .filter(m3u_account=account)
+                        .select_related("category", "m3u_account")
+                    }
+
+                    # Refresh movies with batch processing (pass scan start time)
+                    refresh_movies(client, account, movie_categories, relations, scan_start_time=start_time)
+
+                    # Refresh series with batch processing (pass scan start time)
+                    refresh_series(client, account, series_categories, relations, scan_start_time=start_time)
+            else:
+                client = StalkerClient(
+                    server_url=account.server_url,
+                    mac=(account.custom_properties or {}).get("mac", ""),
+                    username=account.username or "",
+                    password=account.password or "",
+                    user_agent=getattr(account.user_agent, "user_agent", None),
+                    custom_properties=account.custom_properties or {},
+                )
+                movie_categories, series_categories = refresh_categories(account.id, client=client)
+
+                logger.debug("Fetching relations for Stalker VOD category filtering")
+                relations = {
+                    rel.category_id: rel
+                    for rel in M3UVODCategoryRelation.objects.filter(m3u_account=account)
                     .select_related("category", "m3u_account")
                 }
 
-                # Refresh movies with batch processing (pass scan start time)
-                refresh_movies(client, account, movie_categories, relations, scan_start_time=start_time)
+                refresh_movies(
+                    client,
+                    account,
+                    movie_categories,
+                    relations,
+                    scan_start_time=start_time,
+                )
+                refresh_series(
+                    client,
+                    account,
+                    series_categories,
+                    relations,
+                    scan_start_time=start_time,
+                )
 
-                # Refresh series with batch processing (pass scan start time)
-                refresh_series(client, account, series_categories, relations, scan_start_time=start_time)
-        else:
-            client = StalkerClient(
-                server_url=account.server_url,
-                mac=(account.custom_properties or {}).get("mac", ""),
-                username=account.username or "",
-                password=account.password or "",
-                user_agent=getattr(account.user_agent, "user_agent", None),
-                custom_properties=account.custom_properties or {},
-            )
-            movie_categories, series_categories = refresh_categories(account.id, client=client)
+            end_time = timezone.now()
+            duration = (end_time - start_time).total_seconds()
 
-            logger.debug("Fetching relations for Stalker VOD category filtering")
-            relations = {
-                rel.category_id: rel
-                for rel in M3UVODCategoryRelation.objects.filter(m3u_account=account)
-                .select_related("category", "m3u_account")
-            }
+            logger.info(f"Batch VOD refresh completed for account {account.name} in {duration:.2f} seconds")
 
-            refresh_movies(
-                client,
-                account,
-                movie_categories,
-                relations,
-                scan_start_time=start_time,
-            )
-            refresh_series(
-                client,
-                account,
-                series_categories,
-                relations,
-                scan_start_time=start_time,
-            )
+            if account.account_type in (
+                M3UAccount.Types.XC,
+                M3UAccount.Types.STALKER,
+            ):
+                # Cleanup orphaned VOD content after refresh (scoped to this account only)
+                logger.info(f"Starting cleanup of orphaned VOD content for account {account.name}")
+                cleanup_result = cleanup_orphaned_vod_content(account_id=account_id, scan_start_time=start_time)
+                logger.info(f"VOD cleanup completed: {cleanup_result}")
 
-        end_time = timezone.now()
-        duration = (end_time - start_time).total_seconds()
+            # Send completion notification
+            if account.account_type == M3UAccount.Types.STALKER:
+                movie_count = len(movie_categories)
+                series_count = len(series_categories)
+                completion_message = (
+                    f"Stalker VOD refresh completed in {duration:.2f} seconds "
+                    f"({movie_count} movie categories, {series_count} series categories)"
+                )
+            else:
+                completion_message = f"VOD refresh completed in {duration:.2f} seconds"
 
-        logger.info(f"Batch VOD refresh completed for account {account.name} in {duration:.2f} seconds")
+            send_m3u_update(account_id, "vod_refresh", 100, status="success",
+                           message=completion_message)
 
-        if account.account_type in (
-            M3UAccount.Types.XC,
-            M3UAccount.Types.STALKER,
-        ):
-            # Cleanup orphaned VOD content after refresh (scoped to this account only)
-            logger.info(f"Starting cleanup of orphaned VOD content for account {account.name}")
-            cleanup_result = cleanup_orphaned_vod_content(account_id=account_id, scan_start_time=start_time)
-            logger.info(f"VOD cleanup completed: {cleanup_result}")
-
-        # Send completion notification
-        if account.account_type == M3UAccount.Types.STALKER:
-            movie_count = len(movie_categories)
-            series_count = len(series_categories)
-            completion_message = (
-                f"Stalker VOD refresh completed in {duration:.2f} seconds "
-                f"({movie_count} movie categories, {series_count} series categories)"
-            )
-        else:
-            completion_message = f"VOD refresh completed in {duration:.2f} seconds"
-
-        send_m3u_update(account_id, "vod_refresh", 100, status="success",
-                       message=completion_message)
-
-        return completion_message
+            return completion_message
 
     except Exception as e:
         import traceback
@@ -176,6 +207,14 @@ def refresh_vod_content(account_id):
                        message=f"VOD refresh failed: {str(e)}")
 
         return f"VOD refresh failed: {str(e)}"
+    finally:
+        try:
+            release_task_lock("refresh_vod_content", account_id)
+        except Exception:
+            logger.debug(
+                "Failed to release VOD refresh lock for account %s",
+                account_id,
+            )
 
 def refresh_categories(account_id, client=None):
     account = M3UAccount.objects.get(id=account_id, is_active=True)
@@ -775,35 +814,133 @@ def get_stalker_category_requests(categories_by_provider, relations=None):
     return provider_category_ids
 
 
-def iter_stalker_catalog_batches(client, account, categories_by_provider, relations, content_type):
-    portal_url = get_stalker_vod_portal_url(client, account)
-    fetch_page = client.get_vod_movies if content_type == "movie" else client.get_vod_series
-    provider_category_ids = get_stalker_category_requests(
-        categories_by_provider,
-        relations=relations,
-    )
-    seen_relation_ids = set()
+def get_stalker_catalog_worker_count(account, request_count, client):
+    if request_count <= 1:
+        return 1
 
-    logger.info(
-        "Fetching Stalker %s across %s category contexts",
-        content_type,
-        len(provider_category_ids),
-    )
+    if not supports_parallel_stalker_catalog(client):
+        return 1
 
-    if not provider_category_ids:
-        logger.info(
-            "Skipping Stalker %s fetch because no VOD categories are enabled for account %s",
-            content_type,
-            account.id,
+    configured_workers = (
+        (account.custom_properties or {}).get("stalker_vod_catalog_workers")
+        or DEFAULT_STALKER_CATALOG_WORKERS
+    )
+    try:
+        configured_workers = int(configured_workers)
+    except (TypeError, ValueError):
+        configured_workers = DEFAULT_STALKER_CATALOG_WORKERS
+
+    return max(1, min(configured_workers, request_count))
+
+
+def get_stalker_catalog_page_worker_count(account, client):
+    if not supports_parallel_stalker_catalog(client):
+        return 1
+
+    configured_workers = (
+        (account.custom_properties or {}).get("stalker_vod_catalog_page_workers")
+        or DEFAULT_STALKER_CATALOG_PAGE_WORKERS
+    )
+    try:
+        configured_workers = int(configured_workers)
+    except (TypeError, ValueError):
+        configured_workers = DEFAULT_STALKER_CATALOG_PAGE_WORKERS
+
+    return max(1, min(configured_workers, 8))
+
+
+def clone_stalker_catalog_client(client, account):
+    if callable(getattr(type(client), "clone_for_parallel_catalog", None)):
+        cloned_client = client.clone_for_parallel_catalog()
+    elif isinstance(client, StalkerClient):
+        custom_properties = dict(account.custom_properties or {})
+        if getattr(client, "token", None):
+            custom_properties["token"] = client.token
+        cloned_client = StalkerClient(
+            server_url=account.server_url,
+            mac=(account.custom_properties or {}).get("mac", ""),
+            username=account.username or "",
+            password=account.password or "",
+            user_agent=getattr(account.user_agent, "user_agent", None),
+            custom_properties=custom_properties,
+            timeout=getattr(client, "timeout", 15),
         )
-        return
+    else:
+        return client
 
-    for requested_category_id in provider_category_ids:
-        previous_signature = None
+    vod_portal_url = getattr(client, "vod_portal_url", None)
+    if vod_portal_url:
+        cloned_client.vod_portal_url = vod_portal_url
+    return cloned_client
 
-        for page in range(1, 501):
-            items = fetch_page(portal_url, category_id=requested_category_id, page=page)
+
+def fetch_stalker_category_page(
+    client,
+    account,
+    portal_url,
+    requested_category_id,
+    content_type,
+    page,
+):
+    worker_client = clone_stalker_catalog_client(client, account)
+    fetch_page = (
+        worker_client.get_vod_movies
+        if content_type == "movie"
+        else worker_client.get_vod_series
+    )
+    return fetch_page(portal_url, category_id=requested_category_id, page=page)
+
+
+def iter_stalker_category_batches(
+    client,
+    account,
+    portal_url,
+    requested_category_id,
+    content_type,
+):
+    previous_signature = None
+    seen_relation_ids = set()
+    page_workers = get_stalker_catalog_page_worker_count(account, client)
+    next_page = 1
+    stop_pagination = False
+
+    while next_page <= 500 and not stop_pagination:
+        page_numbers = list(
+            range(next_page, min(next_page + page_workers, 501))
+        )
+        page_results = {}
+
+        if len(page_numbers) == 1:
+            page = page_numbers[0]
+            page_results[page] = fetch_stalker_category_page(
+                client,
+                account,
+                portal_url,
+                requested_category_id,
+                content_type,
+                page,
+            )
+        else:
+            with ThreadPoolExecutor(max_workers=len(page_numbers)) as executor:
+                future_to_page = {
+                    executor.submit(
+                        fetch_stalker_category_page,
+                        client,
+                        account,
+                        portal_url,
+                        requested_category_id,
+                        content_type,
+                        page,
+                    ): page
+                    for page in page_numbers
+                }
+                for future in as_completed(future_to_page):
+                    page_results[future_to_page[future]] = future.result()
+
+        for page in page_numbers:
+            items = page_results.get(page, [])
             if not items:
+                stop_pagination = True
                 break
 
             page_signature = build_stalker_page_signature(items)
@@ -814,6 +951,7 @@ def iter_stalker_catalog_batches(client, account, categories_by_provider, relati
                     requested_category_id,
                     page,
                 )
+                stop_pagination = True
                 break
 
             previous_signature = page_signature
@@ -825,7 +963,10 @@ def iter_stalker_catalog_batches(client, account, categories_by_provider, relati
 
                 normalized_item = dict(item)
                 if requested_category_id not in (None, ""):
-                    normalized_item.setdefault("_requested_category_id", str(requested_category_id))
+                    normalized_item.setdefault(
+                        "_requested_category_id",
+                        str(requested_category_id),
+                    )
 
                 relation_id = extract_stalker_relation_id(normalized_item)
                 if not relation_id:
@@ -850,9 +991,128 @@ def iter_stalker_catalog_batches(client, account, categories_by_provider, relati
                     requested_category_id,
                     page,
                 )
+                stop_pagination = True
                 break
 
             yield page_batch
+
+        next_page = page_numbers[-1] + 1
+
+
+def produce_stalker_category_batches(
+    client,
+    account,
+    portal_url,
+    requested_category_id,
+    content_type,
+    out_queue,
+):
+    try:
+        for batch in iter_stalker_category_batches(
+            client,
+            account,
+            portal_url,
+            requested_category_id,
+            content_type,
+        ):
+            out_queue.put(("batch", batch))
+    except Exception as exc:
+        out_queue.put(("error", exc))
+    finally:
+        out_queue.put(("done", None))
+
+
+def iter_stalker_catalog_batches(client, account, categories_by_provider, relations, content_type):
+    portal_url = get_stalker_vod_portal_url(client, account)
+    provider_category_ids = get_stalker_category_requests(
+        categories_by_provider,
+        relations=relations,
+    )
+    seen_relation_ids = set()
+
+    logger.info(
+        "Fetching Stalker %s across %s category contexts",
+        content_type,
+        len(provider_category_ids),
+    )
+
+    if not provider_category_ids:
+        logger.info(
+            "Skipping Stalker %s fetch because no VOD categories are enabled for account %s",
+            content_type,
+            account.id,
+        )
+        return
+
+    max_workers = get_stalker_catalog_worker_count(
+        account,
+        len(provider_category_ids),
+        client,
+    )
+    logger.info(
+        "Using %s worker(s) for Stalker %s catalog fetch",
+        max_workers,
+        content_type,
+    )
+
+    if max_workers == 1:
+        for requested_category_id in provider_category_ids:
+            for raw_batch in iter_stalker_category_batches(
+                client,
+                account,
+                portal_url,
+                requested_category_id,
+                content_type,
+            ):
+                page_batch = []
+                for item in raw_batch:
+                    relation_id = item.get("_stalker_relation_id") or extract_stalker_relation_id(item)
+                    if not relation_id or relation_id in seen_relation_ids:
+                        continue
+
+                    item["_stalker_relation_id"] = relation_id
+                    seen_relation_ids.add(relation_id)
+                    page_batch.append(item)
+
+                if page_batch:
+                    yield page_batch
+    else:
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            queues = []
+            for requested_category_id in provider_category_ids:
+                out_queue = Queue(maxsize=4)
+                queues.append(out_queue)
+                executor.submit(
+                    produce_stalker_category_batches,
+                    client,
+                    account,
+                    portal_url,
+                    requested_category_id,
+                    content_type,
+                    out_queue,
+                )
+
+            for out_queue in queues:
+                while True:
+                    event_type, payload = out_queue.get()
+                    if event_type == "batch":
+                        raw_batch = payload
+                        page_batch = []
+                        for item in raw_batch:
+                            relation_id = item.get("_stalker_relation_id") or extract_stalker_relation_id(item)
+                            if not relation_id or relation_id in seen_relation_ids:
+                                continue
+
+                            item["_stalker_relation_id"] = relation_id
+                            seen_relation_ids.add(relation_id)
+                            page_batch.append(item)
+
+                        if page_batch:
+                            yield page_batch
+                    elif event_type == "error":
+                        raise payload
+                    elif event_type == "done":
+                        break
 
 
 def collect_stalker_paginated_items(
@@ -1176,7 +1436,7 @@ def process_movie_batch(account, batch, categories, relations, scan_start_time=N
     name_year_keys = [k for k in movie_entries.keys() if k.startswith('name_')]
     if name_year_keys:
         name_year_pairs = [
-            (movie_keys[k]['props']['name'], movie_keys[k]['props'].get('year'))
+            (movie_entries[k]['props']['name'], movie_entries[k]['props'].get('year'))
             for k in name_year_keys
         ]
         for key_tuple, movie in lookup_by_name_year(Movie, name_year_pairs).items():
@@ -1590,7 +1850,7 @@ def process_series_batch(account, batch, categories, relations, scan_start_time=
     name_year_keys = [k for k in series_entries.keys() if k.startswith('name_')]
     if name_year_keys:
         name_year_pairs = [
-            (series_keys[k]['props']['name'], series_keys[k]['props'].get('year'))
+            (series_entries[k]['props']['name'], series_entries[k]['props'].get('year'))
             for k in name_year_keys
         ]
         for key_tuple, series in lookup_by_name_year(Series, name_year_pairs).items():
@@ -2553,6 +2813,33 @@ def refresh_series_episodes(account, series, external_series_id, episodes_data=N
         logger.error(f"Error refreshing episodes for series {series.name}: {str(e)}")
 
 
+@shared_task
+def refresh_series_relation_episodes_task(series_relation_id):
+    """Refresh one series relation's provider details/episodes in a Celery worker."""
+    try:
+        relation = (
+            M3USeriesRelation.objects.select_related("m3u_account", "series")
+            .get(id=series_relation_id)
+        )
+    except M3USeriesRelation.DoesNotExist:
+        logger.warning(
+            "Skipping series episode refresh for missing relation %s",
+            series_relation_id,
+        )
+        return "Series relation not found"
+
+    account = relation.m3u_account
+    if not account or not account.is_active:
+        logger.info(
+            "Skipping series episode refresh for relation %s because account is inactive",
+            series_relation_id,
+        )
+        return "Account inactive"
+
+    refresh_series_episodes(account, relation.series, relation.external_series_id)
+    return f"Refreshed series relation {series_relation_id}"
+
+
 def batch_process_episodes(account, series, episodes_data, scan_start_time=None, series_relation=None):
     """Process episodes in batches for better performance.
 
@@ -2873,9 +3160,15 @@ def batch_refresh_series_episodes(account_id, series_ids=None):
     try:
         account = M3UAccount.objects.get(id=account_id, is_active=True)
 
-        if account.account_type != M3UAccount.Types.XC:
-            logger.warning(f"Episode refresh called for non-XC account {account_id}")
-            return "Episode refresh only available for XtreamCodes accounts"
+        if account.account_type not in (
+            M3UAccount.Types.XC,
+            M3UAccount.Types.STALKER,
+        ):
+            logger.warning(
+                "Episode refresh called for unsupported account %s",
+                account_id,
+            )
+            return "Episode refresh only available for XtreamCodes and Stalker accounts"
 
         # Determine which series to refresh
         if series_ids:
@@ -2897,28 +3190,40 @@ def batch_refresh_series_episodes(account_id, series_ids=None):
             ).select_related('series')
 
         logger.info(f"Batch refreshing episodes for {series_relations.count()} series")
+        relation_ids = list(series_relations.values_list("id", flat=True))
+        if not relation_ids:
+            return "Batch episode refresh completed for 0 series"
 
-        with XtreamCodesClient(
-            account.server_url,
-            account.username,
-            account.password,
-            account.get_user_agent().user_agent
-        ) as client:
-
+        if current_app.conf.task_always_eager:
             refreshed_count = 0
-            for relation in series_relations:
+            for relation_id in relation_ids:
                 try:
-                    refresh_series_episodes(
-                        account,
-                        relation.series,
-                        relation.external_series_id
-                    )
+                    refresh_series_relation_episodes_task(relation_id)
                     refreshed_count += 1
                 except Exception as e:
-                    logger.error(f"Error refreshing episodes for series {relation.series.name}: {str(e)}")
+                    logger.error(
+                        "Error refreshing episodes for relation %s: %s",
+                        relation_id,
+                        e,
+                    )
 
-        logger.info(f"Batch episode refresh completed for {refreshed_count} series")
-        return f"Batch episode refresh completed for {refreshed_count} series"
+            logger.info(f"Batch episode refresh completed for {refreshed_count} series")
+            return f"Batch episode refresh completed for {refreshed_count} series"
+
+        job = group(
+            refresh_series_relation_episodes_task.s(relation_id)
+            for relation_id in relation_ids
+        ).apply_async()
+        logger.info(
+            "Queued batch episode refresh for %s series relations on account %s (group_id=%s)",
+            len(relation_ids),
+            account_id,
+            job.id,
+        )
+        return (
+            f"Queued batch episode refresh for {len(relation_ids)} series "
+            f"(group_id={job.id})"
+        )
 
     except Exception as e:
         logger.error(f"Error in batch episode refresh for account {account_id}: {str(e)}")

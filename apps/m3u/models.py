@@ -353,7 +353,7 @@ class M3UAccountProfile(models.Model):
 
 
 @receiver(models.signals.post_save, sender=M3UAccount)
-def create_profile_for_m3u_account(sender, instance, created, **kwargs):
+def create_profile_for_m3u_account(sender, instance, created, update_fields=None, **kwargs):
     """Automatically create an M3UAccountProfile when M3UAccount is created."""
     if created:
         M3UAccountProfile.objects.create(
@@ -366,6 +366,9 @@ def create_profile_for_m3u_account(sender, instance, created, **kwargs):
             replace_pattern="$1",
         )
     else:
+        if update_fields is not None and "max_streams" not in update_fields:
+            return
+
         profile = M3UAccountProfile.objects.get(
             m3u_account=instance,
             is_default=True,

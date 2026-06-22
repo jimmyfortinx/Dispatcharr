@@ -133,6 +133,23 @@ class StalkerPhase0SignalTests(TestCase):
 
         mock_delay.assert_called_once()
 
+    @patch("apps.m3u.models.M3UAccountProfile.objects.get")
+    def test_updating_custom_properties_does_not_touch_default_profile(self, mock_get):
+        account = M3UAccount.objects.create(
+            name="Signal Existing Stalker",
+            account_type=M3UAccount.Types.STALKER,
+            server_url="http://portal.example.com/c/",
+            custom_properties={"mac": "00:1A:79:00:00:05"},
+        )
+
+        account.custom_properties = {
+            **account.custom_properties,
+            "token": "TOKEN-123",
+        }
+        account.save(update_fields=["custom_properties"])
+
+        mock_get.assert_not_called()
+
 User = get_user_model()
 
 
