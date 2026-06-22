@@ -1,3 +1,4 @@
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
@@ -15,6 +16,7 @@ from apps.vod.models import (
     Movie,
     Series,
 )
+from apps.vod.tasks import get_stalker_vod_portal_url
 
 
 User = get_user_model()
@@ -260,6 +262,62 @@ class StalkerPhase10ClientTests(TestCase):
                 "episode_id": "0",
             },
             with_auth=True,
+        )
+
+
+class StalkerPhase10PortalCacheTests(TestCase):
+    def setUp(self):
+        self.account = M3UAccount.objects.create(
+            name="Stalker Portal Cache",
+            account_type=M3UAccount.Types.STALKER,
+            server_url="http://portal.example.com/c/",
+            username="demo",
+            password="secret",
+            custom_properties={"mac": "00:1A:79:00:00:72"},
+        )
+
+    def test_series_refresh_reuses_cached_vod_portal_url(self):
+        self.account.custom_properties["stalker_vod_portal_url"] = (
+            "http://portal.example.com/stalker_portal/server/load.php"
+        )
+        self.account.save(update_fields=["custom_properties"])
+        client = StalkerClient(
+            server_url=self.account.server_url,
+            mac=self.account.custom_properties["mac"],
+        )
+
+        with patch.object(client, "discover_vod_categories") as mock_discover:
+            portal_url = get_stalker_vod_portal_url(client, self.account)
+
+        self.assertEqual(
+            portal_url,
+            "http://portal.example.com/stalker_portal/server/load.php",
+        )
+        self.assertEqual(client.vod_portal_url, portal_url)
+        mock_discover.assert_not_called()
+
+    def test_series_refresh_persists_discovered_vod_portal_url(self):
+        client = StalkerClient(
+            server_url=self.account.server_url,
+            mac=self.account.custom_properties["mac"],
+        )
+
+        with patch.object(client, "discover_vod_categories") as mock_discover:
+            mock_discover.return_value = SimpleNamespace(
+                normalized_portal_url=(
+                    "http://portal.example.com/stalker_portal/server/load.php"
+                )
+            )
+            portal_url = get_stalker_vod_portal_url(client, self.account)
+
+        self.assertEqual(
+            portal_url,
+            "http://portal.example.com/stalker_portal/server/load.php",
+        )
+        self.account.refresh_from_db()
+        self.assertEqual(
+            self.account.custom_properties["stalker_vod_portal_url"],
+            "http://portal.example.com/stalker_portal/server/load.php",
         )
 
     def test_create_vod_link_uses_vod_type(self):

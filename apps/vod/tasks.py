@@ -755,11 +755,25 @@ def get_stalker_vod_portal_url(client, account):
     if portal_url:
         return portal_url
 
+    account_properties = dict(getattr(account, "custom_properties", None) or {})
+    portal_url = (
+        str(account_properties.get("stalker_vod_portal_url") or "").strip()
+        or str(account_properties.get("stalker_portal_url") or "").strip()
+    )
+    if portal_url:
+        client.vod_portal_url = portal_url
+        return portal_url
+
     if str(account.server_url or "").rstrip("/").endswith(("/server/load.php", "/portal.php")):
+        client.vod_portal_url = account.server_url
         return account.server_url
 
     discovery = client.discover_vod_categories()
     client.vod_portal_url = discovery.normalized_portal_url
+    if account_properties.get("stalker_vod_portal_url") != discovery.normalized_portal_url:
+        account_properties["stalker_vod_portal_url"] = discovery.normalized_portal_url
+        account.custom_properties = account_properties
+        account.save(update_fields=["custom_properties"])
     return discovery.normalized_portal_url
 
 
