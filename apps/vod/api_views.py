@@ -862,6 +862,14 @@ class UnifiedContentViewSet(viewsets.ReadOnlyModelViewSet):
         except KeyError:
             return [Authenticated()]
 
+    @staticmethod
+    def _sql_vod_enabled_account_clause(account_alias):
+        return (
+            f"{account_alias}.is_active = true "
+            f"AND {account_alias}.account_type IN ('{M3UAccount.Types.XC}', '{M3UAccount.Types.STALKER}') "
+            f"AND {account_alias}.custom_properties->>'enable_vod' = 'true'"
+        )
+
     def list(self, request, *args, **kwargs):
         """Override list to handle unified content properly - database-level approach"""
         import logging
@@ -889,8 +897,20 @@ class UnifiedContentViewSet(viewsets.ReadOnlyModelViewSet):
             # Build WHERE clauses
             where_conditions = [
                 # Only active content
-                "movies.id IN (SELECT DISTINCT movie_id FROM vod_m3umovierelation mmr JOIN m3u_m3uaccount ma ON mmr.m3u_account_id = ma.id WHERE ma.is_active = true)",
-                "series.id IN (SELECT DISTINCT series_id FROM vod_m3useriesrelation msr JOIN m3u_m3uaccount ma ON msr.m3u_account_id = ma.id WHERE ma.is_active = true)"
+                (
+                    "movies.id IN ("
+                    "SELECT DISTINCT movie_id FROM vod_m3umovierelation mmr "
+                    "JOIN m3u_m3uaccount ma ON mmr.m3u_account_id = ma.id "
+                    f"WHERE {self._sql_vod_enabled_account_clause('ma')}"
+                    ")"
+                ),
+                (
+                    "series.id IN ("
+                    "SELECT DISTINCT series_id FROM vod_m3useriesrelation msr "
+                    "JOIN m3u_m3uaccount ma ON msr.m3u_account_id = ma.id "
+                    f"WHERE {self._sql_vod_enabled_account_clause('ma')}"
+                    ")"
+                ),
             ]
 
             movie_params = []
@@ -907,18 +927,46 @@ class UnifiedContentViewSet(viewsets.ReadOnlyModelViewSet):
                 if '|' in category:
                     cat_name, cat_type = category.rsplit('|', 1)
                     if cat_type == 'movie':
-                        where_conditions[0] += " AND movies.id IN (SELECT movie_id FROM vod_m3umovierelation mmr JOIN vod_vodcategory c ON mmr.category_id = c.id WHERE c.name = %s)"
+                        where_conditions[0] += (
+                            " AND movies.id IN ("
+                            "SELECT movie_id FROM vod_m3umovierelation mmr "
+                            "JOIN vod_vodcategory c ON mmr.category_id = c.id "
+                            "JOIN m3u_m3uaccount ma ON mmr.m3u_account_id = ma.id "
+                            f"WHERE c.name = %s AND {self._sql_vod_enabled_account_clause('ma')}"
+                            ")"
+                        )
                         where_conditions[1] = "1=0"  # Exclude series
                         movie_params.append(cat_name)
                         series_params = []  # no params needed for "1=0"
                     elif cat_type == 'series':
-                        where_conditions[1] += " AND series.id IN (SELECT series_id FROM vod_m3useriesrelation msr JOIN vod_vodcategory c ON msr.category_id = c.id WHERE c.name = %s)"
+                        where_conditions[1] += (
+                            " AND series.id IN ("
+                            "SELECT series_id FROM vod_m3useriesrelation msr "
+                            "JOIN vod_vodcategory c ON msr.category_id = c.id "
+                            "JOIN m3u_m3uaccount ma ON msr.m3u_account_id = ma.id "
+                            f"WHERE c.name = %s AND {self._sql_vod_enabled_account_clause('ma')}"
+                            ")"
+                        )
                         where_conditions[0] = "1=0"  # Exclude movies
                         series_params.append(cat_name)
                         movie_params = []  # no params needed for "1=0"
                 else:
-                    where_conditions[0] += " AND movies.id IN (SELECT movie_id FROM vod_m3umovierelation mmr JOIN vod_vodcategory c ON mmr.category_id = c.id WHERE c.name = %s)"
-                    where_conditions[1] += " AND series.id IN (SELECT series_id FROM vod_m3useriesrelation msr JOIN vod_vodcategory c ON msr.category_id = c.id WHERE c.name = %s)"
+                    where_conditions[0] += (
+                        " AND movies.id IN ("
+                        "SELECT movie_id FROM vod_m3umovierelation mmr "
+                        "JOIN vod_vodcategory c ON mmr.category_id = c.id "
+                        "JOIN m3u_m3uaccount ma ON mmr.m3u_account_id = ma.id "
+                        f"WHERE c.name = %s AND {self._sql_vod_enabled_account_clause('ma')}"
+                        ")"
+                    )
+                    where_conditions[1] += (
+                        " AND series.id IN ("
+                        "SELECT series_id FROM vod_m3useriesrelation msr "
+                        "JOIN vod_vodcategory c ON msr.category_id = c.id "
+                        "JOIN m3u_m3uaccount ma ON msr.m3u_account_id = ma.id "
+                        f"WHERE c.name = %s AND {self._sql_vod_enabled_account_clause('ma')}"
+                        ")"
+                    )
                     movie_params.append(category)
                     series_params.append(category)
 
