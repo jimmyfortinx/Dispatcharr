@@ -14,6 +14,7 @@ from .models import (
 )
 from datetime import datetime
 import logging
+import base64
 import json
 import re
 
@@ -2210,6 +2211,36 @@ def extract_stalker_vod_cmd(item):
     return ""
 
 
+def extract_stalker_target_container_from_cmd(cmd):
+    text = str(cmd or "").strip()
+    if not text:
+        return ""
+
+    normalized = text
+    missing_padding = len(normalized) % 4
+    if missing_padding:
+        normalized += "=" * (4 - missing_padding)
+
+    try:
+        payload = json.loads(base64.b64decode(normalized, validate=False).decode("utf-8"))
+    except (ValueError, TypeError, json.JSONDecodeError, UnicodeDecodeError):
+        return ""
+
+    if not isinstance(payload, dict):
+        return ""
+
+    target_container = payload.get("target_container")
+    if isinstance(target_container, list):
+        for value in target_container:
+            text = str(value or "").strip().lstrip(".").lower()
+            if text:
+                return text
+        return ""
+
+    text = str(target_container or "").strip().lstrip(".").lower()
+    return text
+
+
 def extract_int_from_value(value):
     if value in (None, ""):
         return None
@@ -2391,6 +2422,10 @@ def extract_stalker_container_extension(item):
 
     cmd = extract_stalker_vod_cmd(item)
     if cmd:
+        target_container = extract_stalker_target_container_from_cmd(cmd)
+        if target_container:
+            return target_container
+
         target = cmd.split()[-1].split("?", 1)[0].rstrip("/")
         if "." in target:
             extension = target.rsplit(".", 1)[-1].lower()

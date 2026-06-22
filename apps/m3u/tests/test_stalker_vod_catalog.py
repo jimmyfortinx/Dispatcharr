@@ -743,6 +743,33 @@ class StalkerPhase12MovieImportTests(TestCase):
             "ffmpeg http://provider.example.com/movie-b",
         )
 
+    def test_refresh_movies_uses_target_container_from_stalker_cmd_payload(self):
+        client = Mock()
+        client.vod_portal_url = "http://portal.example.com/stalker_portal/server/load.php"
+        client.get_vod_movies.side_effect = [
+            [
+                {
+                    "id": "393408",
+                    "title": "Zootopia",
+                    "year": "2016",
+                    "category_id": "10",
+                    "cmd": "eyJ0eXBlIjoibW92aWUiLCJzdHJlYW1faWQiOiIzOTM0MDgiLCJ0YXJnZXRfY29udGFpbmVyIjoiW1wibWt2XCJdIn0=",
+                }
+            ],
+            [],
+        ]
+
+        refresh_movies(
+            client,
+            self.account,
+            {"10": self.category},
+            {self.category.id: self.category_relation},
+            scan_start_time=self.scan_start_time,
+        )
+
+        relation = M3UMovieRelation.objects.get(m3u_account=self.account)
+        self.assertEqual(relation.container_extension, "mkv")
+
     def test_iter_stalker_catalog_batches_fetches_categories_in_parallel(self):
         class SharedCatalogState:
             def __init__(self):
