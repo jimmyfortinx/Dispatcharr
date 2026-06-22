@@ -2816,28 +2816,34 @@ def refresh_series_episodes(account, series, external_series_id, episodes_data=N
 @shared_task
 def refresh_series_relation_episodes_task(series_relation_id):
     """Refresh one series relation's provider details/episodes in a Celery worker."""
+    if not acquire_task_lock("refresh_series_relation_episodes", series_relation_id):
+        return f"Refresh already in progress for relation {series_relation_id}"
+
     try:
-        relation = (
-            M3USeriesRelation.objects.select_related("m3u_account", "series")
-            .get(id=series_relation_id)
-        )
-    except M3USeriesRelation.DoesNotExist:
-        logger.warning(
-            "Skipping series episode refresh for missing relation %s",
-            series_relation_id,
-        )
-        return "Series relation not found"
+        try:
+            relation = (
+                M3USeriesRelation.objects.select_related("m3u_account", "series")
+                .get(id=series_relation_id)
+            )
+        except M3USeriesRelation.DoesNotExist:
+            logger.warning(
+                "Skipping series episode refresh for missing relation %s",
+                series_relation_id,
+            )
+            return "Series relation not found"
 
-    account = relation.m3u_account
-    if not account or not account.is_active:
-        logger.info(
-            "Skipping series episode refresh for relation %s because account is inactive",
-            series_relation_id,
-        )
-        return "Account inactive"
+        account = relation.m3u_account
+        if not account or not account.is_active:
+            logger.info(
+                "Skipping series episode refresh for relation %s because account is inactive",
+                series_relation_id,
+            )
+            return "Account inactive"
 
-    refresh_series_episodes(account, relation.series, relation.external_series_id)
-    return f"Refreshed series relation {series_relation_id}"
+        refresh_series_episodes(account, relation.series, relation.external_series_id)
+        return f"Refreshed series relation {series_relation_id}"
+    finally:
+        release_task_lock("refresh_series_relation_episodes", series_relation_id)
 
 
 def batch_process_episodes(account, series, episodes_data, scan_start_time=None, series_relation=None):

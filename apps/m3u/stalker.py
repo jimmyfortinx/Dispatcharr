@@ -887,6 +887,9 @@ class StalkerClient:
         self.prepare_authenticated_session(portal_url)
         self.watchdog_update(portal_url)
 
+    def prepare_vod_playback_session(self, portal_url):
+        self.prepare_authenticated_session(portal_url)
+
     def _should_refresh_channel_cmd(self, exc):
         message = str(exc).lower()
         refresh_markers = (
@@ -922,7 +925,7 @@ class StalkerClient:
         return self.create_link(portal_url, fresh_cmd)
 
     def _resolve_vod_playback_url_once(self, portal_url, cmd, series=None):
-        self.prepare_playback_session(portal_url)
+        self.prepare_vod_playback_session(portal_url)
         return self.create_vod_link(portal_url, cmd, series=series)
 
     def _should_retry_playback_resolution(self, exc):

@@ -15,7 +15,12 @@ from django.views.decorators.csrf import csrf_exempt
 from apps.vod.models import Movie, Series, Episode, M3UMovieRelation, M3UEpisodeRelation
 from apps.vod.resolvers import resolve_vod_stream_context
 from apps.m3u.models import M3UAccount, M3UAccountProfile
-from apps.proxy.vod_proxy.multi_worker_connection_manager import MultiWorkerVODConnectionManager, infer_content_type_from_url, get_vod_client_stop_key
+from apps.proxy.vod_proxy.multi_worker_connection_manager import (
+    MultiWorkerVODConnectionManager,
+    RedisBackedVODConnection,
+    infer_content_type_from_url,
+    get_vod_client_stop_key,
+)
 from .utils import get_client_info, create_vod_response
 from rest_framework.decorators import api_view, authentication_classes, permission_classes
 from rest_framework.permissions import AllowAny
@@ -31,6 +36,30 @@ from core.utils import dispatcharr_user_agent
 logger = logging.getLogger(__name__)
 
 _request_times = {}
+
+
+def _load_existing_vod_session_target(session_id):
+    """Return the stored upstream target for an existing VOD session, if any."""
+    if not session_id:
+        return None
+
+    try:
+        connection = RedisBackedVODConnection(session_id)
+        state = connection._get_connection_state()
+    except Exception as exc:
+        logger.warning(
+            f"[VOD-SESSION] Failed to load existing session target for {session_id}: {exc}"
+        )
+        return None
+
+    if not state or not state.stream_url:
+        return None
+
+    return {
+        "url": state.stream_url,
+        "user_agent": state.headers.get("User-Agent") if state.headers else None,
+        "input_headers": state.headers or None,
+    }
 
 
 def _get_content_and_relation(content_type, content_id, preferred_m3u_account_id=None, preferred_stream_id=None):
@@ -270,6 +299,18 @@ def _get_stream_context_from_relation(relation):
             "user_agent": None,
             "input_headers": None,
         }
+
+
+def _get_stream_context_for_request(relation, session_id=None):
+    """Prefer a reusable session target before resolving a fresh provider URL."""
+    existing_target = _load_existing_vod_session_target(session_id)
+    if existing_target:
+        logger.info(
+            f"[VOD-SESSION] Reusing stored upstream target for session {session_id}"
+        )
+        return existing_target
+
+    return _get_stream_context_from_relation(relation)
 
 def _get_m3u_profile(m3u_account, profile_id, session_id=None):
     """Get appropriate M3U profile for streaming using Redis-based viewer counts
@@ -589,7 +630,7 @@ def stream_vod(request, content_type, content_id, session_id=None, profile_id=No
         logger.info(f"[VOD-ACCOUNT] Using M3U account: {m3u_account.name}")
 
         # Resolve provider-specific playback context before profile transforms.
-        stream_context = _get_stream_context_from_relation(relation)
+        stream_context = _get_stream_context_for_request(relation, session_id=session_id)
         stream_url = stream_context.get("url")
         logger.info(f"[VOD-CONTENT] Content URL: {stream_url or 'No URL found'}")
 
@@ -704,7 +745,7 @@ def head_vod(request, content_type, content_id, session_id=None, profile_id=None
 
         # Get M3U account and stream URL
         m3u_account = relation.m3u_account
-        stream_context = _get_stream_context_from_relation(relation)
+        stream_context = _get_stream_context_for_request(relation, session_id=session_id)
         stream_url = stream_context.get("url")
         if not stream_url:
             logger.error(f"[VOD-HEAD] No stream URL available for {content_type} {content_id}")

@@ -365,17 +365,13 @@ const SeriesModal = ({ series, opened, onClose }) => {
       fetchSeriesInfo(series.id)
         .then((details) => {
           setDetailedSeries(details);
-          // Check if episodes were fetched
-          if (!details.episodes_fetched) {
-            // Episodes not yet fetched, may need to wait for background fetch
-          }
         })
         .catch((error) => {
           console.warn(
             'Failed to fetch series details, using basic info:',
             error
           );
-          setDetailedSeries(series); // Fallback to basic data
+          setDetailedSeries(series);
         })
         .finally(() => {
           setLoadingDetails(false);
@@ -387,8 +383,8 @@ const SeriesModal = ({ series, opened, onClose }) => {
         .then((providersData) => {
           setProviders(providersData);
           // Set the first provider as default if none selected
-          if (providersData.length > 0 && !selectedProvider) {
-            setSelectedProvider(providersData[0]);
+          if (providersData.length > 0) {
+            setSelectedProvider((current) => current || providersData[0]);
           }
         })
         .catch((error) => {
@@ -399,7 +395,7 @@ const SeriesModal = ({ series, opened, onClose }) => {
           setLoadingProviders(false);
         });
     }
-  }, [opened, series, fetchSeriesInfo, fetchSeriesProviders, selectedProvider]);
+  }, [opened, series, fetchSeriesInfo, fetchSeriesProviders]);
 
   useEffect(() => {
     if (!opened) {

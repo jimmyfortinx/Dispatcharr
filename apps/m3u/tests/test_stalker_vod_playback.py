@@ -65,7 +65,7 @@ class StalkerPhase14MovieResolverTests(TestCase):
 
         with patch.object(
             client,
-            "prepare_playback_session",
+            "prepare_vod_playback_session",
             side_effect=fake_prepare,
         ) as mock_prepare, patch.object(
             client,
@@ -84,6 +84,31 @@ class StalkerPhase14MovieResolverTests(TestCase):
         self.assertEqual(client.token, "NEW-TOKEN")
         self.assertEqual(mock_prepare.call_count, 2)
         self.assertEqual(mock_create_vod_link.call_count, 2)
+
+    def test_prepare_vod_playback_session_skips_watchdog(self):
+        client = StalkerClient(
+            server_url=self.account.server_url,
+            mac="00:1A:79:00:00:94",
+            username=self.account.username,
+            password=self.account.password,
+            custom_properties={"token": "OLD-TOKEN"},
+        )
+
+        with patch.object(
+            client,
+            "prepare_authenticated_session",
+        ) as mock_prepare_authenticated, patch.object(
+            client,
+            "watchdog_update",
+        ) as mock_watchdog:
+            client.prepare_vod_playback_session(
+                "http://portal.example.com/stalker_portal/server/load.php"
+            )
+
+        mock_prepare_authenticated.assert_called_once_with(
+            "http://portal.example.com/stalker_portal/server/load.php"
+        )
+        mock_watchdog.assert_not_called()
 
     @patch("apps.vod.resolvers.StalkerClient.resolve_vod_playback_url", autospec=True)
     @patch("apps.vod.resolvers.StalkerClient.discover_vod_categories", autospec=True)
@@ -291,7 +316,7 @@ from apps.m3u.stalker import DEFAULT_USER_AGENT, StalkerClient
 from apps.proxy.vod_proxy.multi_worker_connection_manager import (
     RedisBackedVODConnection,
 )
-from apps.proxy.vod_proxy.views import VODStreamView
+from apps.proxy.vod_proxy.views import VODStreamView, _get_stream_context_for_request
 from apps.vod.models import Episode, M3UEpisodeRelation, Series
 from apps.vod.resolvers import resolve_vod_stream_context
 
@@ -623,3 +648,73 @@ class StalkerPhase15SessionRefreshTests(TestCase):
             final_state.final_url,
             "http://fresh-cdn.example.com/episode-1.mkv",
         )
+
+
+class StalkerPhase15SessionReuseTests(TestCase):
+    def setUp(self):
+        self.account = M3UAccount.objects.create(
+            name="Stalker Reuse Playback",
+            account_type=M3UAccount.Types.STALKER,
+            server_url="http://portal.example.com/c/",
+            custom_properties={
+                "mac": "00:1A:79:00:00:99",
+                "enable_vod": True,
+            },
+        )
+        self.series = Series.objects.create(name="Reuse Series")
+        self.episode = Episode.objects.create(
+            series=self.series,
+            season_number=1,
+            episode_number=1,
+            name="Episode 1",
+        )
+        self.relation = M3UEpisodeRelation.objects.create(
+            m3u_account=self.account,
+            episode=self.episode,
+            stream_id="1002",
+            custom_properties={
+                "provider_type": "stalker",
+                "cmd": "ffmpeg http://provider.example.com/episode-1002.mkv",
+            },
+        )
+
+    @patch("apps.proxy.vod_proxy.views.resolve_vod_stream_context")
+    def test_existing_session_target_skips_fresh_stalker_resolution(
+        self,
+        mock_resolve_vod_stream_context,
+    ):
+        fake_redis = _FakeRedis()
+        connection = RedisBackedVODConnection(
+            "phase15-reuse-session",
+            redis_client=fake_redis,
+        )
+        connection.create_connection(
+            stream_url="http://stored.example.com/episode-1002.mkv",
+            headers={
+                "Authorization": "Bearer STORED-TOKEN",
+                "User-Agent": "StoredAgent/1.0",
+            },
+            m3u_profile_id=1,
+        )
+
+        with patch(
+            "apps.proxy.vod_proxy.views.RedisBackedVODConnection",
+            side_effect=lambda session_id: RedisBackedVODConnection(
+                session_id,
+                redis_client=fake_redis,
+            ),
+        ):
+            stream_context = _get_stream_context_for_request(
+                self.relation,
+                session_id="phase15-reuse-session",
+            )
+
+        self.assertEqual(
+            stream_context["url"],
+            "http://stored.example.com/episode-1002.mkv",
+        )
+        self.assertEqual(
+            stream_context["input_headers"]["Authorization"],
+            "Bearer STORED-TOKEN",
+        )
+        mock_resolve_vod_stream_context.assert_not_called()

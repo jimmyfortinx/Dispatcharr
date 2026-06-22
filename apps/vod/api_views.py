@@ -696,13 +696,11 @@ class SeriesViewSet(viewsets.ReadOnlyModelViewSet):
 
             if force_refresh:
                 logger.debug(f"Refreshing series {series.id} data from provider")
-                # Use existing refresh logic with external_series_id
-                from .tasks import refresh_series_episodes
                 account = relation.m3u_account
                 if account and account.is_active:
                     refresh_series_episodes(account, series, relation.external_series_id)
-                    series.refresh_from_db()  # Reload from database after refresh
-                    relation.refresh_from_db()  # Reload relation too
+                    series.refresh_from_db()
+                    relation.refresh_from_db()
 
             relation_display_name = _extract_relation_display_name(relation, series.name)
             logo_payload = _build_vod_logo_payload(request, series.logo)
