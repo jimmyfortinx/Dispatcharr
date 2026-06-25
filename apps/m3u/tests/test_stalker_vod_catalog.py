@@ -528,6 +528,63 @@ class StalkerPhase11CategoryDiscoveryTests(TestCase):
         self.assertIn("2 movie categories, 1 series categories", success_update.kwargs["message"])
 
     @patch("apps.m3u.tasks.send_m3u_update")
+    @patch("apps.vod.tasks.release_task_lock")
+    @patch("apps.vod.tasks.acquire_task_lock", return_value=True)
+    @patch("apps.vod.tasks.cleanup_orphaned_vod_content")
+    @patch("apps.vod.tasks.refresh_series")
+    @patch("apps.vod.tasks.refresh_movies")
+    @patch("apps.vod.tasks.refresh_categories")
+    def test_refresh_vod_content_for_stalker_emits_intermediate_progress_updates(
+        self,
+        mock_refresh_categories,
+        mock_refresh_movies,
+        mock_refresh_series,
+        mock_cleanup_orphaned_vod_content,
+        mock_acquire_task_lock,
+        mock_release_task_lock,
+        mock_send_m3u_update,
+    ):
+        mock_refresh_categories.return_value = (
+            {"10": object()},
+            {"20": object()},
+        )
+        mock_cleanup_orphaned_vod_content.return_value = "cleanup complete"
+
+        def series_side_effect(*args, **kwargs):
+            progress_callback = kwargs.get("progress_callback")
+            self.assertIsNotNone(progress_callback)
+            progress_callback(1, 2)
+            progress_callback(2, 2)
+
+        mock_refresh_series.side_effect = series_side_effect
+
+        refresh_vod_content(self.account.id)
+
+        intermediate_updates = [
+            call
+            for call in mock_send_m3u_update.call_args_list
+            if call.args[1] == "vod_refresh" and 0 < call.args[2] < 100
+        ]
+
+        self.assertTrue(intermediate_updates)
+        self.assertTrue(
+            any(
+                call.kwargs.get("message") == "Importing movie catalog..."
+                for call in intermediate_updates
+            )
+        )
+        self.assertTrue(
+            any(
+                "Fetching TV show details and episodes... (1/2)"
+                == call.kwargs.get("message")
+                for call in intermediate_updates
+            )
+        )
+        self.assertTrue(
+            any(call.kwargs.get("items_processed") == 2 for call in intermediate_updates)
+        )
+
+    @patch("apps.m3u.tasks.send_m3u_update")
     @patch("apps.vod.tasks.acquire_task_lock", return_value=False)
     def test_refresh_vod_content_skips_when_refresh_already_running(
         self,
@@ -1619,6 +1676,7 @@ from apps.vod.models import (
 from apps.vod.tasks import (
     batch_refresh_series_episodes,
     process_series_batch,
+    refresh_series,
     refresh_series_episodes,
     refresh_series_relation_episodes_task,
 )
@@ -1803,6 +1861,50 @@ class StalkerPhase13BatchSeriesRefreshTests(TestCase):
 
 
 class StalkerPhase13SeriesImportTests(StalkerPhase13Base):
+    @patch("apps.vod.tasks.refresh_series_episodes")
+    @patch("apps.vod.tasks.iter_stalker_catalog_batches")
+    def test_refresh_series_catalog_also_triggers_stalker_episode_discovery(
+        self,
+        mock_iter_stalker_catalog_batches,
+        mock_refresh_series_episodes,
+    ):
+        category = VODCategory.objects.create(name="Drama", category_type="series")
+        category_relation = M3UVODCategoryRelation.objects.create(
+            m3u_account=self.account,
+            category=category,
+            enabled=True,
+            custom_properties={
+                "stalker_category_id": "20",
+                "stalker_category_type": "series",
+            },
+        )
+        relations = {category.id: category_relation}
+
+        mock_iter_stalker_catalog_batches.return_value = [
+            [
+                {
+                    "id": self.external_series_id,
+                    "title": "Fatal Seduction",
+                    "category_id": "20",
+                }
+            ]
+        ]
+
+        refresh_series(
+            client=object(),
+            account=self.account,
+            categories_by_provider={"20": category},
+            relations=relations,
+            scan_start_time=timezone.now(),
+        )
+
+        mock_refresh_series_episodes.assert_called_once_with(
+            self.account,
+            self.series,
+            self.external_series_id,
+            only_missing=True,
+        )
+
     @patch("apps.vod.tasks.StalkerClient.get_series_episodes")
     @patch("apps.vod.tasks.StalkerClient.get_series_seasons")
     @patch("apps.vod.tasks.StalkerClient.prepare_authenticated_session")
@@ -1951,6 +2053,89 @@ class StalkerPhase13SeriesImportTests(StalkerPhase13Base):
             updated_relation.custom_properties["cmd"],
             "ffmpeg http://provider.example.com/ep1-updated.mkv",
         )
+        mock_prepare_authenticated_session.assert_called()
+
+    @patch("apps.vod.tasks.StalkerClient.get_series_episodes")
+    @patch("apps.vod.tasks.StalkerClient.get_series_seasons")
+    @patch("apps.vod.tasks.StalkerClient.prepare_authenticated_session")
+    def test_refresh_series_episodes_only_missing_preserves_cached_episode_details(
+        self,
+        mock_prepare_authenticated_session,
+        mock_get_series_seasons,
+        mock_get_series_episodes,
+    ):
+        existing_episode = Episode.objects.create(
+            series=self.series,
+            name="Cached Episode 1",
+            description="Cached pilot",
+            season_number=1,
+            episode_number=1,
+        )
+        M3UEpisodeRelation.objects.create(
+            m3u_account=self.account,
+            episode=existing_episode,
+            series_relation=self.series_relation,
+            stream_id="9001",
+            container_extension="mkv",
+            custom_properties={
+                "provider_type": "stalker",
+                "stalker_episode_id": "9001",
+                "stalker_season_id": "5001",
+                "stalker_series_id": self.external_series_id,
+                "cmd": "ffmpeg http://provider.example.com/cached-ep1.mkv",
+            },
+        )
+
+        mock_get_series_seasons.side_effect = [
+            [
+                {"id": "5001", "title": "Season 1"},
+                {"id": "5002", "title": "Season 2"},
+            ],
+            [],
+        ]
+        mock_get_series_episodes.side_effect = [
+            [
+                {
+                    "id": "9001",
+                    "title": "Provider Episode 1",
+                    "series_number": "1",
+                    "plot": "Provider pilot update",
+                    "cmd": "ffmpeg http://provider.example.com/provider-ep1.mkv",
+                }
+            ],
+            [],
+            [
+                {
+                    "episode_id": "9002",
+                    "title": "Episode 1",
+                    "episode_number": "1",
+                    "plot": "Season two premiere",
+                    "cmd": "ffmpeg http://provider.example.com/ep2.mp4",
+                }
+            ],
+            [],
+        ]
+
+        refresh_series_episodes(
+            self.account,
+            self.series,
+            self.external_series_id,
+            only_missing=True,
+        )
+
+        existing_episode.refresh_from_db()
+        existing_relation = M3UEpisodeRelation.objects.get(stream_id="9001")
+        new_episode = Episode.objects.get(series=self.series, season_number=2, episode_number=1)
+        new_relation = M3UEpisodeRelation.objects.get(stream_id="9002")
+
+        self.assertEqual(existing_episode.name, "Cached Episode 1")
+        self.assertEqual(existing_episode.description, "Cached pilot")
+        self.assertEqual(
+            existing_relation.custom_properties["cmd"],
+            "ffmpeg http://provider.example.com/cached-ep1.mkv",
+        )
+        self.assertEqual(new_episode.name, "Episode 1")
+        self.assertEqual(new_relation.custom_properties["stalker_episode_id"], "9002")
         mock_prepare_authenticated_session.assert_called()
 
     @patch("apps.vod.tasks.StalkerClient.get_series_episodes")

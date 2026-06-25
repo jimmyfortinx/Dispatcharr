@@ -17,6 +17,7 @@ import {
   Flex,
   Text,
   Box,
+  Progress,
   ActionIcon,
   Tooltip,
   Switch,
@@ -192,6 +193,9 @@ const M3UTable = () => {
       case 'parsing':
         return buildParsingStats(data);
 
+      case 'vod_refresh':
+        return buildVodRefreshStats(data);
+
       default:
         return data.status === 'error'
           ? buildErrorStats(data)
@@ -356,6 +360,48 @@ const M3UTable = () => {
               </Text>
               <Text size="xs">{data.streams_processed}</Text>
             </Flex>
+          )}
+        </Flex>
+      </Box>
+    );
+  };
+
+  const buildVodRefreshStats = (data) => {
+    if (data.progress == 100) {
+      return 'VOD refresh complete!';
+    }
+
+    if (data.progress == 0) {
+      return 'Refreshing VOD content...';
+    }
+
+    const phaseMessage = data.message || 'Refreshing VOD content...';
+    const itemProgress =
+      data.items_total > 0
+        ? `${data.items_processed || 0}/${data.items_total}`
+        : null;
+    const progressValue = Math.max(
+      0,
+      Math.min(100, Number(data.progress) || 0)
+    );
+
+    return (
+      <Box>
+        <Flex direction="column" gap={4}>
+          <Flex justify="space-between" align="center">
+            <Text size="xs" fw={500}>
+              VOD refresh:
+            </Text>
+            <Text size="xs">{parseInt(progressValue)}%</Text>
+          </Flex>
+          <Text size="xs" c="dimmed" lineClamp={2} style={{ lineHeight: 1.3 }}>
+            {phaseMessage}
+          </Text>
+          <Progress value={progressValue} size="xs" />
+          {itemProgress && (
+            <Text size="xs" c="dimmed">
+              {itemProgress}
+            </Text>
           )}
         </Flex>
       </Box>

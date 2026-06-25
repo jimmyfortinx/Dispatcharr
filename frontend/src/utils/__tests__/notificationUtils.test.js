@@ -64,7 +64,7 @@ describe('notificationUtils', () => {
   });
 
   describe('updateNotification', () => {
-    it('should call notifications.update with id and notification object', () => {
+    it('should call notifications.update with a merged id payload', () => {
       const notificationId = 'notification-123';
       const notificationObject = {
         title: 'Updated Title',
@@ -74,10 +74,10 @@ describe('notificationUtils', () => {
 
       notificationUtils.updateNotification(notificationId, notificationObject);
 
-      expect(notifications.update).toHaveBeenCalledWith(
-        notificationId,
-        notificationObject
-      );
+      expect(notifications.update).toHaveBeenCalledWith({
+        id: notificationId,
+        ...notificationObject,
+      });
       expect(notifications.update).toHaveBeenCalledTimes(1);
     });
 
@@ -103,10 +103,10 @@ describe('notificationUtils', () => {
 
       notificationUtils.updateNotification(notificationId, updateObject);
 
-      expect(notifications.update).toHaveBeenCalledWith(
-        notificationId,
-        updateObject
-      );
+      expect(notifications.update).toHaveBeenCalledWith({
+        id: notificationId,
+        ...updateObject,
+      });
     });
 
     it('should handle loading to error transition', () => {
@@ -120,10 +120,10 @@ describe('notificationUtils', () => {
 
       notificationUtils.updateNotification(notificationId, updateObject);
 
-      expect(notifications.update).toHaveBeenCalledWith(
-        notificationId,
-        updateObject
-      );
+      expect(notifications.update).toHaveBeenCalledWith({
+        id: notificationId,
+        ...updateObject,
+      });
     });
 
     it('should handle partial updates', () => {
@@ -134,10 +134,10 @@ describe('notificationUtils', () => {
 
       notificationUtils.updateNotification(notificationId, updateObject);
 
-      expect(notifications.update).toHaveBeenCalledWith(
-        notificationId,
-        updateObject
-      );
+      expect(notifications.update).toHaveBeenCalledWith({
+        id: notificationId,
+        ...updateObject,
+      });
     });
 
     it('should handle empty notification id', () => {
@@ -145,7 +145,10 @@ describe('notificationUtils', () => {
 
       notificationUtils.updateNotification('', notificationObject);
 
-      expect(notifications.update).toHaveBeenCalledWith('', notificationObject);
+      expect(notifications.update).toHaveBeenCalledWith({
+        id: '',
+        ...notificationObject,
+      });
     });
 
     it('should handle null notification id', () => {
@@ -153,10 +156,22 @@ describe('notificationUtils', () => {
 
       notificationUtils.updateNotification(null, notificationObject);
 
-      expect(notifications.update).toHaveBeenCalledWith(
-        null,
-        notificationObject
-      );
+      expect(notifications.update).toHaveBeenCalledWith({
+        id: null,
+        ...notificationObject,
+      });
+    });
+
+    it('should pass through a single Mantine-style update object', () => {
+      const updateObject = {
+        id: 'notification-123',
+        message: 'Updated message',
+        loading: false,
+      };
+
+      notificationUtils.updateNotification(updateObject);
+
+      expect(notifications.update).toHaveBeenCalledWith(updateObject);
     });
   });
 });

@@ -101,6 +101,16 @@ def refresh_vod_content(account_id):
         with TaskLockRenewer("refresh_vod_content", account_id):
             account = M3UAccount.objects.get(id=account_id, is_active=True)
 
+            def send_vod_progress(progress, message=None, **extra):
+                send_m3u_update(
+                    account_id,
+                    "vod_refresh",
+                    int(max(0, min(100, progress))),
+                    status="processing",
+                    message=message,
+                    **extra,
+                )
+
             if account.account_type not in (
                 M3UAccount.Types.XC,
                 M3UAccount.Types.STALKER,
@@ -112,7 +122,7 @@ def refresh_vod_content(account_id):
             start_time = timezone.now()
 
             # Send start notification
-            send_m3u_update(account_id, "vod_refresh", 0, status="processing")
+            send_vod_progress(0, "VOD content refresh starting...")
 
             if account.account_type == M3UAccount.Types.XC:
                 with XtreamCodesClient(
@@ -121,6 +131,7 @@ def refresh_vod_content(account_id):
                     account.password,
                     account.get_user_agent().user_agent
                 ) as client:
+                    send_vod_progress(5, "Loading VOD categories...")
 
                     movie_categories, series_categories = refresh_categories(account.id, client)
 
@@ -131,10 +142,18 @@ def refresh_vod_content(account_id):
                     }
 
                     # Refresh movies with batch processing (pass scan start time)
+                    send_vod_progress(25, "Importing movie catalog...")
                     refresh_movies(client, account, movie_categories, relations, scan_start_time=start_time)
 
                     # Refresh series with batch processing (pass scan start time)
-                    refresh_series(client, account, series_categories, relations, scan_start_time=start_time)
+                    send_vod_progress(55, "Importing TV show catalog...")
+                    refresh_series(
+                        client,
+                        account,
+                        series_categories,
+                        relations,
+                        scan_start_time=start_time,
+                    )
             else:
                 client = StalkerClient(
                     server_url=account.server_url,
@@ -144,6 +163,7 @@ def refresh_vod_content(account_id):
                     user_agent=getattr(account.user_agent, "user_agent", None),
                     custom_properties=account.custom_properties or {},
                 )
+                send_vod_progress(5, "Loading VOD categories...")
                 movie_categories, series_categories = refresh_categories(account.id, client=client)
 
                 logger.debug("Fetching relations for Stalker VOD category filtering")
@@ -153,6 +173,7 @@ def refresh_vod_content(account_id):
                     .select_related("category", "m3u_account")
                 }
 
+                send_vod_progress(20, "Importing movie catalog...")
                 refresh_movies(
                     client,
                     account,
@@ -160,12 +181,23 @@ def refresh_vod_content(account_id):
                     relations,
                     scan_start_time=start_time,
                 )
+                send_vod_progress(40, "Importing TV show catalog...")
                 refresh_series(
                     client,
                     account,
                     series_categories,
                     relations,
                     scan_start_time=start_time,
+                    progress_callback=lambda completed, total: send_vod_progress(
+                        40 + round((completed / max(total, 1)) * 50),
+                        (
+                            f"Fetching TV show details and episodes... ({completed}/{total})"
+                            if total
+                            else "Fetching TV show details and episodes..."
+                        ),
+                        items_processed=completed,
+                        items_total=total,
+                    ),
                 )
 
             end_time = timezone.now()
@@ -178,6 +210,7 @@ def refresh_vod_content(account_id):
                 M3UAccount.Types.STALKER,
             ):
                 # Cleanup orphaned VOD content after refresh (scoped to this account only)
+                send_vod_progress(95, "Finalizing VOD refresh...")
                 logger.info(f"Starting cleanup of orphaned VOD content for account {account.name}")
                 cleanup_result = cleanup_orphaned_vod_content(account_id=account_id, scan_start_time=start_time)
                 logger.info(f"VOD cleanup completed: {cleanup_result}")
@@ -385,10 +418,18 @@ def refresh_movies(client, account, categories_by_provider, relations, scan_star
     logger.info(f"Completed processing all {total_movies} movies in {total_chunks} chunks")
 
 
-def refresh_series(client, account, categories_by_provider, relations, scan_start_time=None):
+def refresh_series(
+    client,
+    account,
+    categories_by_provider,
+    relations,
+    scan_start_time=None,
+    progress_callback=None,
+):
     """Refresh series content using single API call for all series"""
     logger.info(f"Refreshing series for account {account.name}")
     seen_series_keys = set()
+    stalker_series_relation_ids = set()
 
     # Ensure "Uncategorized" category exists for series without a category
     uncategorized_category, created = VODCategory.objects.get_or_create(
@@ -448,11 +489,21 @@ def refresh_series(client, account, categories_by_provider, relations, scan_star
                 scan_start_time,
                 seen_series_keys=seen_series_keys,
             )
+            stalker_series_relation_ids.update(
+                str(extract_stalker_relation_id(item) or "").strip()
+                for item in chunk
+                if extract_stalker_relation_id(item)
+            )
 
         logger.info(
             "Completed processing all %s Stalker series in %s chunks",
             total_series,
             total_chunks,
+        )
+        refresh_stalker_series_catalog_relations(
+            account,
+            stalker_series_relation_ids,
+            progress_callback=progress_callback,
         )
         return
     else:
@@ -1326,6 +1377,51 @@ def build_series_relation_custom_properties(existing_props, series_data):
         relation_custom_properties.get("episodes_fetched")
     )
     return relation_custom_properties
+
+
+def refresh_stalker_series_catalog_relations(
+    account,
+    external_series_ids,
+    progress_callback=None,
+):
+    relation_ids = {
+        str(series_id).strip()
+        for series_id in (external_series_ids or [])
+        if str(series_id).strip()
+    }
+    if not relation_ids:
+        return
+
+    relations = get_enabled_series_relations_queryset(
+        M3USeriesRelation.objects.filter(
+            m3u_account=account,
+            external_series_id__in=relation_ids,
+        )
+    ).select_related("series")
+
+    relation_count = relations.count()
+    logger.info(
+        "Refreshing Stalker seasons and episodes for %s catalog series on account %s",
+        relation_count,
+        account.id,
+    )
+
+    for completed_count, relation in enumerate(relations.iterator(), start=1):
+        try:
+            refresh_series_episodes(
+                account,
+                relation.series,
+                relation.external_series_id,
+                only_missing=True,
+            )
+        except Exception:
+            logger.exception(
+                "Error refreshing Stalker seasons/episodes during catalog refresh for relation %s",
+                relation.id,
+            )
+        finally:
+            if progress_callback:
+                progress_callback(completed_count, relation_count)
 
 
 def get_enabled_series_relations_queryset(queryset):
@@ -2765,6 +2861,7 @@ def refresh_stalker_series_episodes(account, series_relation):
 
     detail_data = build_stalker_series_detail_data(series_relation, season_items)
     episodes_data = {}
+    prefer_embedded_episode_rows = {"value": False}
 
     season_jobs = [
         (season_index, season_item)
@@ -2784,6 +2881,8 @@ def refresh_stalker_series_episodes(account, series_relation):
             season_number=season_number,
             external_series_id=series_relation.external_series_id,
         )
+        if embedded_episode_rows and prefer_embedded_episode_rows["value"]:
+            return season_number, embedded_episode_rows
         season_query_candidates = extract_stalker_season_query_candidates(
             season_item,
             fallback=season_number,
@@ -2791,7 +2890,7 @@ def refresh_stalker_series_episodes(account, series_relation):
         episode_items = []
         episode_query_season_id = season_id
 
-        for season_query_id in season_query_candidates:
+        for candidate_index, season_query_id in enumerate(season_query_candidates):
             candidate_items = collect_stalker_paginated_items(
                 lambda page, season_query_id=season_query_id: fetch_stalker_series_episode_page(
                     client,
@@ -2810,8 +2909,18 @@ def refresh_stalker_series_episodes(account, series_relation):
             )
 
             if candidate_items and looks_like_stalker_season_list(candidate_items):
+                if embedded_episode_rows:
+                    prefer_embedded_episode_rows["value"] = True
                 logger.warning(
                     "Stalker series %s season query %s returned season rows instead of episodes; trying the next season id candidate",
+                    series_relation.external_series_id,
+                    season_query_id,
+                )
+                continue
+
+            if not candidate_items and candidate_index + 1 < len(season_query_candidates):
+                logger.debug(
+                    "Stalker series %s season query %s returned no episode rows; trying the next season id candidate",
                     series_relation.external_series_id,
                     season_query_id,
                 )
@@ -2947,7 +3056,13 @@ def stalker_episode_import_looks_stale(series_relation):
 
 # Episode processing and other advanced features
 
-def refresh_series_episodes(account, series, external_series_id, episodes_data=None):
+def refresh_series_episodes(
+    account,
+    series,
+    external_series_id,
+    episodes_data=None,
+    only_missing=False,
+):
     """Refresh episodes for a series - only called on-demand"""
     try:
         series_relation = M3USeriesRelation.objects.filter(
@@ -2994,7 +3109,13 @@ def refresh_series_episodes(account, series, external_series_id, episodes_data=N
                         episodes_data = {}
 
         # Process all episodes in batch
-        batch_process_episodes(account, series, episodes_data, series_relation=series_relation)
+        batch_process_episodes(
+            account,
+            series,
+            episodes_data,
+            series_relation=series_relation,
+            only_missing=only_missing,
+        )
 
         if series_relation:
             custom_props = dict(series_relation.custom_properties or {})
@@ -3043,7 +3164,14 @@ def refresh_series_relation_episodes_task(series_relation_id):
         release_task_lock("refresh_series_relation_episodes", series_relation_id)
 
 
-def batch_process_episodes(account, series, episodes_data, scan_start_time=None, series_relation=None):
+def batch_process_episodes(
+    account,
+    series,
+    episodes_data,
+    scan_start_time=None,
+    series_relation=None,
+    only_missing=False,
+):
     """Process episodes in batches for better performance.
 
     Note: Multiple streams can represent the same episode (e.g., different languages
@@ -3190,28 +3318,28 @@ def batch_process_episodes(account, series, episodes_data, scan_start_time=None,
             if episode:
                 # Update existing episode
                 updated = False
-                if episode_name != episode.name:
+                if not only_missing and episode_name != episode.name:
                     episode.name = episode_name
                     updated = True
-                if description != episode.description:
+                if not only_missing and description != episode.description:
                     episode.description = description
                     updated = True
-                if rating != episode.rating:
+                if not only_missing and rating != episode.rating:
                     episode.rating = rating
                     updated = True
-                if air_date != episode.air_date:
+                if not only_missing and air_date != episode.air_date:
                     episode.air_date = air_date
                     updated = True
-                if duration_secs != episode.duration_secs:
+                if not only_missing and duration_secs != episode.duration_secs:
                     episode.duration_secs = duration_secs
                     updated = True
-                if tmdb_id != episode.tmdb_id:
+                if not only_missing and tmdb_id != episode.tmdb_id:
                     episode.tmdb_id = tmdb_id
                     updated = True
-                if imdb_id != episode.imdb_id:
+                if not only_missing and imdb_id != episode.imdb_id:
                     episode.imdb_id = imdb_id
                     updated = True
-                if custom_props != episode.custom_properties:
+                if not only_missing and custom_props != episode.custom_properties:
                     episode.custom_properties = custom_props if custom_props else None
                     updated = True
 
@@ -3242,17 +3370,21 @@ def batch_process_episodes(account, series, episodes_data, scan_start_time=None,
             if episode_id in existing_relations:
                 # Update existing relation
                 relation = existing_relations[episode_id]
-                relation.episode = episode
-                relation.series_relation = series_relation
-                relation.container_extension = episode_data.get('container_extension', 'mp4')
-                relation.custom_properties = build_episode_relation_custom_properties(
-                    account,
-                    episode_data,
-                    season_number,
-                    series_relation=series_relation,
-                )
-                relation.last_seen = scan_start_time or timezone.now()  # Mark as seen during this scan
-                relations_to_update.append(relation)
+                if only_missing:
+                    relation.last_seen = scan_start_time or timezone.now()
+                    relations_to_update.append(relation)
+                else:
+                    relation.episode = episode
+                    relation.series_relation = series_relation
+                    relation.container_extension = episode_data.get('container_extension', 'mp4')
+                    relation.custom_properties = build_episode_relation_custom_properties(
+                        account,
+                        episode_data,
+                        season_number,
+                        series_relation=series_relation,
+                    )
+                    relation.last_seen = scan_start_time or timezone.now()  # Mark as seen during this scan
+                    relations_to_update.append(relation)
             else:
                 # Create new relation
                 relation = M3UEpisodeRelation(
@@ -3327,28 +3459,30 @@ def batch_process_episodes(account, series, episodes_data, scan_start_time=None,
 
         # Update existing episode relations
         if relations_to_update:
-            M3UEpisodeRelation.objects.bulk_update(relations_to_update, [
+            update_fields = ['last_seen'] if only_missing else [
                 'episode', 'series_relation', 'container_extension', 'custom_properties', 'last_seen'
-            ])
+            ]
+            M3UEpisodeRelation.objects.bulk_update(relations_to_update, update_fields)
 
         # Delete relations for streams no longer returned by the provider.
         # Scope to this series_relation FK (post-migration rows) plus any legacy NULL rows
         # for the same account+series (pre-migration rows whose stream is now gone — the
         # update path only backfills the FK for streams still present in the response).
         # Falls back to account+series scope when series_relation is None (shouldn't occur).
-        if series_relation is not None:
-            stale_qs = M3UEpisodeRelation.objects.filter(
-                Q(series_relation=series_relation) |
-                Q(series_relation__isnull=True, m3u_account=account, episode__series=series)
-            )
-        else:
-            stale_qs = M3UEpisodeRelation.objects.filter(
-                m3u_account=account,
-                episode__series=series
-            )
-        removed_count = stale_qs.exclude(stream_id__in=episode_ids).delete()[0]
-        if removed_count:
-            logger.info(f"Removed {removed_count} episode relations no longer present in provider for series {series.name}")
+        if not only_missing:
+            if series_relation is not None:
+                stale_qs = M3UEpisodeRelation.objects.filter(
+                    Q(series_relation=series_relation) |
+                    Q(series_relation__isnull=True, m3u_account=account, episode__series=series)
+                )
+            else:
+                stale_qs = M3UEpisodeRelation.objects.filter(
+                    m3u_account=account,
+                    episode__series=series
+                )
+            removed_count = stale_qs.exclude(stream_id__in=episode_ids).delete()[0]
+            if removed_count:
+                logger.info(f"Removed {removed_count} episode relations no longer present in provider for series {series.name}")
 
     logger.info(f"Batch processed episodes: {len(episodes_to_create)} new, {len(episodes_to_update)} updated, "
                 f"{len(relations_to_create)} new relations, {len(relations_to_update)} updated relations")

@@ -13,11 +13,15 @@ import {
   ScrollArea,
   Text,
   Code,
+  Progress,
 } from '@mantine/core';
 import API from '../api';
 import { useNavigate } from 'react-router-dom';
 import { CircleCheck } from 'lucide-react';
-import { showNotification } from '../utils/notificationUtils.js';
+import {
+  showNotification,
+  updateNotification,
+} from '../utils/notificationUtils.js';
 
 const M3uSetupSuccess = ({ data }) => {
   const navigate = useNavigate();
@@ -108,9 +112,11 @@ export default function M3URefreshNotification() {
   const [failureModal, setFailureModal] = useState(null);
 
   const handleM3UUpdate = (data) => {
+    const currentStatus = notificationStatus[data.account];
+
     // Skip if status hasn't changed
     if (
-      JSON.stringify(notificationStatus[data.account]) == JSON.stringify(data)
+      JSON.stringify(currentStatus) == JSON.stringify(data)
     ) {
       return;
     }
@@ -138,15 +144,40 @@ export default function M3URefreshNotification() {
     }
 
     // Skip if already errored
-    const currentStatus = notificationStatus[data.account];
     if (currentStatus && currentStatus.status === 'error') {
       return;
     }
 
-    // Handle normal progress updates (0% start, 100% completion)
-    if (data.progress === 0 || data.progress === 100) {
+    if (
+      data.action === 'vod_refresh' ||
+      data.progress === 0 ||
+      data.progress === 100
+    ) {
       handleProgressNotification(playlist, data);
     }
+  };
+
+  const getNotificationId = (playlist, data) =>
+    `m3u-refresh-${playlist.id}-${data.action || 'processing'}`;
+
+  const buildProgressBody = (data, message) => {
+    const value = Math.max(0, Math.min(100, Number(data.progress) || 0));
+    const itemProgress =
+      data.items_total > 0
+        ? `${data.items_processed || 0}/${data.items_total}`
+        : null;
+
+    return (
+      <Stack gap={6}>
+        <Text size="sm">{message}</Text>
+        <Progress value={value} size="md" radius="xl" />
+        {itemProgress && (
+          <Text size="xs" c="dimmed">
+            {itemProgress}
+          </Text>
+        )}
+      </Stack>
+    );
   };
 
   const handlePendingSetup = (playlist, data) => {
@@ -202,17 +233,27 @@ export default function M3URefreshNotification() {
 
   const handleProgressNotification = (playlist, data) => {
     const baseMessage = getActionMessage(data.action);
-    let message =
-      data.progress == 0
-        ? `${baseMessage} starting...`
-        : `${baseMessage} complete!`;
+    const notificationId = getNotificationId(playlist, data);
+    const existingStatus = notificationStatus[data.account];
+    const shouldUpdateExisting =
+      existingStatus && existingStatus.action === data.action;
+    let message;
+    if (data.progress == 0) {
+      message = `${baseMessage} starting...`;
+    } else if (data.progress == 100) {
+      message = `${baseMessage} complete!`;
+    } else {
+      message =
+        data.message || `${baseMessage} ${Math.max(1, Math.floor(data.progress))}%`;
+    }
 
     if (data.progress == 100) {
       triggerPostCompletionFetches(data.action);
     }
 
-    let body = message;
-    let autoClose = 2000;
+    const inProgress = data.progress < 100;
+    let body = inProgress ? buildProgressBody(data, message) : message;
+    let autoClose = inProgress ? false : 2000;
     // Surface auto-sync counts attached to the parsing-complete event
     // so the channel-side outcome appears in the notification body.
     if (data.progress == 100 && data.action === 'parsing') {
@@ -249,13 +290,21 @@ export default function M3URefreshNotification() {
       }
     }
 
-    showNotification({
+    const notificationPayload = {
+      id: notificationId,
       title: `M3U Processing: ${playlist.name}`,
       message: body,
-      loading: data.progress == 0,
+      loading: inProgress,
       autoClose,
       icon: data.progress == 100 ? <CircleCheck /> : null,
-    });
+      withCloseButton: !inProgress,
+    };
+
+    if (shouldUpdateExisting) {
+      updateNotification(notificationId, notificationPayload);
+    } else {
+      showNotification(notificationPayload);
+    }
   };
 
   useEffect(() => {

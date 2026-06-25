@@ -9,7 +9,10 @@ import useChannelsStore from '../../store/channels';
 import useEPGsStore from '../../store/epgs';
 import useVODStore from '../../store/useVODStore';
 import API from '../../api';
-import { showNotification } from '../../utils/notificationUtils';
+import {
+  showNotification,
+  updateNotification,
+} from '../../utils/notificationUtils';
 
 // Mock all stores
 vi.mock('../../store/playlists', () => ({
@@ -43,6 +46,7 @@ vi.mock('../../api', () => ({
 // Mock notification utility
 vi.mock('../../utils/notificationUtils', () => ({
   showNotification: vi.fn(),
+  updateNotification: vi.fn(),
 }));
 
 vi.mock('@mantine/core', async () => {
@@ -65,6 +69,7 @@ vi.mock('@mantine/core', async () => {
     ScrollArea: ({ children }) => <div>{children}</div>,
     Text: ({ children }) => <span>{children}</span>,
     Code: ({ children }) => <pre>{children}</pre>,
+    Progress: ({ value }) => <div data-testid="progress">{value}</div>,
   };
 });
 
@@ -158,13 +163,17 @@ describe('M3URefreshNotification', () => {
       renderWithProviders(<M3URefreshNotification />);
 
       await waitFor(() => {
-        expect(showNotification).toHaveBeenCalledWith({
-          title: 'M3U Processing: Test Playlist',
-          message: 'Downloading starting...',
-          loading: true,
-          autoClose: 2000,
-          icon: null,
-        });
+        expect(showNotification).toHaveBeenCalledWith(
+          expect.objectContaining({
+            id: 'm3u-refresh-1-downloading',
+            title: 'M3U Processing: Test Playlist',
+            loading: true,
+            autoClose: false,
+            icon: null,
+            withCloseButton: false,
+            message: expect.anything(),
+          })
+        );
       });
     });
 
@@ -181,13 +190,17 @@ describe('M3URefreshNotification', () => {
       renderWithProviders(<M3URefreshNotification />);
 
       await waitFor(() => {
-        expect(showNotification).toHaveBeenCalledWith({
-          title: 'M3U Processing: Test Playlist',
-          message: 'Downloading complete!',
-          loading: false,
-          autoClose: 2000,
-          icon: expect.anything(),
-        });
+        expect(showNotification).toHaveBeenCalledWith(
+          expect.objectContaining({
+            id: 'm3u-refresh-1-downloading',
+            title: 'M3U Processing: Test Playlist',
+            message: 'Downloading complete!',
+            loading: false,
+            autoClose: 2000,
+            icon: expect.anything(),
+            withCloseButton: true,
+          })
+        );
       });
     });
 
@@ -205,6 +218,7 @@ describe('M3URefreshNotification', () => {
 
       await waitFor(() => {
         expect(showNotification).not.toHaveBeenCalled();
+        expect(updateNotification).not.toHaveBeenCalled();
       });
     });
   });
@@ -223,13 +237,17 @@ describe('M3URefreshNotification', () => {
       renderWithProviders(<M3URefreshNotification />);
 
       await waitFor(() => {
-        expect(showNotification).toHaveBeenCalledWith({
-          title: 'M3U Processing: Test Playlist',
-          message: 'Stream parsing starting...',
-          loading: true,
-          autoClose: 2000,
-          icon: null,
-        });
+        expect(showNotification).toHaveBeenCalledWith(
+          expect.objectContaining({
+            id: 'm3u-refresh-1-parsing',
+            title: 'M3U Processing: Test Playlist',
+            loading: true,
+            autoClose: false,
+            icon: null,
+            withCloseButton: false,
+            message: expect.anything(),
+          })
+        );
       });
     });
 
@@ -270,13 +288,17 @@ describe('M3URefreshNotification', () => {
       renderWithProviders(<M3URefreshNotification />);
 
       await waitFor(() => {
-        expect(showNotification).toHaveBeenCalledWith({
-          title: 'M3U Processing: Test Playlist',
-          message: 'Group parsing starting...',
-          loading: true,
-          autoClose: 2000,
-          icon: null,
-        });
+        expect(showNotification).toHaveBeenCalledWith(
+          expect.objectContaining({
+            id: 'm3u-refresh-1-processing_groups',
+            title: 'M3U Processing: Test Playlist',
+            loading: true,
+            autoClose: false,
+            icon: null,
+            withCloseButton: false,
+            message: expect.anything(),
+          })
+        );
       });
     });
 
@@ -315,13 +337,17 @@ describe('M3URefreshNotification', () => {
       renderWithProviders(<M3URefreshNotification />);
 
       await waitFor(() => {
-        expect(showNotification).toHaveBeenCalledWith({
-          title: 'M3U Processing: Test Playlist',
-          message: 'VOD content refresh starting...',
-          loading: true,
-          autoClose: 2000,
-          icon: null,
-        });
+        expect(showNotification).toHaveBeenCalledWith(
+          expect.objectContaining({
+            id: 'm3u-refresh-1-vod_refresh',
+            title: 'M3U Processing: Test Playlist',
+            loading: true,
+            autoClose: false,
+            icon: null,
+            withCloseButton: false,
+            message: expect.anything(),
+          })
+        );
       });
     });
 
@@ -340,6 +366,34 @@ describe('M3URefreshNotification', () => {
       await waitFor(() => {
         expect(mockPlaylistsStore.fetchPlaylists).toHaveBeenCalled();
         expect(mockVODStore.fetchCategories).toHaveBeenCalled();
+      });
+    });
+
+    it('should show notification for in-progress VOD detail refresh updates', async () => {
+      mockPlaylistsStore.refreshProgress = {
+        1: {
+          account: 1,
+          action: 'vod_refresh',
+          progress: 65,
+          status: 'processing',
+          message: 'Fetching TV show details and episodes... (3/8)',
+        },
+      };
+
+      renderWithProviders(<M3URefreshNotification />);
+
+      await waitFor(() => {
+        expect(showNotification).toHaveBeenCalledWith(
+          expect.objectContaining({
+            id: 'm3u-refresh-1-vod_refresh',
+            title: 'M3U Processing: Test Playlist',
+            loading: true,
+            autoClose: false,
+            icon: null,
+            withCloseButton: false,
+            message: expect.anything(),
+          })
+        );
       });
     });
   });
@@ -631,7 +685,65 @@ describe('M3URefreshNotification', () => {
       );
 
       await waitFor(() => {
+        expect(updateNotification).toHaveBeenCalledTimes(1);
+        expect(updateNotification).toHaveBeenCalledWith(
+          'm3u-refresh-1-parsing',
+          expect.objectContaining({
+            id: 'm3u-refresh-1-parsing',
+            title: 'M3U Processing: Test Playlist',
+            loading: false,
+          })
+        );
+      });
+    });
+
+    it('should update the existing notification for repeated progress on the same action', async () => {
+      mockPlaylistsStore.refreshProgress = {
+        1: {
+          account: 1,
+          action: 'vod_refresh',
+          progress: 10,
+          status: 'processing',
+          message: 'Loading VOD categories...',
+        },
+      };
+
+      const { rerender } = renderWithProviders(<M3URefreshNotification />);
+
+      await waitFor(() => {
         expect(showNotification).toHaveBeenCalledTimes(1);
+      });
+
+      vi.clearAllMocks();
+
+      mockPlaylistsStore.refreshProgress = {
+        1: {
+          account: 1,
+          action: 'vod_refresh',
+          progress: 20,
+          status: 'processing',
+          message: 'Importing movie catalog...',
+        },
+      };
+
+      rerender(
+        <BrowserRouter>
+          <M3URefreshNotification />
+        </BrowserRouter>
+      );
+
+      await waitFor(() => {
+        expect(showNotification).not.toHaveBeenCalled();
+        expect(updateNotification).toHaveBeenCalledTimes(1);
+        expect(updateNotification).toHaveBeenCalledWith(
+          'm3u-refresh-1-vod_refresh',
+          expect.objectContaining({
+            id: 'm3u-refresh-1-vod_refresh',
+            title: 'M3U Processing: Test Playlist',
+            loading: true,
+            autoClose: false,
+          })
+        );
       });
     });
   });
