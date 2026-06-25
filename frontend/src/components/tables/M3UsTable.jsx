@@ -375,11 +375,16 @@ const M3UTable = () => {
       return 'Refreshing VOD content...';
     }
 
-    const phaseMessage = data.message || 'Refreshing VOD content...';
     const itemProgress =
       data.items_total > 0
         ? `${data.items_processed || 0}/${data.items_total}`
         : null;
+    const phaseMessage = itemProgress
+      ? (data.message || 'Refreshing VOD content...').replace(
+          new RegExp(`\\s*\\(${itemProgress.replace('/', '\\/')}\\)\\s*$`),
+          ''
+        )
+      : data.message || 'Refreshing VOD content...';
     const progressValue = Math.max(
       0,
       Math.min(100, Number(data.progress) || 0)
@@ -388,12 +393,9 @@ const M3UTable = () => {
     return (
       <Box>
         <Flex direction="column" gap={4}>
-          <Flex justify="space-between" align="center">
-            <Text size="xs" fw={500}>
-              VOD refresh:
-            </Text>
-            <Text size="xs">{parseInt(progressValue)}%</Text>
-          </Flex>
+          <Text size="xs" fw={500}>
+            {parseInt(progressValue)}%
+          </Text>
           <Text size="xs" c="dimmed" lineClamp={2} style={{ lineHeight: 1.3 }}>
             {phaseMessage}
           </Text>

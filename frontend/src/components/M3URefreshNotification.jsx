@@ -166,10 +166,16 @@ export default function M3URefreshNotification() {
       data.items_total > 0
         ? `${data.items_processed || 0}/${data.items_total}`
         : null;
+    const displayMessage = itemProgress
+      ? message.replace(
+          new RegExp(`\\s*\\(${itemProgress.replace('/', '\\/')}\\)\\s*$`),
+          ''
+        )
+      : message;
 
     return (
       <Stack gap={6}>
-        <Text size="sm">{message}</Text>
+        <Text size="sm">{displayMessage}</Text>
         <Progress value={value} size="md" radius="xl" />
         {itemProgress && (
           <Text size="xs" c="dimmed">
