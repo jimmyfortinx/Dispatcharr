@@ -216,7 +216,7 @@ class VODCategoryVisibilityTests(TestCase):
         )
         self.view = VODCategoryViewSet.as_view({"get": "list"})
 
-    def test_categories_only_include_visible_content(self):
+    def test_categories_include_disabled_relations_for_vod_enabled_accounts(self):
         enabled_account = M3UAccount.objects.create(
             name="Category Enabled VOD",
             account_type=M3UAccount.Types.STALKER,
@@ -229,38 +229,24 @@ class VODCategoryVisibilityTests(TestCase):
             is_active=True,
             custom_properties={"enable_vod": False, "mac": "00:1A:79:00:00:96"},
         )
-        visible_category = VODCategory.objects.create(
-            name="Visible Category",
+        disabled_selection_category = VODCategory.objects.create(
+            name="Disabled Selection Category",
             category_type="movie",
         )
         hidden_category = VODCategory.objects.create(
             name="Hidden Category",
             category_type="movie",
         )
-        visible_movie = Movie.objects.create(name="Visible Category Movie")
-        hidden_movie = Movie.objects.create(name="Hidden Category Movie")
 
         M3UVODCategoryRelation.objects.create(
             m3u_account=enabled_account,
-            category=visible_category,
-            enabled=True,
+            category=disabled_selection_category,
+            enabled=False,
         )
         M3UVODCategoryRelation.objects.create(
             m3u_account=disabled_account,
             category=hidden_category,
             enabled=True,
-        )
-        M3UMovieRelation.objects.create(
-            m3u_account=enabled_account,
-            movie=visible_movie,
-            category=visible_category,
-            stream_id="visible-category-movie",
-        )
-        M3UMovieRelation.objects.create(
-            m3u_account=disabled_account,
-            movie=hidden_movie,
-            category=hidden_category,
-            stream_id="hidden-category-movie",
         )
 
         request = self.factory.get("/api/vod/categories/")
@@ -269,5 +255,5 @@ class VODCategoryVisibilityTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         category_names = {row["name"] for row in response.data}
-        self.assertIn("Visible Category", category_names)
+        self.assertIn("Disabled Selection Category", category_names)
         self.assertNotIn("Hidden Category", category_names)

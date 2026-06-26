@@ -1,5 +1,5 @@
 // frontend/src/components/FloatingVideo.js
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import usePlaylistsStore from '../store/playlists';
 import useStreamsStore from '../store/streams';
 import useChannelsStore from '../store/channels';
@@ -106,13 +106,13 @@ export default function M3URefreshNotification() {
   const fetchEPGData = useEPGsStore((s) => s.fetchEPGData);
   const fetchCategories = useVODStore((s) => s.fetchCategories);
 
-  const [notificationStatus, setNotificationStatus] = useState({});
+  const notificationStatusRef = useRef({});
   // Modal payload for the "Click for details" affordance on syncs that
   // produced failed_stream_details. Null when the modal is closed.
   const [failureModal, setFailureModal] = useState(null);
 
   const handleM3UUpdate = (data) => {
-    const currentStatus = notificationStatus[data.account];
+    const currentStatus = notificationStatusRef.current[data.account];
 
     // Skip if status hasn't changed
     if (
@@ -127,10 +127,10 @@ export default function M3URefreshNotification() {
     }
 
     // Update notification status
-    setNotificationStatus((prev) => ({
-      ...prev,
+    notificationStatusRef.current = {
+      ...notificationStatusRef.current,
       [data.account]: data,
-    }));
+    };
 
     // Handle different status types
     if (data.status === 'pending_setup') {
@@ -153,7 +153,7 @@ export default function M3URefreshNotification() {
       data.progress === 0 ||
       data.progress === 100
     ) {
-      handleProgressNotification(playlist, data);
+      handleProgressNotification(playlist, data, currentStatus);
     }
   };
 
@@ -237,12 +237,11 @@ export default function M3URefreshNotification() {
     }
   };
 
-  const handleProgressNotification = (playlist, data) => {
+  const handleProgressNotification = (playlist, data, currentStatus) => {
     const baseMessage = getActionMessage(data.action);
     const notificationId = getNotificationId(playlist, data);
-    const existingStatus = notificationStatus[data.account];
     const shouldUpdateExisting =
-      existingStatus && existingStatus.action === data.action;
+      currentStatus && currentStatus.action === data.action;
     let message;
     if (data.progress == 0) {
       message = `${baseMessage} starting...`;
@@ -314,19 +313,30 @@ export default function M3URefreshNotification() {
   };
 
   useEffect(() => {
-    // Reset notificationStatus when playlists change to prevent stale data
-    if (playlists.length > 0 && Object.keys(notificationStatus).length > 0) {
-      const validIds = playlists.map((p) => p.id);
-      const currentIds = Object.keys(notificationStatus).map(Number);
+    // Drop stale per-playlist notification bookkeeping without triggering
+    // another render. This avoids effect-driven update loops when multiple
+    // accounts are refreshing concurrently and playlist rows keep mutating.
+    if (
+      playlists.length > 0 &&
+      Object.keys(notificationStatusRef.current).length > 0
+    ) {
+      const validIds = new Set(playlists.map((p) => p.id));
+      const nextStatus = Object.fromEntries(
+        Object.entries(notificationStatusRef.current).filter(([id]) =>
+          validIds.has(Number(id))
+        )
+      );
 
-      // If we have notification statuses for playlists that no longer exist, reset the state
-      if (!currentIds.every((id) => validIds.includes(id))) {
-        setNotificationStatus({});
+      if (
+        Object.keys(nextStatus).length !==
+        Object.keys(notificationStatusRef.current).length
+      ) {
+        notificationStatusRef.current = nextStatus;
       }
     }
 
     // Process all refresh progress updates
-    Object.values(refreshProgress).map((data) => handleM3UUpdate(data));
+    Object.values(refreshProgress).forEach((data) => handleM3UUpdate(data));
   }, [playlists, refreshProgress]);
 
   return (

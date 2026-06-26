@@ -823,38 +823,14 @@ class VODCategoryViewSet(viewsets.ReadOnlyModelViewSet):
             return [Authenticated()]
 
     def get_queryset(self):
-        enabled_category_relations = M3UVODCategoryRelation.objects.filter(
-            m3u_account_id=OuterRef("m3u_account_id"),
-            category_id=OuterRef("category_id"),
-            enabled=True,
-        )
-
-        visible_movie_relations = (
-            M3UMovieRelation.objects.filter(
-                category_id=OuterRef("pk"),
-                **_vod_enabled_account_filters(),
-            )
-            .annotate(category_enabled=Exists(enabled_category_relations))
-            .filter(category_enabled=True)
-        )
-        visible_series_relations = (
-            M3USeriesRelation.objects.filter(
-                category_id=OuterRef("pk"),
-                **_vod_enabled_account_filters(),
-            )
-            .annotate(category_enabled=Exists(enabled_category_relations))
-            .filter(category_enabled=True)
+        visible_category_relations = M3UVODCategoryRelation.objects.filter(
+            category_id=OuterRef("pk"),
+            **_vod_enabled_account_filters(),
         )
 
         return (
-            VODCategory.objects.annotate(
-                has_visible_movies=Exists(visible_movie_relations),
-                has_visible_series=Exists(visible_series_relations),
-            )
-            .filter(
-                Q(category_type="movie", has_visible_movies=True)
-                | Q(category_type="series", has_visible_series=True)
-            )
+            VODCategory.objects.annotate(has_visible_relations=Exists(visible_category_relations))
+            .filter(has_visible_relations=True)
             .order_by("name")
         )
 
