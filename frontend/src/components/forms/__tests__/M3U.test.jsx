@@ -313,6 +313,37 @@ describe('M3U form Stalker flow', () => {
     expect(screen.getByLabelText('VOD Priority')).toBeEnabled();
   });
 
+  it('shows Filters for an existing Stalker account and opens the filter modal', async () => {
+    render(
+      <M3U
+        m3uAccount={{
+          id: 44,
+          name: 'Existing Stalker',
+          account_type: 'STALKER',
+          server_url: 'http://portal.example.com/c/',
+          user_agent: null,
+          is_active: true,
+          max_streams: 0,
+          refresh_interval: 24,
+          cron_expression: '',
+          username: 'demo',
+          mac: '00:1A:79:00:00:10',
+          stale_stream_days: 7,
+          priority: 5,
+          enable_vod: false,
+          channel_groups: [],
+          profiles: [],
+        }}
+        isOpen={true}
+        onClose={vi.fn()}
+      />
+    );
+
+    fireEvent.click(screen.getByText('Filters'));
+
+    expect(screen.getByTestId('filters-modal')).toBeInTheDocument();
+  });
+
   it('opens the group filter after first-time Stalker save and preloads VOD categories when enabled', async () => {
     createFormMock({ enable_vod: true });
     setupStores();

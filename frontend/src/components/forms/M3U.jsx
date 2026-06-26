@@ -722,15 +722,13 @@ const M3U = ({
           <Flex mih={50} gap="xs" justify="flex-end" align="flex-end">
             {playlist && (
               <>
-                {!isStalker && (
-                  <Button
-                    variant="filled"
-                    size="sm"
-                    onClick={() => setFilterModalOpen(true)}
-                  >
-                    Filters
-                  </Button>
-                )}
+                <Button
+                  variant="filled"
+                  size="sm"
+                  onClick={() => setFilterModalOpen(true)}
+                >
+                  Filters
+                </Button>
                 <Button
                   variant="filled"
                   size="sm"
