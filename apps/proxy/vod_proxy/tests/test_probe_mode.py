@@ -44,6 +44,40 @@ class TestProbeModeHeuristics(TestCase):
             )
         )
 
+    def test_probe_mode_accepts_non_zero_open_ended_ranges_during_burst(self):
+        user_agent = "Lavf/60.16.100"
+        kwargs = {
+            "client_ip": "10.0.0.10",
+            "client_user_agent": user_agent,
+            "range_header": "bytes=1825399766-",
+            "session_id": None,
+            "offset": None,
+            "utc_start": None,
+            "utc_end": None,
+        }
+
+        self.assertFalse(
+            views._should_use_probe_mode(
+                content_type="movie",
+                content_id="movie-1",
+                **kwargs,
+            )
+        )
+        self.assertFalse(
+            views._should_use_probe_mode(
+                content_type="movie",
+                content_id="movie-2",
+                **kwargs,
+            )
+        )
+        self.assertTrue(
+            views._should_use_probe_mode(
+                content_type="movie",
+                content_id="movie-3",
+                **kwargs,
+            )
+        )
+
     def test_probe_mode_rejects_non_probe_shapes(self):
         self.assertFalse(
             views._should_use_probe_mode(
@@ -64,7 +98,7 @@ class TestProbeModeHeuristics(TestCase):
                 client_user_agent="Lavf/60.16.100",
                 content_type="movie",
                 content_id="movie-1",
-                range_header="bytes=100-",
+                range_header="bytes=100-200",
                 session_id=None,
                 offset=None,
                 utc_start=None,

@@ -49,6 +49,28 @@ def _is_plex_probe_user_agent(user_agent):
     return "lavf/" in normalized or "plex" in normalized
 
 
+def _is_open_ended_probe_range(range_header):
+    if not range_header:
+        return False
+
+    normalized = str(range_header).strip().lower()
+    if not normalized.startswith("bytes="):
+        return False
+
+    range_spec = normalized[len("bytes="):]
+    if "," in range_spec:
+        return False
+    if "-" not in range_spec:
+        return False
+
+    start, end = range_spec.split("-", 1)
+    if end.strip():
+        return False
+
+    start = start.strip()
+    return start.isdigit() or start == ""
+
+
 def _record_probe_activity(client_ip, client_user_agent, content_type, content_id, now=None):
     now = now or time.time()
     activity_key = f"{client_ip}:{client_user_agent or 'unknown'}"
@@ -78,7 +100,7 @@ def _should_use_probe_mode(
         return False
     if not _is_plex_probe_user_agent(client_user_agent):
         return False
-    if (range_header or "").strip().lower() != "bytes=0-":
+    if not _is_open_ended_probe_range(range_header):
         return False
 
     unique_content_count = _record_probe_activity(
