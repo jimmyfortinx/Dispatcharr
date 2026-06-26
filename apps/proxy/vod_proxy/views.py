@@ -8,6 +8,7 @@ import random
 import logging
 import requests
 from urllib.parse import urlencode
+from collections import deque
 from django.db import close_old_connections
 from django.http import StreamingHttpResponse, JsonResponse, Http404, HttpResponse
 from django.shortcuts import get_object_or_404
@@ -36,6 +37,131 @@ from core.utils import dispatcharr_user_agent
 logger = logging.getLogger(__name__)
 
 _request_times = {}
+_probe_activity = {}
+PROBE_ACTIVITY_WINDOW_SECONDS = 30
+PROBE_ACTIVITY_MIN_UNIQUE_CONTENT = 3
+
+
+def _is_plex_probe_user_agent(user_agent):
+    if not user_agent:
+        return False
+    normalized = user_agent.lower()
+    return "lavf/" in normalized or "plex" in normalized
+
+
+def _record_probe_activity(client_ip, client_user_agent, content_type, content_id, now=None):
+    now = now or time.time()
+    activity_key = f"{client_ip}:{client_user_agent or 'unknown'}"
+    bucket = _probe_activity.setdefault(activity_key, deque())
+    bucket.append((now, content_type, str(content_id)))
+
+    while bucket and (now - bucket[0][0]) > PROBE_ACTIVITY_WINDOW_SECONDS:
+        bucket.popleft()
+
+    unique_content = {(entry[1], entry[2]) for entry in bucket}
+    return len(unique_content)
+
+
+def _should_use_probe_mode(
+    *,
+    client_ip,
+    client_user_agent,
+    content_type,
+    content_id,
+    range_header,
+    session_id,
+    offset=None,
+    utc_start=None,
+    utc_end=None,
+):
+    if session_id or offset or utc_start or utc_end:
+        return False
+    if not _is_plex_probe_user_agent(client_user_agent):
+        return False
+    if (range_header or "").strip().lower() != "bytes=0-":
+        return False
+
+    unique_content_count = _record_probe_activity(
+        client_ip,
+        client_user_agent,
+        content_type,
+        content_id,
+    )
+    return unique_content_count >= PROBE_ACTIVITY_MIN_UNIQUE_CONTENT
+
+
+def _stream_stalker_probe_content(
+    *,
+    content_name,
+    stream_url,
+    m3u_profile,
+    client_user_agent,
+    request,
+    input_headers=None,
+    range_header=None,
+):
+    connection_manager = MultiWorkerVODConnectionManager.get_instance()
+    provider_headers = connection_manager._build_provider_request_headers(
+        m3u_profile,
+        client_user_agent,
+        request,
+        input_headers=input_headers,
+    )
+    if range_header:
+        provider_headers["Range"] = range_header
+
+    logger.info(
+        "[VOD-PROBE] Starting lightweight probe stream for %s",
+        content_name,
+    )
+    upstream_response = requests.get(
+        stream_url,
+        headers=provider_headers,
+        stream=True,
+        timeout=(
+            MultiWorkerVODConnectionManager.UPSTREAM_CONNECT_TIMEOUT_SECONDS,
+            MultiWorkerVODConnectionManager.UPSTREAM_READ_TIMEOUT_SECONDS,
+        ),
+        allow_redirects=True,
+    )
+    upstream_response.raise_for_status()
+
+    content_type_header = (
+        upstream_response.headers.get("Content-Type")
+        or upstream_response.headers.get("content-type")
+        or infer_content_type_from_url(upstream_response.url)
+        or infer_content_type_from_url(stream_url)
+        or "video/mp4"
+    )
+
+    def stream_generator():
+        try:
+            for chunk in upstream_response.iter_content(chunk_size=8192):
+                if chunk:
+                    yield chunk
+        finally:
+            upstream_response.close()
+
+    response = StreamingHttpResponse(
+        streaming_content=stream_generator(),
+        content_type=content_type_header,
+    )
+    response.status_code = upstream_response.status_code
+    response["Cache-Control"] = "no-cache"
+    response["Pragma"] = "no-cache"
+    response["X-Dispatcharr-Probe-Mode"] = "1"
+
+    for header_name in ("Accept-Ranges", "Content-Length", "Content-Range"):
+        header_value = upstream_response.headers.get(header_name)
+        if header_value:
+            response[header_name] = header_value
+
+    logger.info(
+        "[VOD-PROBE] Lightweight probe response ready for %s (status: %s)",
+        content_name,
+        response.status_code,
+    )
+    return response
 
 
 def _active_vod_account_filters():
@@ -552,8 +678,50 @@ def stream_vod(request, content_type, content_id, session_id=None, profile_id=No
             f"User-Agent: {(client_user_agent[:50] if client_user_agent else 'None')}..."
         )
 
-        # If no session ID, create one and redirect to path-based URL
-        if not session_id:
+        # Extract preferred M3U account ID and stream ID from query parameters
+        preferred_m3u_account_id = request.GET.get('m3u_account_id')
+        preferred_stream_id = request.GET.get('stream_id')
+
+        if preferred_m3u_account_id:
+            try:
+                preferred_m3u_account_id = int(preferred_m3u_account_id)
+            except (ValueError, TypeError):
+                logger.warning(f"[VOD-PARAM] Invalid m3u_account_id parameter: {preferred_m3u_account_id}")
+                preferred_m3u_account_id = None
+
+        if preferred_stream_id:
+            logger.info(f"[VOD-PARAM] Preferred stream ID: {preferred_stream_id}")
+
+        # Get the content object and its relation
+        content_obj, relation = _get_content_and_relation(content_type, content_id, preferred_m3u_account_id, preferred_stream_id)
+        if not content_obj or not relation:
+            logger.error(f"[VOD-ERROR] Content or relation not found: {content_type} {content_id}")
+            raise Http404(f"Content not found: {content_type} {content_id}")
+
+        logger.info(f"[VOD-CONTENT] Found content: {getattr(content_obj, 'name', 'Unknown')}")
+
+        # Get M3U account from relation
+        m3u_account = relation.m3u_account
+        logger.info(f"[VOD-ACCOUNT] Using M3U account: {m3u_account.name}")
+        probe_mode = (
+            m3u_account.account_type == M3UAccount.Types.STALKER
+            and _should_use_probe_mode(
+                client_ip=client_ip,
+                client_user_agent=client_user_agent,
+                content_type=content_type,
+                content_id=content_id,
+                range_header=range_header,
+                session_id=session_id,
+                offset=offset,
+                utc_start=utc_start,
+                utc_end=utc_end,
+            )
+        )
+        logger.info(f"[VOD-PROBE] Probe mode enabled: {probe_mode}")
+
+        # If no session ID, create one and redirect to path-based URL unless this
+        # looks like a scan/probe burst that can stay on the lightweight path.
+        if not session_id and not probe_mode:
             new_session_id = f"vod_{int(time.time() * 1000)}_{random.randint(1000, 9999)}"
             logger.info(f"[VOD-SESSION] Creating new session: {new_session_id}")
 
@@ -606,7 +774,7 @@ def stream_vod(request, content_type, content_id, session_id=None, profile_id=No
         # Resolve user from Redis session mapping when the streaming request
         # arrives without auth credentials (token was stripped from redirect URL).
         # Only needed on the first streaming request - skip if connection already exists.
-        if user is None:
+        if user is None and session_id:
             try:
                 from core.utils import RedisClient
                 _r = RedisClient.get_client()
@@ -617,38 +785,12 @@ def stream_vod(request, content_type, content_id, session_id=None, profile_id=No
             except Exception:
                 pass
 
-        if user:
+        if user and not probe_mode:
             if not check_user_stream_limits(user, session_id, media_id=content_id):
                 return JsonResponse(
                     {"error": f"Stream limit exceeded ({user.stream_limit} concurrent streams allowed)"},
                     status=429
                 )
-
-        # Extract preferred M3U account ID and stream ID from query parameters
-        preferred_m3u_account_id = request.GET.get('m3u_account_id')
-        preferred_stream_id = request.GET.get('stream_id')
-
-        if preferred_m3u_account_id:
-            try:
-                preferred_m3u_account_id = int(preferred_m3u_account_id)
-            except (ValueError, TypeError):
-                logger.warning(f"[VOD-PARAM] Invalid m3u_account_id parameter: {preferred_m3u_account_id}")
-                preferred_m3u_account_id = None
-
-        if preferred_stream_id:
-            logger.info(f"[VOD-PARAM] Preferred stream ID: {preferred_stream_id}")
-
-        # Get the content object and its relation
-        content_obj, relation = _get_content_and_relation(content_type, content_id, preferred_m3u_account_id, preferred_stream_id)
-        if not content_obj or not relation:
-            logger.error(f"[VOD-ERROR] Content or relation not found: {content_type} {content_id}")
-            raise Http404(f"Content not found: {content_type} {content_id}")
-
-        logger.info(f"[VOD-CONTENT] Found content: {getattr(content_obj, 'name', 'Unknown')}")
-
-        # Get M3U account from relation
-        m3u_account = relation.m3u_account
-        logger.info(f"[VOD-ACCOUNT] Using M3U account: {m3u_account.name}")
 
         # Resolve provider-specific playback context before profile transforms.
         stream_context = _get_stream_context_for_request(relation, session_id=session_id)
@@ -678,6 +820,17 @@ def stream_vod(request, content_type, content_id, session_id=None, profile_id=No
         if not final_stream_url or not final_stream_url.startswith(('http://', 'https://')):
             logger.error(f"[VOD-ERROR] Invalid stream URL: {final_stream_url}")
             return HttpResponse("Invalid stream URL", status=500)
+
+        if probe_mode:
+            return _stream_stalker_probe_content(
+                content_name=getattr(content_obj, 'name', 'Unknown'),
+                stream_url=final_stream_url,
+                m3u_profile=m3u_profile,
+                client_user_agent=client_user_agent,
+                request=request,
+                input_headers=stream_context.get("input_headers"),
+                range_header=range_header,
+            )
 
         # Get connection manager (Redis-backed for multi-worker support)
         connection_manager = MultiWorkerVODConnectionManager.get_instance()
@@ -889,6 +1042,48 @@ def head_vod(request, content_type, content_id, session_id=None, profile_id=None
     except Exception as e:
         logger.error(f"[VOD-HEAD] Error in HEAD request: {e}", exc_info=True)
         return HttpResponse(f"HEAD error: {str(e)}", status=500)
+
+
+class VODStreamView:
+    """Compatibility wrapper for tests that still exercise the old class API."""
+
+    _get_content_and_relation = staticmethod(_get_content_and_relation)
+    _get_m3u_profile = staticmethod(_get_m3u_profile)
+    _get_stream_context_for_request = staticmethod(_get_stream_context_for_request)
+
+    def _call_with_overrides(self, func, request, content_type, content_id, session_id=None, profile_id=None):
+        original_content_lookup = globals()["_get_content_and_relation"]
+        original_profile_lookup = globals()["_get_m3u_profile"]
+        original_stream_context_lookup = globals()["_get_stream_context_for_request"]
+        globals()["_get_content_and_relation"] = self._get_content_and_relation
+        globals()["_get_m3u_profile"] = self._get_m3u_profile
+        globals()["_get_stream_context_for_request"] = self._get_stream_context_for_request
+        try:
+            return func(request, content_type, content_id, session_id, profile_id)
+        finally:
+            globals()["_get_content_and_relation"] = original_content_lookup
+            globals()["_get_m3u_profile"] = original_profile_lookup
+            globals()["_get_stream_context_for_request"] = original_stream_context_lookup
+
+    def get(self, request, content_type, content_id, session_id=None, profile_id=None):
+        return self._call_with_overrides(
+            stream_vod,
+            request,
+            content_type,
+            content_id,
+            session_id=session_id,
+            profile_id=profile_id,
+        )
+
+    def head(self, request, content_type, content_id, session_id=None, profile_id=None):
+        return self._call_with_overrides(
+            head_vod,
+            request,
+            content_type,
+            content_id,
+            session_id=session_id,
+            profile_id=profile_id,
+        )
 
 def build_vod_stats_data(redis_client):
     """

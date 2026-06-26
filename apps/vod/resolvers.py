@@ -1,10 +1,12 @@
 import base64
+import hashlib
 import json
 from dataclasses import dataclass
 from typing import Dict, Optional
 
 from apps.m3u.models import M3UAccount
 from apps.m3u.stalker import StalkerClient, StalkerError
+from core.utils import RedisClient
 
 
 @dataclass
@@ -12,6 +14,9 @@ class ResolvedVODStreamContext:
     url: Optional[str]
     user_agent: Optional[str] = None
     input_headers: Optional[Dict[str, str]] = None
+
+
+STALKER_VOD_PLAYBACK_CACHE_TTL_SECONDS = 30
 
 
 def resolve_vod_stream_context(relation) -> ResolvedVODStreamContext:
@@ -65,6 +70,19 @@ def _resolve_stalker_vod_stream_context(relation) -> ResolvedVODStreamContext:
             "Stalker VOD item is missing portal metadata required for playback."
         )
 
+    series_number = _get_stalker_episode_series_selector(
+        relation,
+        relation_properties,
+        cmd,
+    )
+    cached_context = _load_cached_stalker_vod_stream_context(
+        relation,
+        cmd,
+        series_number,
+    )
+    if cached_context is not None:
+        return cached_context
+
     client = StalkerClient(
         server_url=m3u_account.server_url,
         mac=account_properties.get("mac", ""),
@@ -77,11 +95,6 @@ def _resolve_stalker_vod_stream_context(relation) -> ResolvedVODStreamContext:
         relation=relation,
         client=client,
         account_properties=account_properties,
-    )
-    series_number = _get_stalker_episode_series_selector(
-        relation,
-        relation_properties,
-        cmd,
     )
     resolved_url = client.resolve_vod_playback_url(
         portal_url,
@@ -97,11 +110,99 @@ def _resolve_stalker_vod_stream_context(relation) -> ResolvedVODStreamContext:
         portal_url=portal_url,
     )
 
-    return ResolvedVODStreamContext(
+    stream_context = ResolvedVODStreamContext(
         url=resolved_url,
         user_agent=input_headers.get("User-Agent") or client.user_agent,
         input_headers=input_headers,
     )
+    _store_cached_stalker_vod_stream_context(
+        relation,
+        cmd,
+        series_number,
+        stream_context,
+    )
+    return stream_context
+
+
+def _get_stalker_vod_cache_key(relation, cmd, series_number) -> str:
+    account_id = getattr(getattr(relation, "m3u_account", None), "id", "unknown")
+    stream_id = getattr(relation, "stream_id", "") or ""
+    relation_type = _get_relation_content_type(relation) or "unknown"
+    cmd_hash = hashlib.sha1(str(cmd).encode("utf-8")).hexdigest()[:16]
+    series_part = str(series_number) if series_number is not None else "none"
+    return (
+        "stalker_vod_playback:"
+        f"{account_id}:{relation_type}:{stream_id}:{series_part}:{cmd_hash}"
+    )
+
+
+def _load_cached_stalker_vod_stream_context(
+    relation,
+    cmd,
+    series_number,
+) -> Optional[ResolvedVODStreamContext]:
+    redis_client = RedisClient.get_client()
+    if redis_client is None:
+        return None
+
+    cache_key = _get_stalker_vod_cache_key(relation, cmd, series_number)
+    try:
+        raw_payload = redis_client.get(cache_key)
+    except Exception:
+        return None
+
+    if not raw_payload:
+        return None
+
+    if isinstance(raw_payload, bytes):
+        raw_payload = raw_payload.decode("utf-8", errors="ignore")
+
+    try:
+        payload = json.loads(raw_payload)
+    except (TypeError, ValueError):
+        return None
+
+    url = payload.get("url")
+    if not url:
+        return None
+
+    input_headers = payload.get("input_headers")
+    if not isinstance(input_headers, dict):
+        input_headers = None
+
+    return ResolvedVODStreamContext(
+        url=url,
+        user_agent=payload.get("user_agent"),
+        input_headers=input_headers,
+    )
+
+
+def _store_cached_stalker_vod_stream_context(
+    relation,
+    cmd,
+    series_number,
+    stream_context: ResolvedVODStreamContext,
+) -> None:
+    redis_client = RedisClient.get_client()
+    if redis_client is None or not stream_context.url:
+        return
+
+    cache_key = _get_stalker_vod_cache_key(relation, cmd, series_number)
+    payload = json.dumps(
+        {
+            "url": stream_context.url,
+            "user_agent": stream_context.user_agent,
+            "input_headers": stream_context.input_headers or {},
+        }
+    )
+    try:
+        redis_client.set(
+            cache_key,
+            payload,
+            ex=STALKER_VOD_PLAYBACK_CACHE_TTL_SECONDS,
+        )
+    except Exception:
+        return
 
 
 def _get_stalker_vod_portal_url(relation, client, account_properties) -> str:

@@ -15,6 +15,20 @@ from apps.vod.models import M3UMovieRelation, Movie
 from apps.vod.resolvers import resolve_vod_stream_context
 
 
+class ResolverFakeRedis:
+    def __init__(self):
+        self._data = {}
+
+    def get(self, key):
+        return self._data.get(key)
+
+    def set(self, key, value, ex=None, nx=False):
+        if nx and key in self._data:
+            return False
+        self._data[key] = value
+        return True
+
+
 class StalkerPhase14MovieResolverTests(TestCase):
     def setUp(self):
         self.account = M3UAccount.objects.create(
@@ -196,6 +210,35 @@ class StalkerPhase14MovieResolverTests(TestCase):
             "http://portal.example.com/stalker_portal/server/load.php",
         )
 
+    @patch("apps.vod.resolvers.RedisClient.get_client")
+    @patch("apps.vod.resolvers.StalkerClient.resolve_vod_playback_url", autospec=True)
+    @patch("apps.vod.resolvers.StalkerClient.discover_vod_categories", autospec=True)
+    def test_resolver_reuses_short_lived_cached_stalker_vod_context(
+        self,
+        mock_discover_vod_categories,
+        mock_resolve_vod_playback_url,
+        mock_get_redis_client,
+    ):
+        fake_redis = ResolverFakeRedis()
+        mock_get_redis_client.return_value = fake_redis
+        mock_discover_vod_categories.return_value = SimpleNamespace(
+            normalized_portal_url="http://portal.example.com/stalker_portal/server/load.php"
+        )
+        mock_resolve_vod_playback_url.return_value = (
+            "http://resolved.example.com/movie-100.mkv"
+        )
+
+        first_context = resolve_vod_stream_context(self.relation)
+        second_context = resolve_vod_stream_context(self.relation)
+
+        self.assertEqual(
+            first_context.url,
+            "http://resolved.example.com/movie-100.mkv",
+        )
+        self.assertEqual(second_context.url, first_context.url)
+        self.assertEqual(mock_resolve_vod_playback_url.call_count, 1)
+        self.assertEqual(mock_discover_vod_categories.call_count, 1)
+
     def test_resolver_keeps_xtream_movie_urls_on_existing_route_pattern(self):
         account = M3UAccount.objects.create(
             name="XC Movies Playback",
@@ -364,6 +407,7 @@ class _FakeHeadResponse:
 class _FakeUpstreamResponse:
     def __init__(self, url, headers=None):
         self.url = url
+        self.status_code = 200
         self.headers = headers or {
             "content-length": "4096",
             "content-type": "video/mp4",
@@ -476,7 +520,7 @@ class StalkerPhase15SeriesCreateLinkTests(TestCase):
         self.assertEqual(resolved, "http://media.example.com/episode-1.avi")
         mock_request.assert_called_once_with(
             "GET",
-            "http://portal.example.com/stalker_portal/portal.php?action=create_link&type=vod&cmd=eyJzZXJpZXNfaWQiOjcxNDEsInNlYXNvbl9udW0iOjEsInR5cGUiOiJzZXJpZXMifQ%3D%3D&series=1&JsHttpRequest=1-xml",
+            "http://portal.example.com/stalker_portal/portal.php?action=create_link&type=vod&cmd=eyJzZXJpZXNfaWQiOjcxNDEsInNlYXNvbl9udW0iOjEsInR5cGUiOiJzZXJpZXMifQ==&series=1&JsHttpRequest=1-xml",
             with_auth=True,
         )
 
