@@ -21,15 +21,18 @@ class FakeRedis:
         val = self._data.get(key)
         return str(val).encode() if val is not None else None
 
-    def set(self, key, value, ex=None):
-        self._data[key] = int(value)
+    def set(self, key, value, ex=None, nx=False):
+        if nx and key in self._data:
+            return False
+        self._data[key] = value
+        return True
 
     def incr(self, key):
-        self._data[key] = self._data.get(key, 0) + 1
+        self._data[key] = int(self._data.get(key, 0)) + 1
         return self._data[key]
 
     def decr(self, key):
-        self._data[key] = self._data.get(key, 0) - 1
+        self._data[key] = int(self._data.get(key, 0)) - 1
         return self._data[key]
 
     def delete(self, key):
@@ -40,6 +43,28 @@ class FakeRedis:
 
     def pipeline(self):
         return FakePipeline(self)
+
+    def hset(self, key, mapping):
+        current = self._data.get(key, {})
+        if not isinstance(current, dict):
+            current = {}
+        current.update(mapping)
+        self._data[key] = current
+        return True
+
+    def hgetall(self, key):
+        value = self._data.get(key, {})
+        return value if isinstance(value, dict) else {}
+
+    def expire(self, key, seconds):
+        return True
+
+    def scan(self, cursor, match=None, count=None):
+        keys = []
+        if match == "vod_persistent_connection:*":
+            prefix = "vod_persistent_connection:"
+            keys = [k for k in self._data.keys() if isinstance(k, str) and k.startswith(prefix)]
+        return 0, keys
 
 
 class FakePipeline:
@@ -53,6 +78,10 @@ class FakePipeline:
 
     def decr(self, key):
         self._cmds.append(('decr', key))
+        return self
+
+    def delete(self, key):
+        self._cmds.append(('delete', key))
         return self
 
     def execute(self):
@@ -251,3 +280,59 @@ class TestDecrementActiveStreamsAndCheck(TestCase):
             RedisBackedVODConnection.decrement_active_streams_and_check(conn)
 
         conn._release_lock.assert_called_once()
+
+
+class TestIdleSessionReuseControls(TestCase):
+    def test_find_matching_idle_session_short_circuits_when_reuse_disabled(self):
+        from apps.proxy.vod_proxy.multi_worker_connection_manager import (
+            MultiWorkerVODConnectionManager,
+        )
+
+        mgr = MultiWorkerVODConnectionManager.__new__(MultiWorkerVODConnectionManager)
+        mgr.redis_client = MagicMock()
+        mgr.worker_id = "test-worker"
+        mgr.IDLE_SESSION_REUSE_ENABLED = False
+
+        result = mgr.find_matching_idle_session(
+            content_type="movie",
+            content_uuid="abc",
+            client_ip="10.0.0.1",
+            client_user_agent="UA",
+        )
+
+        self.assertIsNone(result)
+        mgr.redis_client.scan.assert_not_called()
+
+
+class TestFailedReuseCleanup(TestCase):
+    def _make_state(self, session_id="reuse-session", active_streams=1, worker_id="test-worker"):
+        from apps.proxy.vod_proxy.multi_worker_connection_manager import SerializableConnectionState
+
+        state = SerializableConnectionState(
+            session_id=session_id,
+            stream_url="http://example.com/movie.mkv",
+            headers={"User-Agent": "UA"},
+            m3u_profile_id=7,
+            content_obj_type="movie",
+            content_uuid="uuid-1",
+            content_name="Movie 1",
+            client_ip="10.0.0.1",
+            client_user_agent="UA",
+            worker_id=worker_id,
+            user_id="1",
+        )
+        state.active_streams = active_streams
+        return state
+
+    def test_force_cleanup_after_failed_reuse_deletes_connection_state(self):
+        from apps.proxy.vod_proxy.multi_worker_connection_manager import RedisBackedVODConnection
+
+        redis = FakeRedis()
+        conn = RedisBackedVODConnection("reuse-session", redis_client=redis)
+        conn._save_connection_state(self._make_state())
+
+        result = conn.force_cleanup_after_failed_reuse(current_worker_id="test-worker")
+
+        self.assertTrue(result)
+        self.assertEqual(redis.hgetall(conn.connection_key), {})
+        self.assertFalse(redis.exists(conn.lock_key))

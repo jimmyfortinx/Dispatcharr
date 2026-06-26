@@ -747,13 +747,64 @@ class RedisBackedVODConnection:
             # Always release the lock
             self._release_lock()
 
+    def force_cleanup_after_failed_reuse(self, current_worker_id=None):
+        """Remove Redis state for a reused session that failed before streaming.
+
+        Reused idle sessions reserve ownership/active_streams before the new
+        upstream request is attempted. If that request fails, the session must
+        be torn down immediately so it cannot linger as an apparently active
+        connection.
+        """
+        if self.local_response:
+            self.local_response.close()
+            self.local_response = None
+        if self.local_session:
+            self.local_session.close()
+            self.local_session = None
+
+        if not self.redis_client:
+            logger.info(f"[{self.session_id}] No Redis client - failed reuse cleanup skipped")
+            return False
+
+        if not self._acquire_lock():
+            logger.warning(f"[{self.session_id}] Could not acquire lock for failed reuse cleanup")
+            return False
+
+        try:
+            state = self._get_connection_state()
+            if not state:
+                logger.info(f"[{self.session_id}] No connection state found during failed reuse cleanup")
+                return True
+
+            if current_worker_id and state.worker_id not in (None, "", current_worker_id):
+                logger.warning(
+                    f"[{self.session_id}] Failed reuse cleanup saw ownership on "
+                    f"{state.worker_id}; current worker={current_worker_id}"
+                )
+
+            pipe = self.redis_client.pipeline()
+            pipe.delete(self.connection_key)
+            pipe.delete(self.lock_key)
+            pipe.execute()
+            logger.info(
+                f"[{self.session_id}] Force-cleaned Redis keys after upstream "
+                "connect failure during session reuse"
+            )
+            return True
+        except Exception as e:
+            logger.error(f"[{self.session_id}] Error during failed reuse cleanup: {e}")
+            return False
+        finally:
+            self._release_lock()
+
 
 # Modify the VODConnectionManager to use Redis-backed connections
 class MultiWorkerVODConnectionManager:
     """Enhanced VOD Connection Manager that works across multiple uwsgi workers"""
 
     _instance = None
-    SESSION_REUSE_GRACE_SECONDS = 20
+    SESSION_REUSE_GRACE_SECONDS = 3
+    IDLE_SESSION_REUSE_ENABLED = False
     UPSTREAM_CONNECT_TIMEOUT_SECONDS = 10
     UPSTREAM_READ_TIMEOUT_SECONDS = 30
 
@@ -1375,7 +1426,12 @@ class MultiWorkerVODConnectionManager:
                 # Pass connection_manager=None since we already decremented above
                 if redis_connection:
                     try:
-                        redis_connection.cleanup(current_worker_id=self.worker_id)
+                        if matching_session_id:
+                            redis_connection.force_cleanup_after_failed_reuse(
+                                current_worker_id=self.worker_id
+                            )
+                        else:
+                            redis_connection.cleanup(current_worker_id=self.worker_id)
                     except Exception as cleanup_error:
                         logger.error(f"[{client_id}] Error during cleanup after connection failure: {cleanup_error}")
 
@@ -1637,6 +1693,9 @@ class MultiWorkerVODConnectionManager:
                                  utc_start=None, utc_end=None, offset=None) -> Optional[str]:
         """Find existing Redis-backed session that matches criteria using consolidated connection state"""
         if not self.redis_client:
+            return None
+        if not self.IDLE_SESSION_REUSE_ENABLED:
+            logger.debug("Idle VOD session reuse disabled; skipping idle-session scan")
             return None
 
         try:
