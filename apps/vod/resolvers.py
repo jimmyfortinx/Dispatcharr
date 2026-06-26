@@ -1,12 +1,16 @@
 import base64
 import hashlib
 import json
+import logging
 from dataclasses import dataclass
 from typing import Dict, Optional
 
 from apps.m3u.models import M3UAccount
 from apps.m3u.stalker import StalkerClient, StalkerError
 from core.utils import RedisClient
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -149,9 +153,22 @@ def _load_cached_stalker_vod_stream_context(
     try:
         raw_payload = redis_client.get(cache_key)
     except Exception:
+        logger.debug(
+            "Failed to read Stalker VOD playback cache for account=%s stream_id=%s key=%s",
+            getattr(getattr(relation, "m3u_account", None), "id", None),
+            getattr(relation, "stream_id", None),
+            cache_key,
+            exc_info=True,
+        )
         return None
 
     if not raw_payload:
+        logger.info(
+            "Stalker VOD playback cache miss for account=%s stream_id=%s key=%s",
+            getattr(getattr(relation, "m3u_account", None), "id", None),
+            getattr(relation, "stream_id", None),
+            cache_key,
+        )
         return None
 
     if isinstance(raw_payload, bytes):
@@ -170,6 +187,12 @@ def _load_cached_stalker_vod_stream_context(
     if not isinstance(input_headers, dict):
         input_headers = None
 
+    logger.info(
+        "Stalker VOD playback cache hit for account=%s stream_id=%s key=%s",
+        getattr(getattr(relation, "m3u_account", None), "id", None),
+        getattr(relation, "stream_id", None),
+        cache_key,
+    )
     return ResolvedVODStreamContext(
         url=url,
         user_agent=payload.get("user_agent"),
@@ -200,6 +223,13 @@ def _store_cached_stalker_vod_stream_context(
             cache_key,
             payload,
             ex=STALKER_VOD_PLAYBACK_CACHE_TTL_SECONDS,
+        )
+        logger.info(
+            "Stored Stalker VOD playback cache entry for account=%s stream_id=%s key=%s ttl=%ss",
+            getattr(getattr(relation, "m3u_account", None), "id", None),
+            getattr(relation, "stream_id", None),
+            cache_key,
+            STALKER_VOD_PLAYBACK_CACHE_TTL_SECONDS,
         )
     except Exception:
         return

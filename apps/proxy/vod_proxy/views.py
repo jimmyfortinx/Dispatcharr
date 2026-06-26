@@ -8,7 +8,7 @@ import random
 import logging
 import hashlib
 import requests
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 from django.db import close_old_connections
 from django.http import StreamingHttpResponse, JsonResponse, Http404, HttpResponse
 from django.shortcuts import get_object_or_404
@@ -87,7 +87,10 @@ def _record_probe_activity(client_ip, client_user_agent, content_type, content_i
             pipe.zcard(activity_key)
             pipe.expire(activity_key, PROBE_ACTIVITY_WINDOW_SECONDS)
             _, _, unique_content_count, _ = pipe.execute()
-            return int(unique_content_count)
+            return {
+                "unique_content_count": int(unique_content_count),
+                "backend": "redis",
+            }
         except Exception:
             logger.warning(
                 "[VOD-PROBE] Redis probe activity tracking failed for %s",
@@ -105,7 +108,10 @@ def _record_probe_activity(client_ip, client_user_agent, content_type, content_i
     ]
     for member in expired_members:
         bucket.pop(member, None)
-    return len(bucket)
+    return {
+        "unique_content_count": len(bucket),
+        "backend": "memory",
+    }
 
 
 def _get_probe_activity_redis_key(client_ip, client_user_agent):
@@ -127,20 +133,68 @@ def _should_use_probe_mode(
     utc_start=None,
     utc_end=None,
 ):
-    if session_id or offset or utc_start or utc_end:
-        return False
-    if not _is_plex_probe_user_agent(client_user_agent):
-        return False
-    if not _is_open_ended_probe_range(range_header):
-        return False
+    evaluation = _evaluate_probe_mode(
+        client_ip=client_ip,
+        client_user_agent=client_user_agent,
+        content_type=content_type,
+        content_id=content_id,
+        range_header=range_header,
+        session_id=session_id,
+        offset=offset,
+        utc_start=utc_start,
+        utc_end=utc_end,
+    )
+    return evaluation["enabled"]
 
-    unique_content_count = _record_probe_activity(
+
+def _evaluate_probe_mode(
+    *,
+    client_ip,
+    client_user_agent,
+    content_type,
+    content_id,
+    range_header,
+    session_id,
+    offset=None,
+    utc_start=None,
+    utc_end=None,
+):
+    if session_id or offset or utc_start or utc_end:
+        return {
+            "enabled": False,
+            "reason": "existing-session-or-timeshift",
+            "backend": None,
+            "unique_content_count": None,
+        }
+    if not _is_plex_probe_user_agent(client_user_agent):
+        return {
+            "enabled": False,
+            "reason": "non-plex-user-agent",
+            "backend": None,
+            "unique_content_count": None,
+        }
+    if not _is_open_ended_probe_range(range_header):
+        return {
+            "enabled": False,
+            "reason": "range-not-open-ended",
+            "backend": None,
+            "unique_content_count": None,
+        }
+
+    activity = _record_probe_activity(
         client_ip,
         client_user_agent,
         content_type,
         content_id,
     )
-    return unique_content_count >= PROBE_ACTIVITY_MIN_UNIQUE_CONTENT
+    unique_content_count = activity["unique_content_count"]
+    enabled = unique_content_count >= PROBE_ACTIVITY_MIN_UNIQUE_CONTENT
+    return {
+        "enabled": enabled,
+        "reason": "scan-burst-detected" if enabled else "below-unique-content-threshold",
+        "backend": activity["backend"],
+        "unique_content_count": unique_content_count,
+    }
 
 
 def _stream_stalker_probe_content(
@@ -459,6 +513,7 @@ def _get_content_and_relation(content_type, content_id, preferred_m3u_account_id
 
 def _get_stream_context_from_relation(relation):
     """Resolve stream URL and any provider-specific request headers."""
+    started_at = time.monotonic()
     try:
         # Log the relation type and available attributes
         logger.info(f"[VOD-URL] Relation type: {type(relation).__name__}")
@@ -468,6 +523,13 @@ def _get_stream_context_from_relation(relation):
         stream_context = resolve_vod_stream_context(relation)
         if stream_context.url:
             logger.info(f"[VOD-URL] Resolved provider-aware URL: {stream_context.url}")
+            logger.info(
+                "[VOD-URL] Resolved stream context in %.3fs for account=%s stream_id=%s host=%s",
+                time.monotonic() - started_at,
+                getattr(relation.m3u_account, "id", None),
+                getattr(relation, "stream_id", None),
+                urlparse(stream_context.url).netloc or "unknown",
+            )
             return {
                 "url": stream_context.url,
                 "user_agent": stream_context.user_agent,
@@ -479,6 +541,13 @@ def _get_stream_context_from_relation(relation):
             url = relation.get_stream_url()
             if url:
                 logger.info(f"[VOD-URL] Built URL from legacy get_stream_url(): {url}")
+                logger.info(
+                    "[VOD-URL] Built legacy stream context in %.3fs for account=%s stream_id=%s host=%s",
+                    time.monotonic() - started_at,
+                    getattr(relation.m3u_account, "id", None),
+                    getattr(relation, "stream_id", None),
+                    urlparse(url).netloc or "unknown",
+                )
                 return {
                     "url": url,
                     "user_agent": None,
@@ -493,7 +562,12 @@ def _get_stream_context_from_relation(relation):
             "input_headers": None,
         }
     except Exception as e:
-        logger.error(f"[VOD-URL] Error getting stream URL from relation: {e}", exc_info=True)
+        logger.error(
+            "[VOD-URL] Error getting stream URL from relation after %.3fs: %s",
+            time.monotonic() - started_at,
+            e,
+            exc_info=True,
+        )
         return {
             "url": None,
             "user_agent": None,
@@ -756,9 +830,8 @@ def stream_vod(request, content_type, content_id, session_id=None, profile_id=No
         # Get M3U account from relation
         m3u_account = relation.m3u_account
         logger.info(f"[VOD-ACCOUNT] Using M3U account: {m3u_account.name}")
-        probe_mode = (
-            m3u_account.account_type == M3UAccount.Types.STALKER
-            and _should_use_probe_mode(
+        probe_evaluation = (
+            _evaluate_probe_mode(
                 client_ip=client_ip,
                 client_user_agent=client_user_agent,
                 content_type=content_type,
@@ -769,8 +842,28 @@ def stream_vod(request, content_type, content_id, session_id=None, profile_id=No
                 utc_start=utc_start,
                 utc_end=utc_end,
             )
+            if m3u_account.account_type == M3UAccount.Types.STALKER
+            else {
+                "enabled": False,
+                "reason": "non-stalker-provider",
+                "backend": None,
+                "unique_content_count": None,
+            }
         )
-        logger.info(f"[VOD-PROBE] Probe mode enabled: {probe_mode}")
+        probe_mode = (
+            m3u_account.account_type == M3UAccount.Types.STALKER
+            and probe_evaluation["enabled"]
+        )
+        logger.info(
+            "[VOD-PROBE] Probe mode enabled=%s reason=%s unique_count=%s threshold=%s backend=%s session_id=%s range=%s",
+            probe_mode,
+            probe_evaluation["reason"],
+            probe_evaluation["unique_content_count"],
+            PROBE_ACTIVITY_MIN_UNIQUE_CONTENT,
+            probe_evaluation["backend"],
+            bool(session_id),
+            range_header or "none",
+        )
 
         # If no session ID, create one and redirect to path-based URL unless this
         # looks like a scan/probe burst that can stay on the lightweight path.
