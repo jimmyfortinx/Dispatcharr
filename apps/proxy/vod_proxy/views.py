@@ -6,9 +6,9 @@ Supports M3U profiles for authentication and URL transformation.
 import time
 import random
 import logging
+import hashlib
 import requests
 from urllib.parse import urlencode
-from collections import deque
 from django.db import close_old_connections
 from django.http import StreamingHttpResponse, JsonResponse, Http404, HttpResponse
 from django.shortcuts import get_object_or_404
@@ -32,7 +32,7 @@ from rest_framework_simplejwt.authentication import JWTAuthentication
 from apps.accounts.authentication import ApiKeyAuthentication, QueryParamJWTAuthentication
 from apps.proxy.utils import check_user_stream_limits
 from dispatcharr.utils import network_access_allowed
-from core.utils import dispatcharr_user_agent
+from core.utils import RedisClient, dispatcharr_user_agent
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +40,7 @@ _request_times = {}
 _probe_activity = {}
 PROBE_ACTIVITY_WINDOW_SECONDS = 30
 PROBE_ACTIVITY_MIN_UNIQUE_CONTENT = 3
+PROBE_ACTIVITY_REDIS_KEY_PREFIX = "vod_probe_activity"
 
 
 def _is_plex_probe_user_agent(user_agent):
@@ -73,15 +74,45 @@ def _is_open_ended_probe_range(range_header):
 
 def _record_probe_activity(client_ip, client_user_agent, content_type, content_id, now=None):
     now = now or time.time()
-    activity_key = f"{client_ip}:{client_user_agent or 'unknown'}"
-    bucket = _probe_activity.setdefault(activity_key, deque())
-    bucket.append((now, content_type, str(content_id)))
+    activity_key = _get_probe_activity_redis_key(client_ip, client_user_agent)
+    activity_member = f"{content_type}:{content_id}"
+    redis_client = RedisClient.get_client()
 
-    while bucket and (now - bucket[0][0]) > PROBE_ACTIVITY_WINDOW_SECONDS:
-        bucket.popleft()
+    if redis_client is not None:
+        try:
+            cutoff = now - PROBE_ACTIVITY_WINDOW_SECONDS
+            pipe = redis_client.pipeline(transaction=False)
+            pipe.zadd(activity_key, {activity_member: now})
+            pipe.zremrangebyscore(activity_key, "-inf", cutoff)
+            pipe.zcard(activity_key)
+            pipe.expire(activity_key, PROBE_ACTIVITY_WINDOW_SECONDS)
+            _, _, unique_content_count, _ = pipe.execute()
+            return int(unique_content_count)
+        except Exception:
+            logger.warning(
+                "[VOD-PROBE] Redis probe activity tracking failed for %s",
+                activity_key,
+                exc_info=True,
+            )
 
-    unique_content = {(entry[1], entry[2]) for entry in bucket}
-    return len(unique_content)
+    fallback_key = f"{client_ip}:{client_user_agent or 'unknown'}"
+    bucket = _probe_activity.setdefault(fallback_key, {})
+    bucket[activity_member] = now
+    cutoff = now - PROBE_ACTIVITY_WINDOW_SECONDS
+    expired_members = [
+        member for member, timestamp in bucket.items()
+        if timestamp <= cutoff
+    ]
+    for member in expired_members:
+        bucket.pop(member, None)
+    return len(bucket)
+
+
+def _get_probe_activity_redis_key(client_ip, client_user_agent):
+    fingerprint = hashlib.sha1(
+        f"{client_ip}:{client_user_agent or 'unknown'}".encode("utf-8")
+    ).hexdigest()
+    return f"{PROBE_ACTIVITY_REDIS_KEY_PREFIX}:{fingerprint}"
 
 
 def _should_use_probe_mode(
