@@ -23,8 +23,7 @@ logger = logging.getLogger(__name__)
 
 from .models import M3UAccount, M3UFilter, ServerGroup, M3UAccountProfile
 from core.models import UserAgent
-from core.utils import safe_upload_path
-from core.utils import is_task_lock_held
+from core.utils import ensure_custom_properties_dict, is_task_lock_held, safe_upload_path
 from apps.channels.models import ChannelGroupM3UAccount
 from core.serializers import UserAgentSerializer
 from apps.vod.models import (

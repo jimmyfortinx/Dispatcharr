@@ -266,17 +266,6 @@ class ChannelGroupM3UAccountSerializer(serializers.ModelSerializer):
 
         return data
 
-    def to_internal_value(self, data):
-        # Accept both dict and JSON string for custom_properties (for backward compatibility)
-        val = data.get("custom_properties")
-        if isinstance(val, str):
-            try:
-                data["custom_properties"] = json.loads(val)
-            except Exception:
-                pass
-
-        return super().to_internal_value(data)
-
     def validate(self, attrs):
         # Partial PATCHes only carry submitted fields; fill missing
         # start/end from the instance so the validator catches a PATCH
@@ -616,9 +605,14 @@ class ChannelSerializer(serializers.ModelSerializer):
         return request.build_absolute_uri(path)
 
     def get_streams(self, obj):
-        """Retrieve ordered stream IDs for GET requests."""
+        """Retrieve ordered streams for GET requests using prefetched channelstream_set."""
+        ordered_streams = [
+            cs.stream
+            for cs in obj.channelstream_set.all()
+            if cs.stream_id is not None
+        ]
         return StreamSerializer(
-            obj.streams.all().order_by("channelstream__order"),
+            ordered_streams,
             many=True,
             context={**self.context, "parent_channel": obj},
         ).data
