@@ -232,7 +232,7 @@ class M3UAccountViewSet(viewsets.ModelViewSet):
                 from apps.vod.tasks import refresh_vod_content
 
                 refresh_vod_content.delay(instance.id)
-        elif old_vod_enabled and not new_vod_enabled:
+        elif not new_vod_enabled:
             if instance.account_type in (
                 M3UAccount.Types.XC,
                 M3UAccount.Types.STALKER,

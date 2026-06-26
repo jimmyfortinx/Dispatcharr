@@ -89,3 +89,30 @@ class StreamXcMovieRouteTest(TestCase):
             None,
             self.user,
         )
+
+    @patch("apps.proxy.vod_proxy.views.network_access_allowed", return_value=True)
+    @patch("apps.proxy.vod_proxy.views.stream_vod", return_value=HttpResponse("ok"))
+    def test_stream_xc_movie_rejects_disabled_vod_accounts(
+        self,
+        mock_stream_vod,
+        _mock_network_access_allowed,
+    ):
+        from apps.proxy.vod_proxy.views import stream_xc_movie
+
+        self.account.custom_properties = {"enable_vod": False}
+        self.account.save(update_fields=["custom_properties"])
+
+        request = self.factory.get(
+            f"/movie/{self.user.username}/secret/{self.movie_relation.id}.mp4"
+        )
+
+        response = stream_xc_movie(
+            request,
+            username=self.user.username,
+            password="secret",
+            stream_id=str(self.movie_relation.id),
+            extension="mp4",
+        )
+
+        self.assertEqual(response.status_code, 404)
+        mock_stream_vod.assert_not_called()

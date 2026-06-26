@@ -58,6 +58,9 @@ def remove_account_vod_relations(account_id):
     deleted_movie_relations, _ = M3UMovieRelation.objects.filter(
         m3u_account_id=account_id
     ).delete()
+    deleted_episode_relations, _ = M3UEpisodeRelation.objects.filter(
+        m3u_account_id=account_id
+    ).delete()
     deleted_series_relations, _ = M3USeriesRelation.objects.filter(
         m3u_account_id=account_id
     ).delete()
@@ -69,6 +72,7 @@ def remove_account_vod_relations(account_id):
 
     return (
         f"Removed {deleted_movie_relations} movie relations and "
+        f"{deleted_episode_relations} episode relations and "
         f"{deleted_series_relations} series relations. {cleanup_result}"
     )
 
@@ -280,6 +284,8 @@ def refresh_categories(account_id, client=None):
     logger.info("Fetching movie categories from provider...")
     if account.account_type == M3UAccount.Types.STALKER:
         discovery = client.discover_vod_categories()
+        if discovery.token:
+            client.token = discovery.token
         client.vod_portal_url = discovery.normalized_portal_url
         categories_data = discovery.movie_categories
         persist_stalker_runtime_state(
@@ -1501,6 +1507,11 @@ def process_movie_batch(account, batch, categories, relations, scan_start_time=N
                         logger.debug("Skipping disabled 'Uncategorized' category")
                         continue
 
+            if is_stalker and not movie_data.get("container_extension"):
+                movie_data["container_extension"] = extract_stalker_container_extension(
+                    movie_data
+                )
+
             # Extract metadata
             title_key = 'name' if movie_data.get('name') else 'title'
             year = extract_year_from_data(movie_data, title_key)
@@ -2467,6 +2478,20 @@ def extract_stalker_target_container_from_cmd(cmd):
             if text:
                 return text
         return ""
+
+    if isinstance(target_container, str):
+        stripped_target_container = target_container.strip()
+        if stripped_target_container.startswith("[") and stripped_target_container.endswith("]"):
+            try:
+                decoded_target_container = json.loads(stripped_target_container)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                decoded_target_container = None
+            if isinstance(decoded_target_container, list):
+                for value in decoded_target_container:
+                    text = str(value or "").strip().lstrip(".").lower()
+                    if text:
+                        return text
+                return ""
 
     text = str(target_container or "").strip().lstrip(".").lower()
     return text

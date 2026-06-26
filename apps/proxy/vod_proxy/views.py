@@ -38,6 +38,13 @@ logger = logging.getLogger(__name__)
 _request_times = {}
 
 
+def _active_vod_account_filters():
+    return {
+        "m3u_account__is_active": True,
+        "m3u_account__custom_properties__enable_vod": True,
+    }
+
+
 def _load_existing_vod_session_target(session_id):
     """Return the stored upstream target for an existing VOD session, if any."""
     if not session_id:
@@ -86,17 +93,21 @@ def _get_content_and_relation(content_type, content_id, preferred_m3u_account_id
                 if preferred_m3u_account_id:
                     rel = (
                         M3UMovieRelation.objects
-                        .filter(stream_id=preferred_stream_id,
-                                m3u_account_id=preferred_m3u_account_id,
-                                m3u_account__is_active=True)
+                        .filter(
+                            stream_id=preferred_stream_id,
+                            m3u_account_id=preferred_m3u_account_id,
+                            **_active_vod_account_filters(),
+                        )
                         .select_related('movie', 'm3u_account')
                         .first()
                     )
                 if rel is None:
                     rel = (
                         M3UMovieRelation.objects
-                        .filter(stream_id=preferred_stream_id,
-                                m3u_account__is_active=True)
+                        .filter(
+                            stream_id=preferred_stream_id,
+                            **_active_vod_account_filters(),
+                        )
                         .select_related('movie', 'm3u_account')
                         .order_by('-m3u_account__priority', 'id')
                         .first()
@@ -118,7 +129,9 @@ def _get_content_and_relation(content_type, content_id, preferred_m3u_account_id
             logger.info(f"[CONTENT-FOUND] Movie: {content_obj.name} (ID: {content_obj.id})")
 
             # Filter by preferred stream ID first (most specific)
-            relations_query = content_obj.m3u_relations.filter(m3u_account__is_active=True)
+            relations_query = content_obj.m3u_relations.filter(
+                **_active_vod_account_filters()
+            )
             if preferred_stream_id:
                 specific_relation = relations_query.filter(stream_id=preferred_stream_id).first()
                 if specific_relation:
@@ -154,17 +167,21 @@ def _get_content_and_relation(content_type, content_id, preferred_m3u_account_id
                 if preferred_m3u_account_id:
                     rel = (
                         M3UEpisodeRelation.objects
-                        .filter(stream_id=preferred_stream_id,
-                                m3u_account_id=preferred_m3u_account_id,
-                                m3u_account__is_active=True)
+                        .filter(
+                            stream_id=preferred_stream_id,
+                            m3u_account_id=preferred_m3u_account_id,
+                            **_active_vod_account_filters(),
+                        )
                         .select_related('episode', 'm3u_account')
                         .first()
                     )
                 if rel is None:
                     rel = (
                         M3UEpisodeRelation.objects
-                        .filter(stream_id=preferred_stream_id,
-                                m3u_account__is_active=True)
+                        .filter(
+                            stream_id=preferred_stream_id,
+                            **_active_vod_account_filters(),
+                        )
                         .select_related('episode', 'm3u_account')
                         .order_by('-m3u_account__priority', 'id')
                         .first()
@@ -186,7 +203,9 @@ def _get_content_and_relation(content_type, content_id, preferred_m3u_account_id
             logger.info(f"[CONTENT-FOUND] Episode: {content_obj.name} (ID: {content_obj.id}, Series: {content_obj.series.name})")
 
             # Filter by preferred stream ID first (most specific)
-            relations_query = content_obj.m3u_relations.filter(m3u_account__is_active=True)
+            relations_query = content_obj.m3u_relations.filter(
+                **_active_vod_account_filters()
+            )
             if preferred_stream_id:
                 specific_relation = relations_query.filter(stream_id=preferred_stream_id).first()
                 if specific_relation:
@@ -224,7 +243,9 @@ def _get_content_and_relation(content_type, content_id, preferred_m3u_account_id
             logger.info(f"[CONTENT-FOUND] First episode: {episode.name} (ID: {episode.id})")
 
             # Filter by preferred stream ID first (most specific)
-            relations_query = episode.m3u_relations.filter(m3u_account__is_active=True)
+            relations_query = episode.m3u_relations.filter(
+                **_active_vod_account_filters()
+            )
             if preferred_stream_id:
                 specific_relation = relations_query.filter(stream_id=preferred_stream_id).first()
                 if specific_relation:
@@ -1225,7 +1246,7 @@ def stream_xc_movie(request, username, password, stream_id, extension):
         movie_relation = (
             M3UMovieRelation.objects
             .select_related('movie')
-            .filter(id=stream_id, m3u_account__is_active=True)
+            .filter(id=stream_id, **_active_vod_account_filters())
             .order_by('-m3u_account__priority', 'id')
             .first()
         )
@@ -1233,7 +1254,7 @@ def stream_xc_movie(request, username, password, stream_id, extension):
             movie_relation = (
                 M3UMovieRelation.objects
                 .select_related('movie')
-                .filter(movie_id=stream_id, m3u_account__is_active=True)
+                .filter(movie_id=stream_id, **_active_vod_account_filters())
                 .order_by('-m3u_account__priority', 'id')
                 .first()
             )
@@ -1269,7 +1290,10 @@ def stream_xc_episode(request, username, password, stream_id, extension):
         return Response({"error": "Invalid credentials"}, status=401)
 
     # All authenticated users get access to series/episodes from all active M3U accounts
-    filters = {"episode_id": stream_id, "m3u_account__is_active": True}
+    filters = {
+        "episode_id": stream_id,
+        **_active_vod_account_filters(),
+    }
 
     try:
         episode_relation = M3UEpisodeRelation.objects.select_related('episode').filter(**filters).order_by('-m3u_account__priority', 'id').first()

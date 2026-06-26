@@ -21,7 +21,29 @@ def _validate_tls_cert_paths(paths, service_name):
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY")
+
+def _load_secret_key():
+    secret_key = (os.environ.get("DJANGO_SECRET_KEY") or "").strip()
+    if secret_key:
+        return secret_key
+
+    secret_file = Path("/data/jwt")
+    if secret_file.is_file():
+        file_secret = secret_file.read_text(encoding="utf-8").strip()
+        if file_secret:
+            return file_secret
+
+    settings_module = os.environ.get("DJANGO_SETTINGS_MODULE", "")
+    dispatcharr_env = os.environ.get("DISPATCHARR_ENV", "").lower()
+    if settings_module.endswith("settings_test") or dispatcharr_env == "dev":
+        return "django-insecure-dispatcharr-dev"
+
+    raise ImproperlyConfigured(
+        "The DJANGO_SECRET_KEY environment variable is not set and /data/jwt is missing or empty."
+    )
+
+
+SECRET_KEY = _load_secret_key()
 REDIS_HOST = os.environ.get("REDIS_HOST", "localhost")
 REDIS_PORT = int(os.environ.get("REDIS_PORT", 6379))
 REDIS_DB = os.environ.get("REDIS_DB", "0")

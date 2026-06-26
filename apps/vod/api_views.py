@@ -129,6 +129,16 @@ def _vod_enabled_account_filters(prefix="m3u_account__"):
     }
 
 
+def _vod_catalog_account_filters(prefix="m3u_account__"):
+    return {
+        f"{prefix}is_active": True,
+        f"{prefix}account_type__in": (
+            M3UAccount.Types.XC,
+            M3UAccount.Types.STALKER,
+        ),
+    }
+
+
 def _parse_category_filter_value(category_value):
     text = str(category_value or "").strip()
     if not text:
@@ -317,7 +327,7 @@ class MovieViewSet(viewsets.ReadOnlyModelViewSet):
     @action(detail=True, methods=['get'], url_path='providers')
     def get_providers(self, request, pk=None):
         """Get all providers (M3U accounts) that have this movie"""
-        movie = self.get_object()
+        movie = get_object_or_404(Movie, pk=pk)
         enabled_category_relations = M3UVODCategoryRelation.objects.filter(
             m3u_account_id=OuterRef("m3u_account_id"),
             category_id=OuterRef("category_id"),
@@ -325,7 +335,7 @@ class MovieViewSet(viewsets.ReadOnlyModelViewSet):
         )
         relations = M3UMovieRelation.objects.filter(
             movie=movie,
-            **_vod_enabled_account_filters()
+            **_vod_catalog_account_filters()
         ).select_related('m3u_account', 'category').annotate(
             category_enabled=Exists(enabled_category_relations)
         ).filter(
@@ -346,7 +356,7 @@ class MovieViewSet(viewsets.ReadOnlyModelViewSet):
     @action(detail=True, methods=['get'], url_path='provider-info')
     def provider_info(self, request, pk=None):
         """Get detailed movie information from the original provider, throttled to 24h."""
-        movie = self.get_object()
+        movie = get_object_or_404(Movie, pk=pk)
 
         relation_id = request.query_params.get('relation_id')
         if relation_id is not None:
@@ -360,7 +370,7 @@ class MovieViewSet(viewsets.ReadOnlyModelViewSet):
 
         qs = M3UMovieRelation.objects.filter(
             movie=movie,
-            **_vod_enabled_account_filters()
+            **_vod_catalog_account_filters()
         ).select_related('m3u_account', 'category').annotate(
             category_enabled=Exists(
                 M3UVODCategoryRelation.objects.filter(
@@ -389,7 +399,7 @@ class MovieViewSet(viewsets.ReadOnlyModelViewSet):
         if not relation:
             return Response(
                 {'error': 'No active M3U account associated with this movie'},
-                status=status.HTTP_400_BAD_REQUEST
+                status=status.HTTP_404_NOT_FOUND
             )
 
         force_refresh = request.query_params.get('force_refresh', 'false').lower() == 'true'
@@ -581,10 +591,10 @@ class SeriesViewSet(viewsets.ReadOnlyModelViewSet):
     @action(detail=True, methods=['get'], url_path='providers')
     def get_providers(self, request, pk=None):
         """Get all providers (M3U accounts) that have this series"""
-        series = self.get_object()
+        series = get_object_or_404(Series, pk=pk)
         relations = M3USeriesRelation.objects.filter(
             series=series,
-            **_vod_enabled_account_filters()
+            **_vod_catalog_account_filters()
         ).select_related('m3u_account', 'category')
         relations = _filter_relations_by_category(
             relations,
@@ -626,7 +636,7 @@ class SeriesViewSet(viewsets.ReadOnlyModelViewSet):
     def series_info(self, request, pk=None):
         """Get detailed series information, refreshing from provider if needed"""
         logger.debug(f"SeriesViewSet.series_info called for series ID: {pk}")
-        series = self.get_object()
+        series = get_object_or_404(Series, pk=pk)
         logger.debug(f"Retrieved series: {series.name} (ID: {series.id})")
 
         relation_id = request.query_params.get('relation_id')
@@ -641,7 +651,7 @@ class SeriesViewSet(viewsets.ReadOnlyModelViewSet):
 
         qs = M3USeriesRelation.objects.filter(
             series=series,
-            **_vod_enabled_account_filters()
+            **_vod_catalog_account_filters()
         ).select_related('m3u_account', 'category')
 
         qs = _filter_relations_by_category(
@@ -663,7 +673,7 @@ class SeriesViewSet(viewsets.ReadOnlyModelViewSet):
         if not relation:
             return Response(
                 {'error': 'No active M3U account associated with this series'},
-                status=status.HTTP_400_BAD_REQUEST
+                status=status.HTTP_404_NOT_FOUND
             )
 
         try:

@@ -10,6 +10,8 @@ from apps.m3u.models import M3UAccount
 from apps.m3u.serializers import M3UAccountSerializer
 from apps.m3u.stalker import StalkerClient, StalkerVodDiscoveryResult
 from apps.vod.models import (
+    Episode,
+    M3UEpisodeRelation,
     M3UMovieRelation,
     M3USeriesRelation,
     M3UVODCategoryRelation,
@@ -157,6 +159,12 @@ class StalkerPhase10DisableVodCleanupTests(TestCase):
         )
         self.movie = Movie.objects.create(name="Movie To Remove")
         self.series = Series.objects.create(name="Series To Remove")
+        self.episode = Episode.objects.create(
+            name="Episode To Remove",
+            series=self.series,
+            season_number=1,
+            episode_number=1,
+        )
         M3UMovieRelation.objects.create(
             m3u_account=self.account,
             movie=self.movie,
@@ -166,6 +174,11 @@ class StalkerPhase10DisableVodCleanupTests(TestCase):
             m3u_account=self.account,
             series=self.series,
             external_series_id="series-1",
+        )
+        M3UEpisodeRelation.objects.create(
+            m3u_account=self.account,
+            episode=self.episode,
+            stream_id="episode-1",
         )
 
     def test_disabling_vod_removes_existing_catalog_relations(self):
@@ -181,6 +194,9 @@ class StalkerPhase10DisableVodCleanupTests(TestCase):
         )
         self.assertFalse(
             M3USeriesRelation.objects.filter(m3u_account=self.account).exists()
+        )
+        self.assertFalse(
+            M3UEpisodeRelation.objects.filter(m3u_account=self.account).exists()
         )
         self.assertFalse(Movie.objects.filter(id=self.movie.id).exists())
         self.assertFalse(Series.objects.filter(id=self.series.id).exists())
@@ -321,12 +337,16 @@ class StalkerPhase10PortalCacheTests(TestCase):
         )
 
     def test_create_vod_link_uses_vod_type(self):
+        client = StalkerClient(
+            server_url=self.account.server_url,
+            mac=self.account.custom_properties["mac"],
+        )
         with patch.object(
-            self.client,
+            client,
             "_request",
             return_value={"js": {"cmd": "ffmpeg http://media.example.com/movie.mp4"}},
         ) as mock_request:
-            resolved = self.client.create_vod_link(
+            resolved = client.create_vod_link(
                 "http://portal.example.com/stalker_portal/server/load.php",
                 "ffmpeg http://provider.example.com/play/movie",
             )
