@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Dict, Optional
 
 from apps.m3u.models import M3UAccount
-from apps.m3u.stalker import StalkerClient, StalkerError
+from apps.m3u.stalker import StalkerAuthError, StalkerClient, StalkerError
 from core.utils import RedisClient
 
 
@@ -21,6 +21,7 @@ class ResolvedVODStreamContext:
 
 
 STALKER_VOD_PLAYBACK_CACHE_TTL_SECONDS = 30
+STALKER_VOD_AUTH_FAILURE_COOLDOWN_SECONDS = 15
 
 
 def resolve_vod_stream_context(relation) -> ResolvedVODStreamContext:
@@ -100,11 +101,16 @@ def _resolve_stalker_vod_stream_context(relation) -> ResolvedVODStreamContext:
         client=client,
         account_properties=account_properties,
     )
-    resolved_url = client.resolve_vod_playback_url(
-        portal_url,
-        cmd,
-        series=series_number,
-    )
+    _ensure_stalker_vod_auth_cooldown_allows_request(relation, portal_url)
+    try:
+        resolved_url = client.resolve_vod_playback_url(
+            portal_url,
+            cmd,
+            series=series_number,
+        )
+    except StalkerAuthError as exc:
+        _mark_stalker_vod_auth_failure_cooldown(relation, portal_url, exc)
+        raise
     input_headers = client.build_media_headers(resolved_url)
 
     _persist_stalker_runtime_state(
@@ -138,6 +144,70 @@ def _get_stalker_vod_cache_key(relation, cmd, series_number) -> str:
         "stalker_vod_playback:"
         f"{account_id}:{relation_type}:{stream_id}:{series_part}:{cmd_hash}"
     )
+
+
+def _get_stalker_vod_auth_failure_cooldown_key(relation, portal_url) -> str:
+    account_id = getattr(getattr(relation, "m3u_account", None), "id", "unknown")
+    portal_hash = hashlib.sha1(str(portal_url).encode("utf-8")).hexdigest()[:16]
+    return f"stalker_vod_auth_failure:{account_id}:{portal_hash}"
+
+
+def _ensure_stalker_vod_auth_cooldown_allows_request(relation, portal_url) -> None:
+    redis_client = RedisClient.get_client()
+    if redis_client is None:
+        return
+
+    cooldown_key = _get_stalker_vod_auth_failure_cooldown_key(relation, portal_url)
+    try:
+        cooldown_state = redis_client.get(cooldown_key)
+    except Exception:
+        logger.debug(
+            "Failed to read Stalker VOD auth failure cooldown for account=%s key=%s",
+            getattr(getattr(relation, "m3u_account", None), "id", None),
+            cooldown_key,
+            exc_info=True,
+        )
+        return
+
+    if not cooldown_state:
+        return
+
+    logger.warning(
+        "Skipping Stalker VOD playback resolution during auth failure cooldown for account=%s stream_id=%s key=%s",
+        getattr(getattr(relation, "m3u_account", None), "id", None),
+        getattr(relation, "stream_id", None),
+        cooldown_key,
+    )
+    raise StalkerError("Recent Stalker authentication failure cooldown is active.")
+
+
+def _mark_stalker_vod_auth_failure_cooldown(relation, portal_url, exc) -> None:
+    redis_client = RedisClient.get_client()
+    if redis_client is None:
+        return
+
+    cooldown_key = _get_stalker_vod_auth_failure_cooldown_key(relation, portal_url)
+    try:
+        redis_client.set(
+            cooldown_key,
+            str(exc),
+            ex=STALKER_VOD_AUTH_FAILURE_COOLDOWN_SECONDS,
+        )
+        logger.warning(
+            "Stored Stalker VOD auth failure cooldown for account=%s stream_id=%s key=%s ttl=%ss reason=%s",
+            getattr(getattr(relation, "m3u_account", None), "id", None),
+            getattr(relation, "stream_id", None),
+            cooldown_key,
+            STALKER_VOD_AUTH_FAILURE_COOLDOWN_SECONDS,
+            exc,
+        )
+    except Exception:
+        logger.debug(
+            "Failed to store Stalker VOD auth failure cooldown for account=%s key=%s",
+            getattr(getattr(relation, "m3u_account", None), "id", None),
+            cooldown_key,
+            exc_info=True,
+        )
 
 
 def _load_cached_stalker_vod_stream_context(

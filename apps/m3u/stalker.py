@@ -46,6 +46,10 @@ class StalkerRecoverableError(StalkerError):
     pass
 
 
+class StalkerAuthError(StalkerRecoverableError):
+    pass
+
+
 @dataclass
 class StalkerConnectionResult:
     normalized_portal_url: str
@@ -521,6 +525,8 @@ class StalkerClient:
                 time.monotonic() - started_at,
                 exc,
             )
+            if self._is_auth_status_error(exc):
+                raise StalkerAuthError(f"Request failed: {exc}") from exc
             raise StalkerError(f"Request failed: {exc}") from exc
 
         try:
@@ -905,6 +911,11 @@ class StalkerClient:
         self._authenticate_portal(portal_url)
         self._prepared_portal_url = portal_url
 
+    def reset_session_state(self, regenerate_token=False):
+        self._prepared_portal_url = None
+        if regenerate_token:
+            self.token = token_hex(16).upper()
+
     def prepare_playback_session(self, portal_url, force=False):
         if force:
             self._prepared_portal_url = None
@@ -1089,7 +1100,7 @@ class StalkerClient:
                 portal_url,
                 exc,
             )
-            self._prepared_portal_url = None
+            self.reset_session_state(regenerate_token=True)
             resolved_url = self._resolve_vod_playback_url_once(portal_url, cmd, series=series)
             logger.info(
                 "[STALKER] Resolved VOD playback URL on retry for %s in %.3fs",
@@ -1697,7 +1708,7 @@ class StalkerClient:
                 exc,
             )
             if with_auth and self._is_auth_status_error(exc):
-                raise StalkerRecoverableError(f"Request failed: {exc}") from exc
+                raise StalkerAuthError(f"Request failed: {exc}") from exc
             raise StalkerError(f"Request failed: {exc}") from exc
 
         elapsed = time.monotonic() - started_at

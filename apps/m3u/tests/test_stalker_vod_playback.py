@@ -7,6 +7,7 @@ from django.test import RequestFactory, TestCase
 from apps.m3u.models import M3UAccount, M3UAccountProfile
 from apps.m3u.stalker import (
     DEFAULT_USER_AGENT,
+    StalkerAuthError,
     StalkerClient,
     StalkerRecoverableError,
 )
@@ -124,6 +125,41 @@ class StalkerPhase14MovieResolverTests(TestCase):
         )
         mock_watchdog.assert_not_called()
 
+    def test_resolve_vod_playback_url_regenerates_token_before_retry(self):
+        client = StalkerClient(
+            server_url=self.account.server_url,
+            mac="00:1A:79:00:00:94",
+            username=self.account.username,
+            password=self.account.password,
+            custom_properties={"token": "OLD-TOKEN"},
+        )
+
+        tokens_seen = []
+
+        def fake_prepare(portal_url):
+            tokens_seen.append(client.token)
+
+        with patch.object(
+            client,
+            "prepare_vod_playback_session",
+            side_effect=fake_prepare,
+        ), patch.object(
+            client,
+            "create_vod_link",
+            side_effect=[
+                StalkerAuthError("Request failed: 403 Client Error: Forbidden"),
+                "http://resolved.example.com/movie-100.mkv",
+            ],
+        ):
+            resolved = client.resolve_vod_playback_url(
+                "http://portal.example.com/stalker_portal/server/load.php",
+                "ffmpeg http://provider.example.com/movie-100.mkv",
+            )
+
+        self.assertEqual(resolved, "http://resolved.example.com/movie-100.mkv")
+        self.assertEqual(tokens_seen[0], "OLD-TOKEN")
+        self.assertNotEqual(tokens_seen[1], "OLD-TOKEN")
+
     @patch("apps.vod.resolvers.StalkerClient.resolve_vod_playback_url", autospec=True)
     @patch("apps.vod.resolvers.StalkerClient.discover_vod_categories", autospec=True)
     def test_resolver_builds_stalker_movie_link_and_persists_runtime_state(
@@ -238,6 +274,35 @@ class StalkerPhase14MovieResolverTests(TestCase):
         self.assertEqual(second_context.url, first_context.url)
         self.assertEqual(mock_resolve_vod_playback_url.call_count, 1)
         self.assertEqual(mock_discover_vod_categories.call_count, 1)
+
+    @patch("apps.vod.resolvers.RedisClient.get_client")
+    @patch("apps.vod.resolvers.StalkerClient.resolve_vod_playback_url", autospec=True)
+    @patch("apps.vod.resolvers.StalkerClient.discover_vod_categories", autospec=True)
+    def test_resolver_sets_short_auth_failure_cooldown_for_stalker_403(
+        self,
+        mock_discover_vod_categories,
+        mock_resolve_vod_playback_url,
+        mock_get_redis_client,
+    ):
+        fake_redis = ResolverFakeRedis()
+        mock_get_redis_client.return_value = fake_redis
+        mock_discover_vod_categories.return_value = SimpleNamespace(
+            normalized_portal_url="http://portal.example.com/stalker_portal/server/load.php"
+        )
+        mock_resolve_vod_playback_url.side_effect = StalkerAuthError(
+            "Request failed: 403 Client Error: Forbidden"
+        )
+
+        with self.assertRaises(StalkerAuthError):
+            resolve_vod_stream_context(self.relation)
+
+        with self.assertRaisesMessage(
+            Exception,
+            "Recent Stalker authentication failure cooldown is active.",
+        ):
+            resolve_vod_stream_context(self.relation)
+
+        self.assertEqual(mock_resolve_vod_playback_url.call_count, 1)
 
     def test_resolver_keeps_xtream_movie_urls_on_existing_route_pattern(self):
         account = M3UAccount.objects.create(
