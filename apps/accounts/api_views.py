@@ -245,8 +245,13 @@ class UserViewSet(viewsets.ModelViewSet):
     def me(self, request):
         user = request.user
         if request.method == "PATCH":
+            PATCH_IGNORED_FIELDS = {"user_level", "is_staff", "is_superuser"}
             ALLOWED_FIELDS = {"custom_properties", "first_name", "last_name", "email", "password"}
-            disallowed = set(request.data.keys()) - ALLOWED_FIELDS
+            mutable_data = dict(request.data)
+            for field in PATCH_IGNORED_FIELDS:
+                mutable_data.pop(field, None)
+
+            disallowed = set(mutable_data.keys()) - ALLOWED_FIELDS
 
             if disallowed:
                 raise serializers.ValidationError(
@@ -259,12 +264,12 @@ class UserViewSet(viewsets.ModelViewSet):
             # Strip admin-managed keys from custom_properties so users cannot
             # set their own XC credentials or network rules via this endpoint.
             ADMIN_ONLY_PROPS = {"xc_password", "allowed_networks"}
-            cp = request.data.get("custom_properties")
+            cp = mutable_data.get("custom_properties")
             if isinstance(cp, dict):
                 for key in ADMIN_ONLY_PROPS:
                     cp.pop(key, None)
 
-            serializer = UserSerializer(user, data=request.data, partial=True)
+            serializer = UserSerializer(user, data=mutable_data, partial=True)
             serializer.is_valid(raise_exception=True)
             serializer.save()
             return Response(serializer.data)
