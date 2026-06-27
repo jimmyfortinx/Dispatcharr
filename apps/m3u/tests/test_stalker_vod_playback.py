@@ -428,6 +428,7 @@ from apps.proxy.vod_proxy.multi_worker_connection_manager import (
 )
 from apps.proxy.vod_proxy.views import (
     VODStreamView,
+    _get_stalker_probe_462_cooldown_key,
     _get_stream_context_for_request,
     _stream_stalker_probe_content,
 )
@@ -439,6 +440,9 @@ class _FakeRedis:
     def __init__(self):
         self.hashes = {}
         self.values = {}
+
+    def get(self, key):
+        return self.values.get(key)
 
     def hgetall(self, key):
         return dict(self.hashes.get(key, {}))
@@ -982,6 +986,160 @@ class StalkerPhase15SessionRefreshTests(TestCase):
         )
         self.assertEqual(second_call_kwargs["headers"]["Authorization"], "Bearer NEW-TOKEN")
         self.assertEqual(second_call_kwargs["headers"]["Range"], "bytes=0-")
+
+    @patch("apps.proxy.vod_proxy.views.RedisClient.get_client")
+    @patch("apps.proxy.vod_proxy.views.requests.get")
+    @patch("apps.proxy.vod_proxy.views.resolve_vod_stream_context")
+    def test_probe_stream_returns_soft_response_after_double_462(
+        self,
+        mock_resolve_vod_stream_context,
+        mock_requests_get,
+        mock_get_redis_client,
+    ):
+        fake_redis = _FakeRedis()
+        mock_get_redis_client.return_value = fake_redis
+        account = M3UAccount.objects.create(
+            name="462 Probe Soft Retry Account",
+            account_type=M3UAccount.Types.STALKER,
+            server_url="http://portal.example.com/c/",
+            custom_properties={
+                "mac": "00:1A:79:00:00:AC",
+                "enable_vod": True,
+            },
+        )
+        profile = M3UAccountProfile.objects.create(
+            m3u_account=account,
+            name="Probe Soft Retry Profile",
+            is_default=True,
+            is_active=True,
+        )
+        movie = Movie.objects.create(name="Probe Soft Retry Movie")
+        relation = M3UMovieRelation.objects.create(
+            m3u_account=account,
+            movie=movie,
+            stream_id="557",
+            custom_properties={"cmd": "ffmpeg http://provider.example.com/movie-557.mkv"},
+        )
+        request = RequestFactory().get(
+            f"/proxy/vod/movie/{movie.uuid}",
+            HTTP_USER_AGENT="Lavf/60.16.100",
+            HTTP_RANGE="bytes=0-",
+        )
+
+        first_response = _FakeUpstreamResponse(
+            "http://diablo-pro.com:2095/play/movie.php?mac=00:1A:79:BB:8B:B9&stream=557.mp4&play_token=OLD&type=movie&sn2="
+        )
+        first_response.status_code = 462
+        first_response.raise_for_status = Mock(
+            side_effect=HTTPError(response=_Fake462Response(first_response.url))
+        )
+        second_response = _FakeUpstreamResponse(
+            "http://diablo-pro.com:2095/play/movie.php?mac=00:1A:79:BB:8B:B9&stream=557.mp4&play_token=NEW&type=movie&sn2="
+        )
+        second_response.status_code = 462
+        second_response.raise_for_status = Mock(
+            side_effect=HTTPError(response=_Fake462Response(second_response.url))
+        )
+        mock_requests_get.side_effect = [
+            first_response,
+            second_response,
+        ]
+        mock_resolve_vod_stream_context.return_value = SimpleNamespace(
+            url="http://resolved.example.com/movie/557.mkv",
+            user_agent=DEFAULT_USER_AGENT,
+            input_headers={
+                "Authorization": "Bearer NEW-TOKEN",
+                "User-Agent": DEFAULT_USER_AGENT,
+            },
+        )
+
+        response = _stream_stalker_probe_content(
+            content_name=movie.name,
+            stream_url=first_response.url,
+            m3u_profile=profile,
+            relation=relation,
+            client_user_agent="Lavf/60.16.100",
+            request=request,
+            input_headers={
+                "Authorization": "Bearer OLD-TOKEN",
+                "User-Agent": "Lavf/60.16.100",
+            },
+            range_header="bytes=0-",
+        )
+
+        cooldown_key = _get_stalker_probe_462_cooldown_key(relation)
+        self.assertEqual(response.status_code, 204)
+        self.assertEqual(response["X-Dispatcharr-Probe-Mode"], "1")
+        self.assertEqual(
+            response["X-Dispatcharr-Probe-Skipped"],
+            "stalker-462-retry-exhausted",
+        )
+        self.assertEqual(mock_requests_get.call_count, 2)
+        self.assertEqual(fake_redis.get(cooldown_key), "2")
+
+    @patch("apps.proxy.vod_proxy.views.RedisClient.get_client")
+    @patch("apps.proxy.vod_proxy.views.requests.get")
+    def test_probe_stream_skips_upstream_during_active_462_cooldown(
+        self,
+        mock_requests_get,
+        mock_get_redis_client,
+    ):
+        fake_redis = _FakeRedis()
+        mock_get_redis_client.return_value = fake_redis
+        account = M3UAccount.objects.create(
+            name="462 Probe Cooldown Account",
+            account_type=M3UAccount.Types.STALKER,
+            server_url="http://portal.example.com/c/",
+            custom_properties={
+                "mac": "00:1A:79:00:00:AD",
+                "enable_vod": True,
+            },
+        )
+        profile = M3UAccountProfile.objects.create(
+            m3u_account=account,
+            name="Probe Cooldown Profile",
+            is_default=True,
+            is_active=True,
+        )
+        movie = Movie.objects.create(name="Probe Cooldown Movie")
+        relation = M3UMovieRelation.objects.create(
+            m3u_account=account,
+            movie=movie,
+            stream_id="558",
+            custom_properties={"cmd": "ffmpeg http://provider.example.com/movie-558.mkv"},
+        )
+        request = RequestFactory().get(
+            f"/proxy/vod/movie/{movie.uuid}",
+            HTTP_USER_AGENT="Lavf/60.16.100",
+            HTTP_RANGE="bytes=0-",
+        )
+        fake_redis.set(
+            _get_stalker_probe_462_cooldown_key(relation),
+            "2",
+            ex=4,
+        )
+
+        response = _stream_stalker_probe_content(
+            content_name=movie.name,
+            stream_url="http://diablo-pro.com:2095/play/movie.php?mac=00:1A:79:BB:8B:B9&stream=558.mp4&play_token=OLD&type=movie&sn2=",
+            m3u_profile=profile,
+            relation=relation,
+            client_user_agent="Lavf/60.16.100",
+            request=request,
+            input_headers={
+                "Authorization": "Bearer OLD-TOKEN",
+                "User-Agent": "Lavf/60.16.100",
+            },
+            range_header="bytes=0-",
+        )
+
+        self.assertEqual(response.status_code, 204)
+        self.assertEqual(response["X-Dispatcharr-Probe-Mode"], "1")
+        self.assertEqual(
+            response["X-Dispatcharr-Probe-Skipped"],
+            "stalker-462-cooldown",
+        )
+        mock_requests_get.assert_not_called()
 
 
 class StalkerPhase15SessionReuseTests(TestCase):

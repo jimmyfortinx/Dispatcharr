@@ -43,6 +43,9 @@ _probe_activity = {}
 PROBE_ACTIVITY_WINDOW_SECONDS = 30
 PROBE_ACTIVITY_MIN_UNIQUE_CONTENT = 3
 PROBE_ACTIVITY_REDIS_KEY_PREFIX = "vod_probe_activity"
+STALKER_PROBE_462_COOLDOWN_KEY_PREFIX = "stalker_probe_462"
+STALKER_PROBE_462_COOLDOWN_BASE_SECONDS = 2
+STALKER_PROBE_462_COOLDOWN_MAX_SECONDS = 30
 
 
 def _is_plex_probe_user_agent(user_agent):
@@ -211,6 +214,15 @@ def _stream_stalker_probe_content(
     range_header=None,
 ):
     connection_manager = MultiWorkerVODConnectionManager.get_instance()
+    if relation is not None and _is_stalker_probe_462_cooldown_active(relation):
+        logger.warning(
+            "[VOD-PROBE] Skipping upstream probe for %s during Stalker 462 cooldown",
+            content_name,
+        )
+        return _build_probe_skip_response(
+            content_name=content_name,
+            reason="stalker-462-cooldown",
+        )
 
     def _build_probe_headers(resolved_input_headers):
         headers = connection_manager._build_provider_request_headers(
@@ -249,6 +261,7 @@ def _stream_stalker_probe_content(
         if relation is None or not _is_stalker_expired_playback_http_error(exc):
             raise
 
+        _mark_stalker_probe_462_cooldown(relation)
         logger.warning(
             "[VOD-PROBE] Provider returned expired Stalker playback URL (462) during probe for %s, resolving a fresh link",
             content_name,
@@ -270,7 +283,23 @@ def _stream_stalker_probe_content(
             fresh_stream_url,
             provider_headers,
         )
-        upstream_response.raise_for_status()
+        try:
+            upstream_response.raise_for_status()
+        except requests.HTTPError as retry_exc:
+            if _is_stalker_expired_playback_http_error(retry_exc):
+                _mark_stalker_probe_462_cooldown(relation)
+                upstream_response.close()
+                logger.warning(
+                    "[VOD-PROBE] Fresh Stalker playback URL also returned 462 during probe for %s, returning soft probe response",
+                    content_name,
+                )
+                return _build_probe_skip_response(
+                    content_name=content_name,
+                    reason="stalker-462-retry-exhausted",
+                )
+            raise
+
+        _clear_stalker_probe_462_cooldown(relation)
         stream_url = fresh_stream_url
 
     content_type_header = (
@@ -309,6 +338,100 @@ def _stream_stalker_probe_content(
         response.status_code,
     )
     return response
+
+
+def _build_probe_skip_response(*, content_name, reason):
+    response = HttpResponse(status=204)
+    response["Cache-Control"] = "no-cache"
+    response["Pragma"] = "no-cache"
+    response["X-Dispatcharr-Probe-Mode"] = "1"
+    response["X-Dispatcharr-Probe-Skipped"] = reason
+    logger.info(
+        "[VOD-PROBE] Returning soft probe skip response for %s (reason: %s)",
+        content_name,
+        reason,
+    )
+    return response
+
+
+def _get_stalker_probe_462_cooldown_key(relation):
+    account_id = getattr(getattr(relation, "m3u_account", None), "id", "unknown")
+    stream_id = getattr(relation, "stream_id", "") or ""
+    relation_type = "episode" if hasattr(relation, "episode_id") else "movie"
+    return f"{STALKER_PROBE_462_COOLDOWN_KEY_PREFIX}:{account_id}:{relation_type}:{stream_id}"
+
+
+def _is_stalker_probe_462_cooldown_active(relation):
+    redis_client = RedisClient.get_client()
+    if redis_client is None:
+        return False
+
+    cooldown_key = _get_stalker_probe_462_cooldown_key(relation)
+    try:
+        cooldown_state = redis_client.get(cooldown_key)
+    except Exception:
+        logger.debug(
+            "Failed to read Stalker probe 462 cooldown for key=%s",
+            cooldown_key,
+            exc_info=True,
+        )
+        return False
+    return bool(cooldown_state)
+
+
+def _mark_stalker_probe_462_cooldown(relation):
+    redis_client = RedisClient.get_client()
+    if redis_client is None:
+        return
+
+    cooldown_key = _get_stalker_probe_462_cooldown_key(relation)
+    try:
+        raw_count = redis_client.get(cooldown_key)
+        current_count = int(raw_count) if raw_count else 0
+    except Exception:
+        current_count = 0
+
+    next_count = min(current_count + 1, 5)
+    cooldown_seconds = min(
+        STALKER_PROBE_462_COOLDOWN_BASE_SECONDS * (2 ** (next_count - 1)),
+        STALKER_PROBE_462_COOLDOWN_MAX_SECONDS,
+    )
+    try:
+        redis_client.set(
+            cooldown_key,
+            str(next_count),
+            ex=cooldown_seconds,
+        )
+        logger.warning(
+            "[VOD-PROBE] Stored Stalker 462 probe cooldown for account=%s stream_id=%s key=%s count=%s ttl=%ss",
+            getattr(getattr(relation, "m3u_account", None), "id", None),
+            getattr(relation, "stream_id", None),
+            cooldown_key,
+            next_count,
+            cooldown_seconds,
+        )
+    except Exception:
+        logger.debug(
+            "Failed to store Stalker probe 462 cooldown for key=%s",
+            cooldown_key,
+            exc_info=True,
+        )
+
+
+def _clear_stalker_probe_462_cooldown(relation):
+    redis_client = RedisClient.get_client()
+    if redis_client is None:
+        return
+
+    cooldown_key = _get_stalker_probe_462_cooldown_key(relation)
+    try:
+        redis_client.delete(cooldown_key)
+    except Exception:
+        logger.debug(
+            "Failed to clear Stalker probe 462 cooldown for key=%s",
+            cooldown_key,
+            exc_info=True,
+        )
 
 
 def _active_vod_account_filters():
