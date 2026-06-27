@@ -19,6 +19,8 @@ from apps.m3u.models import M3UAccount, M3UAccountProfile
 from apps.proxy.vod_proxy.multi_worker_connection_manager import (
     MultiWorkerVODConnectionManager,
     RedisBackedVODConnection,
+    _is_stalker_expired_playback_http_error,
+    _transform_url_for_profile,
     infer_content_type_from_url,
     get_vod_client_stop_key,
 )
@@ -202,36 +204,74 @@ def _stream_stalker_probe_content(
     content_name,
     stream_url,
     m3u_profile,
+    relation,
     client_user_agent,
     request,
     input_headers=None,
     range_header=None,
 ):
     connection_manager = MultiWorkerVODConnectionManager.get_instance()
-    provider_headers = connection_manager._build_provider_request_headers(
-        m3u_profile,
-        client_user_agent,
-        request,
-        input_headers=input_headers,
-    )
-    if range_header:
-        provider_headers["Range"] = range_header
+
+    def _build_probe_headers(resolved_input_headers):
+        headers = connection_manager._build_provider_request_headers(
+            m3u_profile,
+            client_user_agent,
+            request,
+            input_headers=resolved_input_headers,
+        )
+        if range_header:
+            headers["Range"] = range_header
+        return headers
+
+    provider_headers = _build_probe_headers(input_headers)
 
     logger.info(
         "[VOD-PROBE] Starting lightweight probe stream for %s",
         content_name,
     )
-    upstream_response = requests.get(
-        stream_url,
-        headers=provider_headers,
-        stream=True,
-        timeout=(
-            MultiWorkerVODConnectionManager.UPSTREAM_CONNECT_TIMEOUT_SECONDS,
-            MultiWorkerVODConnectionManager.UPSTREAM_READ_TIMEOUT_SECONDS,
-        ),
-        allow_redirects=True,
-    )
-    upstream_response.raise_for_status()
+
+    def _fetch_probe_response(target_url, headers):
+        return requests.get(
+            target_url,
+            headers=headers,
+            stream=True,
+            timeout=(
+                MultiWorkerVODConnectionManager.UPSTREAM_CONNECT_TIMEOUT_SECONDS,
+                MultiWorkerVODConnectionManager.UPSTREAM_READ_TIMEOUT_SECONDS,
+            ),
+            allow_redirects=True,
+        )
+
+    upstream_response = _fetch_probe_response(stream_url, provider_headers)
+    try:
+        upstream_response.raise_for_status()
+    except requests.HTTPError as exc:
+        if relation is None or not _is_stalker_expired_playback_http_error(exc):
+            raise
+
+        logger.warning(
+            "[VOD-PROBE] Provider returned expired Stalker playback URL (462) during probe for %s, resolving a fresh link",
+            content_name,
+        )
+        upstream_response.close()
+
+        fresh_context = resolve_vod_stream_context(
+            relation,
+            force_refresh=True,
+        )
+        fresh_stream_url = _transform_url_for_profile(
+            fresh_context.url,
+            m3u_profile,
+        )
+        provider_headers = _build_probe_headers(
+            fresh_context.input_headers or input_headers,
+        )
+        upstream_response = _fetch_probe_response(
+            fresh_stream_url,
+            provider_headers,
+        )
+        upstream_response.raise_for_status()
+        stream_url = fresh_stream_url
 
     content_type_header = (
         upstream_response.headers.get("Content-Type")
@@ -972,6 +1012,7 @@ def stream_vod(request, content_type, content_id, session_id=None, profile_id=No
                 content_name=getattr(content_obj, 'name', 'Unknown'),
                 stream_url=final_stream_url,
                 m3u_profile=m3u_profile,
+                relation=relation,
                 client_user_agent=client_user_agent,
                 request=request,
                 input_headers=stream_context.get("input_headers"),

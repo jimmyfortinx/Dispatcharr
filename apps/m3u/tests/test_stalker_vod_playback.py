@@ -426,7 +426,11 @@ from apps.proxy.vod_proxy.multi_worker_connection_manager import (
     MultiWorkerVODConnectionManager,
     RedisBackedVODConnection,
 )
-from apps.proxy.vod_proxy.views import VODStreamView, _get_stream_context_for_request
+from apps.proxy.vod_proxy.views import (
+    VODStreamView,
+    _get_stream_context_for_request,
+    _stream_stalker_probe_content,
+)
 from apps.vod.models import Episode, M3UEpisodeRelation, Series
 from apps.vod.resolvers import resolve_vod_stream_context
 
@@ -482,6 +486,9 @@ class _FakeUpstreamResponse:
 
     def raise_for_status(self):
         return None
+
+    def iter_content(self, chunk_size=8192):
+        yield b"fake-chunk"
 
     def close(self):
         return None
@@ -883,6 +890,98 @@ class StalkerPhase15SessionRefreshTests(TestCase):
             refresh_args[1]["Authorization"],
             "Bearer NEW-TOKEN",
         )
+
+    @patch("apps.proxy.vod_proxy.views.requests.get")
+    @patch("apps.proxy.vod_proxy.views.resolve_vod_stream_context")
+    def test_probe_stream_refreshes_stalker_url_after_462(
+        self,
+        mock_resolve_vod_stream_context,
+        mock_requests_get,
+    ):
+        account = M3UAccount.objects.create(
+            name="462 Probe Retry Account",
+            account_type=M3UAccount.Types.STALKER,
+            server_url="http://portal.example.com/c/",
+            custom_properties={
+                "mac": "00:1A:79:00:00:AB",
+                "enable_vod": True,
+            },
+        )
+        profile = M3UAccountProfile.objects.create(
+            m3u_account=account,
+            name="Probe Retry Profile",
+            is_default=True,
+            is_active=True,
+            search_pattern=r"/movie/",
+            replace_pattern="/movie-hd/",
+        )
+        movie = Movie.objects.create(name="Probe Retry Movie")
+        relation = M3UMovieRelation.objects.create(
+            m3u_account=account,
+            movie=movie,
+            stream_id="556",
+            custom_properties={"cmd": "ffmpeg http://provider.example.com/movie-556.mkv"},
+        )
+        request = RequestFactory().get(
+            f"/proxy/vod/movie/{movie.uuid}",
+            HTTP_USER_AGENT="Lavf/60.16.100",
+            HTTP_RANGE="bytes=0-",
+        )
+
+        first_response = _FakeUpstreamResponse(
+            "http://diablo-pro.com:2095/play/movie.php?mac=00:1A:79:BB:8B:B9&stream=556.mp4&play_token=OLD&type=movie&sn2="
+        )
+        first_response.status_code = 462
+        first_response.raise_for_status = Mock(
+            side_effect=HTTPError(response=_Fake462Response(first_response.url))
+        )
+        second_response = _FakeUpstreamResponse(
+            "http://fresh-cdn.example.com/movie-556.mkv"
+        )
+        mock_requests_get.side_effect = [
+            first_response,
+            second_response,
+        ]
+        mock_resolve_vod_stream_context.return_value = SimpleNamespace(
+            url="http://resolved.example.com/movie/556.mkv",
+            user_agent=DEFAULT_USER_AGENT,
+            input_headers={
+                "Authorization": "Bearer NEW-TOKEN",
+                "User-Agent": DEFAULT_USER_AGENT,
+            },
+        )
+
+        response = _stream_stalker_probe_content(
+            content_name=movie.name,
+            stream_url="http://diablo-pro.com:2095/play/movie.php?mac=00:1A:79:BB:8B:B9&stream=556.mp4&play_token=OLD&type=movie&sn2=",
+            m3u_profile=profile,
+            relation=relation,
+            client_user_agent="Lavf/60.16.100",
+            request=request,
+            input_headers={
+                "Authorization": "Bearer OLD-TOKEN",
+                "User-Agent": "Lavf/60.16.100",
+            },
+            range_header="bytes=0-",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response["X-Dispatcharr-Probe-Mode"], "1")
+        mock_resolve_vod_stream_context.assert_called_once_with(
+            relation,
+            force_refresh=True,
+        )
+        self.assertEqual(mock_requests_get.call_count, 2)
+        first_call_args, first_call_kwargs = mock_requests_get.call_args_list[0]
+        second_call_args, second_call_kwargs = mock_requests_get.call_args_list[1]
+        self.assertIn("play_token=OLD", first_call_args[0])
+        self.assertEqual(first_call_kwargs["headers"]["Authorization"], "Bearer OLD-TOKEN")
+        self.assertEqual(
+            second_call_args[0],
+            "http://resolved.example.com/movie-hd/556.mkv",
+        )
+        self.assertEqual(second_call_kwargs["headers"]["Authorization"], "Bearer NEW-TOKEN")
+        self.assertEqual(second_call_kwargs["headers"]["Range"], "bytes=0-")
 
 
 class StalkerPhase15SessionReuseTests(TestCase):
