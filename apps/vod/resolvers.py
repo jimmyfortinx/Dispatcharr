@@ -24,7 +24,11 @@ STALKER_VOD_PLAYBACK_CACHE_TTL_SECONDS = 30
 STALKER_VOD_AUTH_FAILURE_COOLDOWN_SECONDS = 15
 
 
-def resolve_vod_stream_context(relation) -> ResolvedVODStreamContext:
+def resolve_vod_stream_context(
+    relation,
+    *,
+    force_refresh: bool = False,
+) -> ResolvedVODStreamContext:
     """Resolve a playable upstream URL and request context for a VOD relation."""
     m3u_account = getattr(relation, "m3u_account", None)
     if not m3u_account:
@@ -39,7 +43,10 @@ def resolve_vod_stream_context(relation) -> ResolvedVODStreamContext:
     if _get_relation_content_type(relation) not in {"movie", "episode"}:
         return ResolvedVODStreamContext(url=None)
 
-    return _resolve_stalker_vod_stream_context(relation)
+    return _resolve_stalker_vod_stream_context(
+        relation,
+        force_refresh=force_refresh,
+    )
 
 
 def _build_xtream_vod_url(relation) -> Optional[str]:
@@ -65,7 +72,11 @@ def _build_xtream_vod_url(relation) -> Optional[str]:
     )
 
 
-def _resolve_stalker_vod_stream_context(relation) -> ResolvedVODStreamContext:
+def _resolve_stalker_vod_stream_context(
+    relation,
+    *,
+    force_refresh: bool = False,
+) -> ResolvedVODStreamContext:
     m3u_account = relation.m3u_account
     account_properties = dict(m3u_account.custom_properties or {})
     relation_properties = dict(relation.custom_properties or {})
@@ -80,13 +91,14 @@ def _resolve_stalker_vod_stream_context(relation) -> ResolvedVODStreamContext:
         relation_properties,
         cmd,
     )
-    cached_context = _load_cached_stalker_vod_stream_context(
-        relation,
-        cmd,
-        series_number,
-    )
-    if cached_context is not None:
-        return cached_context
+    if not force_refresh:
+        cached_context = _load_cached_stalker_vod_stream_context(
+            relation,
+            cmd,
+            series_number,
+        )
+        if cached_context is not None:
+            return cached_context
 
     client = StalkerClient(
         server_url=m3u_account.server_url,

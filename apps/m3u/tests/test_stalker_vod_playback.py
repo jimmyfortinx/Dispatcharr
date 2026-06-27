@@ -2,6 +2,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from django.http import HttpResponse
+from requests import HTTPError
 from django.test import RequestFactory, TestCase
 
 from apps.m3u.models import M3UAccount, M3UAccountProfile
@@ -422,6 +423,7 @@ from django.test import RequestFactory, TestCase
 from apps.m3u.models import M3UAccount, M3UAccountProfile
 from apps.m3u.stalker import DEFAULT_USER_AGENT, StalkerClient
 from apps.proxy.vod_proxy.multi_worker_connection_manager import (
+    MultiWorkerVODConnectionManager,
     RedisBackedVODConnection,
 )
 from apps.proxy.vod_proxy.views import VODStreamView, _get_stream_context_for_request
@@ -483,6 +485,21 @@ class _FakeUpstreamResponse:
 
     def close(self):
         return None
+
+
+class _Fake462Response:
+    def __init__(self, url):
+        self.url = url
+        self.status_code = 462
+
+
+class _Raising462Session:
+    def __init__(self, url):
+        self.url = url
+
+    def get_stream(self, range_header=None):
+        response = _Fake462Response(self.url)
+        raise HTTPError(response=response)
 
 
 class StalkerPhase15EpisodeResolverTests(TestCase):
@@ -756,6 +773,115 @@ class StalkerPhase15SessionRefreshTests(TestCase):
         self.assertEqual(
             final_state.final_url,
             "http://fresh-cdn.example.com/episode-1.mkv",
+        )
+
+    @patch("apps.vod.resolvers.resolve_vod_stream_context")
+    @patch("apps.proxy.vod_proxy.multi_worker_connection_manager.MultiWorkerVODConnectionManager.find_matching_idle_session")
+    @patch("apps.proxy.vod_proxy.multi_worker_connection_manager.MultiWorkerVODConnectionManager._check_and_reserve_profile_slot")
+    @patch("apps.proxy.vod_proxy.multi_worker_connection_manager.MultiWorkerVODConnectionManager._build_provider_request_headers")
+    @patch("apps.proxy.vod_proxy.multi_worker_connection_manager.RedisBackedVODConnection")
+    def test_stream_content_with_session_refreshes_stalker_url_after_462(
+        self,
+        mock_connection_cls,
+        mock_build_headers,
+        mock_check_profile_slot,
+        mock_find_matching_idle_session,
+        mock_resolve_vod_stream_context,
+    ):
+        account = M3UAccount.objects.create(
+            name="462 Retry Account",
+            account_type=M3UAccount.Types.STALKER,
+            server_url="http://portal.example.com/c/",
+            custom_properties={
+                "mac": "00:1A:79:00:00:AA",
+                "enable_vod": True,
+            },
+        )
+        profile = M3UAccountProfile.objects.create(
+            m3u_account=account,
+            name="Retry Profile",
+            is_default=True,
+            is_active=True,
+            search_pattern=r"/movie/",
+            replace_pattern="/movie-hd/",
+        )
+        movie = Movie.objects.create(name="Retry Movie")
+        relation = M3UMovieRelation.objects.create(
+            m3u_account=account,
+            movie=movie,
+            stream_id="555",
+            custom_properties={"cmd": "ffmpeg http://provider.example.com/movie-555.mkv"},
+        )
+
+        request = RequestFactory().get(
+            f"/proxy/vod/movie/{movie.uuid}/retry-session",
+            HTTP_USER_AGENT="DispatcharrTestClient/1.0",
+        )
+
+        redis_connection = Mock()
+        redis_connection._get_connection_state.return_value = None
+        redis_connection.create_connection.return_value = True
+        redis_connection.refresh_connection_target.return_value = True
+        redis_connection.get_headers.return_value = {
+            "content_length": "4096",
+            "content_type": "video/mp4",
+        }
+        redis_connection.get_stream.side_effect = [
+            HTTPError(
+                response=_Fake462Response(
+                    "http://diablo-pro.com:2095/play/movie.php?mac=00:1A:79:BB:8B:B9&stream=555.mp4&play_token=OLD&type=movie&sn2="
+                )
+            ),
+            _FakeUpstreamResponse("http://fresh-cdn.example.com/movie-555.mkv"),
+        ]
+        mock_connection_cls.return_value = redis_connection
+        def _build_headers(_profile, _client_user_agent, _request, input_headers=None):
+            return dict(input_headers or {})
+
+        mock_build_headers.side_effect = _build_headers
+        mock_check_profile_slot.return_value = True
+        mock_find_matching_idle_session.return_value = None
+        mock_resolve_vod_stream_context.return_value = SimpleNamespace(
+            url="http://resolved.example.com/movie/555.mkv",
+            user_agent=DEFAULT_USER_AGENT,
+            input_headers={
+                "Authorization": "Bearer NEW-TOKEN",
+                "User-Agent": DEFAULT_USER_AGENT,
+            },
+        )
+
+        manager = MultiWorkerVODConnectionManager()
+        manager.redis_client = _FakeRedis()
+
+        response = manager.stream_content_with_session(
+            session_id="retry-session",
+            content_obj=movie,
+            stream_url="http://resolved.example.com/movie/555.mkv",
+            m3u_profile=profile,
+            client_ip="127.0.0.1",
+            client_user_agent="DispatcharrTestClient/1.0",
+            request=request,
+            input_headers={
+                "Authorization": "Bearer OLD-TOKEN",
+                "User-Agent": "DispatcharrTestClient/1.0",
+            },
+            relation=relation,
+        )
+
+        self.assertEqual(response.status_code, 200)
+        mock_resolve_vod_stream_context.assert_called_once_with(
+            relation,
+            force_refresh=True,
+        )
+        redis_connection.refresh_connection_target.assert_called_once()
+        refresh_args = redis_connection.refresh_connection_target.call_args[0]
+        self.assertEqual(
+            refresh_args[0],
+            "http://resolved.example.com/movie-hd/555.mkv",
+        )
+        self.assertEqual(
+            refresh_args[1]["Authorization"],
+            "Bearer NEW-TOKEN",
         )
 
 

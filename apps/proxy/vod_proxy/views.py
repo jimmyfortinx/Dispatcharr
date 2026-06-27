@@ -997,6 +997,7 @@ def stream_vod(request, content_type, content_id, session_id=None, profile_id=No
             range_header=range_header,
             input_headers=stream_context.get("input_headers"),
             user=user,
+            relation=relation,
         )
 
         logger.info(f"[VOD-SUCCESS] Stream response created successfully, type: {type(response)}")

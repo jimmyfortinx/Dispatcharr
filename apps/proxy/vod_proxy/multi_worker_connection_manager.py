@@ -14,7 +14,7 @@ import base64
 import os
 import socket
 import mimetypes
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 from typing import Optional, Dict, Any
 from django.http import StreamingHttpResponse, HttpResponse
 from core.utils import RedisClient
@@ -22,6 +22,40 @@ from apps.vod.models import Movie, Episode
 from apps.m3u.models import M3UAccountProfile
 
 logger = logging.getLogger("vod_proxy")
+
+
+def _transform_url_for_profile(original_url, m3u_profile):
+    if not m3u_profile or not original_url:
+        return original_url
+
+    try:
+        import regex
+
+        search_pattern = m3u_profile.search_pattern
+        replace_pattern = m3u_profile.replace_pattern
+        safe_replace_pattern = regex.sub(r'\$<([^>]+)>', r'\\g<\1>', replace_pattern)
+        safe_replace_pattern = regex.sub(r'\$(\d+)', r'\\\1', safe_replace_pattern)
+
+        if search_pattern and replace_pattern:
+            return regex.sub(search_pattern, safe_replace_pattern, original_url)
+        return original_url
+    except Exception as exc:
+        logger.warning(f"Error transforming URL for profile retry: {exc}")
+        return original_url
+
+
+def _is_stalker_expired_playback_http_error(exc):
+    response = getattr(exc, "response", None)
+    if response is None or response.status_code != 462:
+        return False
+
+    url = getattr(response, "url", "") or ""
+    parsed = urlparse(url)
+    query = parse_qs(parsed.query)
+    return (
+        "/play/" in parsed.path
+        and "play_token" in query
+    )
 
 
 def get_vod_client_stop_key(client_id):
@@ -1004,7 +1038,7 @@ class MultiWorkerVODConnectionManager:
     def stream_content_with_session(self, session_id, content_obj, stream_url, m3u_profile,
                                   client_ip, client_user_agent, request,
                                   utc_start=None, utc_end=None, offset=None, range_header=None,
-                                  input_headers=None, user=None):
+                                  input_headers=None, user=None, relation=None):
         """Stream content with Redis-backed persistent connection"""
 
         # Generate client ID
@@ -1152,7 +1186,43 @@ class MultiWorkerVODConnectionManager:
                     )
 
             # Get stream from Redis-backed connection
-            upstream_response = redis_connection.get_stream(range_header)
+            try:
+                upstream_response = redis_connection.get_stream(range_header)
+            except requests.HTTPError as exc:
+                if relation is None or not _is_stalker_expired_playback_http_error(exc):
+                    raise
+
+                logger.warning(
+                    f"[{client_id}] Worker {self.worker_id} - Provider returned expired Stalker playback URL (462), resolving a fresh link"
+                )
+
+                from apps.vod.resolvers import resolve_vod_stream_context
+
+                fresh_context = resolve_vod_stream_context(
+                    relation,
+                    force_refresh=True,
+                )
+                fresh_stream_url = _transform_url_for_profile(
+                    fresh_context.url,
+                    m3u_profile,
+                )
+                modified_stream_url = self._apply_timeshift_parameters(
+                    fresh_stream_url,
+                    utc_start,
+                    utc_end,
+                    offset,
+                )
+                headers = self._build_provider_request_headers(
+                    m3u_profile,
+                    client_user_agent,
+                    request,
+                    input_headers=fresh_context.input_headers or input_headers,
+                )
+                redis_connection.refresh_connection_target(
+                    modified_stream_url,
+                    headers,
+                )
+                upstream_response = redis_connection.get_stream(range_header)
 
             if upstream_response is None:
                 logger.warning(f"[{client_id}] Worker {self.worker_id} - Range not satisfiable")
