@@ -24,6 +24,14 @@ from apps.m3u.models import M3UAccountProfile
 logger = logging.getLogger("vod_proxy")
 
 
+def _is_plex_like_user_agent(user_agent: Optional[str]) -> bool:
+    if not user_agent:
+        return False
+
+    normalized = str(user_agent).lower()
+    return "plex" in normalized or "lavf/" in normalized
+
+
 def _transform_url_for_profile(original_url, m3u_profile):
     if not m3u_profile or not original_url:
         return original_url
@@ -1844,6 +1852,11 @@ class MultiWorkerVODConnectionManager:
             return None
         if not self.IDLE_SESSION_REUSE_ENABLED:
             logger.debug("Idle VOD session reuse disabled; skipping idle-session scan")
+            return None
+        if _is_plex_like_user_agent(client_user_agent):
+            logger.debug(
+                "Skipping idle VOD session reuse for Plex-like client user agent"
+            )
             return None
 
         try:

@@ -303,6 +303,26 @@ class TestIdleSessionReuseControls(TestCase):
         self.assertIsNone(result)
         mgr.redis_client.scan.assert_not_called()
 
+    def test_find_matching_idle_session_short_circuits_for_plex_like_clients(self):
+        from apps.proxy.vod_proxy.multi_worker_connection_manager import (
+            MultiWorkerVODConnectionManager,
+        )
+
+        mgr = MultiWorkerVODConnectionManager.__new__(MultiWorkerVODConnectionManager)
+        mgr.redis_client = MagicMock()
+        mgr.worker_id = "test-worker"
+        mgr.IDLE_SESSION_REUSE_ENABLED = True
+
+        result = mgr.find_matching_idle_session(
+            content_type="movie",
+            content_uuid="abc",
+            client_ip="10.0.0.1",
+            client_user_agent="Lavf/60.16.100",
+        )
+
+        self.assertIsNone(result)
+        mgr.redis_client.scan.assert_not_called()
+
 
 class TestFailedReuseCleanup(TestCase):
     def _make_state(self, session_id="reuse-session", active_streams=1, worker_id="test-worker"):
