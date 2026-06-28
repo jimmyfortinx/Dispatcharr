@@ -4050,156 +4050,165 @@ def refresh_movie_advanced_data(m3u_movie_relation_id, force_refresh=False):
         account = relation.m3u_account
         movie = relation.movie
 
-        from core.xtream_codes import Client as XtreamCodesClient
+        if account.account_type == M3UAccount.Types.STALKER:
+            info = dict((relation.custom_properties or {}).get('detailed_info') or {})
+            if not info:
+                info = dict((relation.custom_properties or {}).get('basic_data') or {})
+            movie_data = dict((relation.custom_properties or {}).get('movie_data') or {})
+        else:
+            from core.xtream_codes import Client as XtreamCodesClient
 
-        with XtreamCodesClient(
-            server_url=account.server_url,
-            username=account.username,
-            password=account.password,
-            user_agent=account.get_user_agent().user_agent
-        ) as client:
-            vod_info = client.get_vod_info(relation.stream_id)
-            if vod_info and 'info' in vod_info:
-                info_raw = vod_info.get('info', {})
+            with XtreamCodesClient(
+                server_url=account.server_url,
+                username=account.username,
+                password=account.password,
+                user_agent=account.get_user_agent().user_agent
+            ) as client:
+                vod_info = client.get_vod_info(relation.stream_id)
+                if vod_info and 'info' in vod_info:
+                    info_raw = vod_info.get('info', {})
 
-                # Handle case where 'info' might be a list instead of dict
-                if isinstance(info_raw, list):
-                    # If it's a list, try to use the first item or create empty dict
-                    info = info_raw[0] if info_raw and isinstance(info_raw[0], dict) else {}
-                    logger.warning(f"VOD info for stream {relation.stream_id} returned list instead of dict, using first item")
-                elif isinstance(info_raw, dict):
-                    info = info_raw
+                    # Handle case where 'info' might be a list instead of dict
+                    if isinstance(info_raw, list):
+                        # If it's a list, try to use the first item or create empty dict
+                        info = info_raw[0] if info_raw and isinstance(info_raw[0], dict) else {}
+                        logger.warning(f"VOD info for stream {relation.stream_id} returned list instead of dict, using first item")
+                    elif isinstance(info_raw, dict):
+                        info = info_raw
+                    else:
+                        info = {}
+                        logger.warning(f"VOD info for stream {relation.stream_id} returned unexpected type: {type(info_raw)}")
+
+                    movie_data_raw = vod_info.get('movie_data', {})
+
+                    # Handle case where 'movie_data' might be a list instead of dict
+                    if isinstance(movie_data_raw, list):
+                        movie_data = movie_data_raw[0] if movie_data_raw and isinstance(movie_data_raw[0], dict) else {}
+                        logger.warning(f"VOD movie_data for stream {relation.stream_id} returned list instead of dict, using first item")
+                    elif isinstance(movie_data_raw, dict):
+                        movie_data = movie_data_raw
+                    else:
+                        movie_data = {}
+                        logger.warning(f"VOD movie_data for stream {relation.stream_id} returned unexpected type: {type(movie_data_raw)}")
                 else:
                     info = {}
-                    logger.warning(f"VOD info for stream {relation.stream_id} returned unexpected type: {type(info_raw)}")
-
-                movie_data_raw = vod_info.get('movie_data', {})
-
-                # Handle case where 'movie_data' might be a list instead of dict
-                if isinstance(movie_data_raw, list):
-                    movie_data = movie_data_raw[0] if movie_data_raw and isinstance(movie_data_raw[0], dict) else {}
-                    logger.warning(f"VOD movie_data for stream {relation.stream_id} returned list instead of dict, using first item")
-                elif isinstance(movie_data_raw, dict):
-                    movie_data = movie_data_raw
-                else:
                     movie_data = {}
-                    logger.warning(f"VOD movie_data for stream {relation.stream_id} returned unexpected type: {type(movie_data_raw)}")
 
-                # Update Movie fields if changed
-                updated = False
-                custom_props = movie.custom_properties or {}
-                if info.get('plot') and info.get('plot') != movie.description:
-                    movie.description = info.get('plot')
+        # Update Movie fields if changed
+        updated = False
+        custom_props = movie.custom_properties or {}
+        if info.get('plot') and info.get('plot') != movie.description:
+            movie.description = info.get('plot')
+            updated = True
+        normalized_rating = normalize_rating(info.get('rating'))
+        if normalized_rating and normalized_rating != movie.rating:
+            movie.rating = normalized_rating
+            updated = True
+        if info.get('genre') and info.get('genre') != movie.genre:
+            movie.genre = info.get('genre')
+            updated = True
+        if info.get('duration_secs'):
+            duration_secs = int(info.get('duration_secs'))
+            if duration_secs != movie.duration_secs:
+                movie.duration_secs = duration_secs
+                updated = True
+        # Check for releasedate or release_date
+        release_date_value = info.get('releasedate') or info.get('release_date')
+        if release_date_value:
+            try:
+                year = int(str(release_date_value).split('-')[0])
+                if year != movie.year:
+                    movie.year = year
                     updated = True
-                normalized_rating = normalize_rating(info.get('rating'))
-                if normalized_rating and normalized_rating != movie.rating:
-                    movie.rating = normalized_rating
-                    updated = True
-                if info.get('genre') and info.get('genre') != movie.genre:
-                    movie.genre = info.get('genre')
-                    updated = True
-                if info.get('duration_secs'):
-                    duration_secs = int(info.get('duration_secs'))
-                    if duration_secs != movie.duration_secs:
-                        movie.duration_secs = duration_secs
-                        updated = True
-                # Check for releasedate or release_date
-                release_date_value = info.get('releasedate') or info.get('release_date')
-                if release_date_value:
-                    try:
-                        year = int(str(release_date_value).split('-')[0])
-                        if year != movie.year:
-                            movie.year = year
-                            updated = True
-                    except Exception:
-                        pass
-                # Handle TMDB/IMDB ID updates with duplicate key protection
-                tmdb_id_to_set = info.get('tmdb_id') if info.get('tmdb_id') and info.get('tmdb_id') != movie.tmdb_id else None
-                imdb_id_to_set = info.get('imdb_id') if info.get('imdb_id') and info.get('imdb_id') != movie.imdb_id else None
+            except Exception:
+                pass
+        # Handle TMDB/IMDB ID updates with duplicate key protection
+        tmdb_id_to_set = info.get('tmdb_id') if info.get('tmdb_id') and info.get('tmdb_id') != movie.tmdb_id else None
+        imdb_id_to_set = info.get('imdb_id') if info.get('imdb_id') and info.get('imdb_id') != movie.imdb_id else None
 
-                logger.debug(f"Movie {movie.id} current IDs: tmdb_id={movie.tmdb_id}, imdb_id={movie.imdb_id}")
-                logger.debug(f"IDs to set: tmdb_id={tmdb_id_to_set}, imdb_id={imdb_id_to_set}")
+        logger.debug(f"Movie {movie.id} current IDs: tmdb_id={movie.tmdb_id}, imdb_id={movie.imdb_id}")
+        logger.debug(f"IDs to set: tmdb_id={tmdb_id_to_set}, imdb_id={imdb_id_to_set}")
 
-                if tmdb_id_to_set or imdb_id_to_set:
-                    # Check for existing movies with these IDs and handle duplicates
-                    updated_movie, relation_updated = handle_movie_id_conflicts(
-                        movie, relation, tmdb_id_to_set, imdb_id_to_set
-                    )
-                    if relation_updated:
-                        # If the relation was updated to point to a different movie,
-                        # we need to update our reference and continue with that movie
-                        movie = updated_movie
-                        logger.info(f"Relation updated, now working with movie {movie.id}")
-                    else:
-                        # No relation update, safe to set the IDs
-                        if tmdb_id_to_set:
-                            movie.tmdb_id = tmdb_id_to_set
-                            updated = True
-                            logger.debug(f"Set tmdb_id {tmdb_id_to_set} on movie {movie.id}")
-                        if imdb_id_to_set:
-                            movie.imdb_id = imdb_id_to_set
-                            updated = True
-                            logger.debug(f"Set imdb_id {imdb_id_to_set} on movie {movie.id}")
-                if should_update_field(custom_props.get('youtube_trailer'), info.get('trailer')):
-                    custom_props['youtube_trailer'] = extract_string_from_array_or_string(info.get('trailer'))
+        if tmdb_id_to_set or imdb_id_to_set:
+            # Check for existing movies with these IDs and handle duplicates
+            updated_movie, relation_updated = handle_movie_id_conflicts(
+                movie, relation, tmdb_id_to_set, imdb_id_to_set
+            )
+            if relation_updated:
+                # If the relation was updated to point to a different movie,
+                # we need to update our reference and continue with that movie
+                movie = updated_movie
+                logger.info(f"Relation updated, now working with movie {movie.id}")
+            else:
+                # No relation update, safe to set the IDs
+                if tmdb_id_to_set:
+                    movie.tmdb_id = tmdb_id_to_set
                     updated = True
-                if should_update_field(custom_props.get('youtube_trailer'), info.get('youtube_trailer')):
-                    custom_props['youtube_trailer'] = extract_string_from_array_or_string(info.get('youtube_trailer'))
+                    logger.debug(f"Set tmdb_id {tmdb_id_to_set} on movie {movie.id}")
+                if imdb_id_to_set:
+                    movie.imdb_id = imdb_id_to_set
                     updated = True
-                if should_update_field(custom_props.get('backdrop_path'), info.get('backdrop_path')):
-                    backdrop_url = extract_string_from_array_or_string(info.get('backdrop_path'))
-                    custom_props['backdrop_path'] = [backdrop_url] if backdrop_url else None
-                    updated = True
-                for actors_key in ('actors', 'cast'):
-                    actors_raw = info.get(actors_key)
-                    if should_update_field(custom_props.get('actors'), actors_raw):
-                        if isinstance(actors_raw, list):
-                            custom_props['actors'] = ', '.join(s.strip() for s in actors_raw if s and str(s).strip()) or None
-                        else:
-                            custom_props['actors'] = extract_string_from_array_or_string(actors_raw)
-                        updated = True
-                        break
-                if should_update_field(custom_props.get('director'), info.get('director')):
-                    custom_props['director'] = extract_string_from_array_or_string(info.get('director'))
-                    updated = True
-                if updated:
-                    # Clean custom_properties before saving to remove null/empty values
-                    movie.custom_properties = clean_custom_properties(custom_props)
-                    try:
-                        movie.save()
-                    except Exception as save_error:
-                        # If we still get an integrity error after our conflict resolution,
-                        # log it and try to save without the problematic IDs
-                        logger.error(f"Failed to save movie {movie.id} after conflict resolution: {str(save_error)}")
-                        if 'tmdb_id' in str(save_error) and movie.tmdb_id:
-                            logger.warning(f"Clearing tmdb_id {movie.tmdb_id} from movie {movie.id} due to save error")
-                            movie.tmdb_id = None
-                        if 'imdb_id' in str(save_error) and movie.imdb_id:
-                            logger.warning(f"Clearing imdb_id {movie.imdb_id} from movie {movie.id} due to save error")
-                            movie.imdb_id = None
-                        try:
-                            movie.save()
-                            logger.info(f"Successfully saved movie {movie.id} after clearing problematic IDs")
-                        except Exception as final_error:
-                            logger.error(f"Final save attempt failed for movie {movie.id}: {str(final_error)}")
-                            raise
+                    logger.debug(f"Set imdb_id {imdb_id_to_set} on movie {movie.id}")
+        if should_update_field(custom_props.get('youtube_trailer'), info.get('trailer')):
+            custom_props['youtube_trailer'] = extract_string_from_array_or_string(info.get('trailer'))
+            updated = True
+        if should_update_field(custom_props.get('youtube_trailer'), info.get('youtube_trailer')):
+            custom_props['youtube_trailer'] = extract_string_from_array_or_string(info.get('youtube_trailer'))
+            updated = True
+        if should_update_field(custom_props.get('backdrop_path'), info.get('backdrop_path')):
+            backdrop_url = extract_string_from_array_or_string(info.get('backdrop_path'))
+            custom_props['backdrop_path'] = [backdrop_url] if backdrop_url else None
+            updated = True
+        for actors_key in ('actors', 'cast'):
+            actors_raw = info.get(actors_key)
+            if should_update_field(custom_props.get('actors'), actors_raw):
+                if isinstance(actors_raw, list):
+                    custom_props['actors'] = ', '.join(s.strip() for s in actors_raw if s and str(s).strip()) or None
+                else:
+                    custom_props['actors'] = extract_string_from_array_or_string(actors_raw)
+                updated = True
+                break
+        if should_update_field(custom_props.get('director'), info.get('director')):
+            custom_props['director'] = extract_string_from_array_or_string(info.get('director'))
+            updated = True
+        if updated:
+            # Clean custom_properties before saving to remove null/empty values
+            movie.custom_properties = clean_custom_properties(custom_props)
+            try:
+                movie.save()
+            except Exception as save_error:
+                # If we still get an integrity error after our conflict resolution,
+                # log it and try to save without the problematic IDs
+                logger.error(f"Failed to save movie {movie.id} after conflict resolution: {str(save_error)}")
+                if 'tmdb_id' in str(save_error) and movie.tmdb_id:
+                    logger.warning(f"Clearing tmdb_id {movie.tmdb_id} from movie {movie.id} due to save error")
+                    movie.tmdb_id = None
+                if 'imdb_id' in str(save_error) and movie.imdb_id:
+                    logger.warning(f"Clearing imdb_id {movie.imdb_id} from movie {movie.id} due to save error")
+                    movie.imdb_id = None
+                try:
+                    movie.save()
+                    logger.info(f"Successfully saved movie {movie.id} after clearing problematic IDs")
+                except Exception as final_error:
+                    logger.error(f"Final save attempt failed for movie {movie.id}: {str(final_error)}")
+                    raise
 
-                # Update relation custom_properties and last_advanced_refresh
-                relation_custom_props = relation.custom_properties or {}
+        # Update relation custom_properties and last_advanced_refresh
+        relation_custom_props = relation.custom_properties or {}
 
-                # Clean the detailed_info before saving to avoid storing null/empty arrays
-                cleaned_info = clean_custom_properties(info) if info else None
-                cleaned_movie_data = clean_custom_properties(movie_data) if movie_data else None
+        # Clean the detailed_info before saving to avoid storing null/empty arrays
+        cleaned_info = clean_custom_properties(info) if info else None
+        cleaned_movie_data = clean_custom_properties(movie_data) if movie_data else None
 
-                if cleaned_info:
-                    relation_custom_props['detailed_info'] = cleaned_info
-                if cleaned_movie_data:
-                    relation_custom_props['movie_data'] = cleaned_movie_data
-                relation_custom_props['detailed_fetched'] = True
+        if cleaned_info:
+            relation_custom_props['detailed_info'] = cleaned_info
+        if cleaned_movie_data:
+            relation_custom_props['movie_data'] = cleaned_movie_data
+        relation_custom_props['detailed_fetched'] = True
 
-                relation.custom_properties = relation_custom_props
-                relation.last_advanced_refresh = now
-                relation.save(update_fields=['custom_properties', 'last_advanced_refresh'])
+        relation.custom_properties = relation_custom_props
+        relation.last_advanced_refresh = now
+        relation.save(update_fields=['custom_properties', 'last_advanced_refresh'])
 
         return "Advanced data refreshed."
     except Exception as e:

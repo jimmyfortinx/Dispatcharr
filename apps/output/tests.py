@@ -28,6 +28,7 @@ from apps.output.views import (
     xc_get_vod_info,
     xc_movie_stream,
 )
+from apps.vod.tasks import refresh_movie_advanced_data
 import xml.etree.ElementTree as ET
 
 class OutputM3UTest(TestCase):
@@ -218,7 +219,6 @@ class OutputXtreamVodVisibilityTest(TestCase):
             category=self.disabled_series_category,
             enabled=False,
         )
-
         self.enabled_movie = Movie.objects.create(name="Enabled Movie")
         self.disabled_movie = Movie.objects.create(name="Disabled Movie")
         self.enabled_movie_relation = M3UMovieRelation.objects.create(
@@ -356,6 +356,54 @@ class OutputXtreamVodVisibilityTest(TestCase):
 
         self.assertNotIn("Hidden Movies", {row["category_name"] for row in categories})
         self.assertNotIn("Hidden Movie", {row["name"] for row in streams})
+
+
+class StalkerMovieAdvancedRefreshTests(TestCase):
+    def test_refresh_movie_advanced_data_uses_local_stalker_metadata(self):
+        account = M3UAccount.objects.create(
+            name="stalker-vod-account",
+            account_type=M3UAccount.Types.STALKER,
+            server_url="http://portal.example.com/c/",
+            is_active=True,
+            custom_properties={
+                "enable_vod": True,
+                "mac": "00:1A:79:00:00:94",
+            },
+        )
+        movie = Movie.objects.create(name="Zootopia")
+        relation = M3UMovieRelation.objects.create(
+            m3u_account=account,
+            movie=movie,
+            stream_id="393408",
+            custom_properties={
+                "basic_data": {
+                    "plot": "Local stalker plot",
+                    "rating": "7.7",
+                    "genre": "Animation",
+                    "director": "Byron Howard",
+                    "actors": "Ginnifer Goodwin, Jason Bateman",
+                    "tmdb_id": "269149",
+                },
+                "detailed_fetched": False,
+            },
+        )
+
+        with patch("apps.vod.tasks.XtreamCodesClient") as mock_xtream_client:
+            result = refresh_movie_advanced_data(relation.id, force_refresh=True)
+
+        self.assertEqual(result, "Advanced data refreshed.")
+        mock_xtream_client.assert_not_called()
+
+        relation.refresh_from_db()
+        movie.refresh_from_db()
+
+        self.assertTrue(relation.custom_properties["detailed_fetched"])
+        self.assertEqual(
+            relation.custom_properties["detailed_info"]["plot"],
+            "Local stalker plot",
+        )
+        self.assertEqual(movie.description, "Local stalker plot")
+        self.assertEqual(str(movie.tmdb_id), "269149")
 
 
 class OutputXtreamRelationSelectionTest(TestCase):
