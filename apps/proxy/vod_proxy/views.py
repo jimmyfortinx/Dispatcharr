@@ -105,6 +105,19 @@ def _is_open_ended_probe_range(range_header):
     return start.isdigit() or start == ""
 
 
+def _parse_open_ended_probe_range_start(range_header):
+    if not _is_open_ended_probe_range(range_header):
+        return None
+
+    normalized = str(range_header).strip().lower()
+    range_spec = normalized[len("bytes="):]
+    start, _ = range_spec.split("-", 1)
+    start = start.strip()
+    if start == "":
+        return 0
+    return int(start)
+
+
 def _record_probe_activity(client_ip, client_user_agent, content_type, content_id, now=None):
     now = now or time.time()
     activity_key = _get_probe_activity_redis_key(client_ip, client_user_agent)
@@ -210,6 +223,15 @@ def _evaluate_probe_mode(
         return {
             "enabled": False,
             "reason": "range-not-open-ended",
+            "backend": None,
+            "unique_content_count": None,
+        }
+
+    range_start = _parse_open_ended_probe_range_start(range_header)
+    if content_type == "movie" and (range_start is None or range_start == 0):
+        return {
+            "enabled": False,
+            "reason": "movie-initial-range-creates-session",
             "backend": None,
             "unique_content_count": None,
         }
