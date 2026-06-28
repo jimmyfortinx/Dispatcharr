@@ -10,7 +10,7 @@ import hashlib
 import requests
 from urllib.parse import urlencode, urlparse
 from django.db import close_old_connections
-from django.http import StreamingHttpResponse, JsonResponse, Http404, HttpResponse
+from django.http import JsonResponse, Http404, HttpResponse
 from django.shortcuts import get_object_or_404
 from django.views.decorators.csrf import csrf_exempt
 from apps.vod.models import Movie, Series, Episode, M3UMovieRelation, M3UEpisodeRelation
@@ -19,8 +19,6 @@ from apps.m3u.models import M3UAccount, M3UAccountProfile
 from apps.proxy.vod_proxy.multi_worker_connection_manager import (
     MultiWorkerVODConnectionManager,
     RedisBackedVODConnection,
-    _is_stalker_expired_playback_http_error,
-    _transform_url_for_profile,
     infer_content_type_from_url,
     get_vod_client_stop_key,
 )
@@ -43,9 +41,6 @@ _probe_activity = {}
 PROBE_ACTIVITY_WINDOW_SECONDS = 30
 PROBE_ACTIVITY_MIN_UNIQUE_CONTENT = 3
 PROBE_ACTIVITY_REDIS_KEY_PREFIX = "vod_probe_activity"
-STALKER_PROBE_462_COOLDOWN_KEY_PREFIX = "stalker_probe_462"
-STALKER_PROBE_462_COOLDOWN_BASE_SECONDS = 2
-STALKER_PROBE_462_COOLDOWN_MAX_SECONDS = 30
 
 
 def _is_plex_probe_user_agent(user_agent):
@@ -202,237 +197,165 @@ def _evaluate_probe_mode(
     }
 
 
-def _stream_stalker_probe_content(
-    *,
-    content_name,
-    stream_url,
-    m3u_profile,
-    relation,
-    client_user_agent,
-    request,
-    input_headers=None,
-    range_header=None,
-):
-    connection_manager = MultiWorkerVODConnectionManager.get_instance()
-    if relation is not None and _is_stalker_probe_462_cooldown_active(relation):
-        logger.warning(
-            "[VOD-PROBE] Skipping upstream probe for %s during Stalker 462 cooldown",
-            content_name,
-        )
-        return _build_probe_skip_response(
-            content_name=content_name,
-            reason="stalker-462-cooldown",
-        )
+def _iter_probe_metadata_dicts(content_obj, relation):
+    relation_props = dict(getattr(relation, "custom_properties", None) or {})
+    content_props = dict(getattr(content_obj, "custom_properties", None) or {})
 
-    def _build_probe_headers(resolved_input_headers):
-        headers = connection_manager._build_provider_request_headers(
-            m3u_profile,
-            client_user_agent,
-            request,
-            input_headers=resolved_input_headers,
-        )
-        if range_header:
-            headers["Range"] = range_header
-        return headers
+    for payload in (
+        relation_props.get("detailed_info"),
+        relation_props.get("movie_data"),
+        relation_props.get("detail_data"),
+        relation_props.get("basic_data"),
+        relation_props.get("info"),
+        relation_props,
+        content_props,
+    ):
+        if isinstance(payload, dict):
+            yield payload
 
-    provider_headers = _build_probe_headers(input_headers)
 
-    logger.info(
-        "[VOD-PROBE] Starting lightweight probe stream for %s",
-        content_name,
-    )
-
-    def _fetch_probe_response(target_url, headers):
-        return requests.get(
-            target_url,
-            headers=headers,
-            stream=True,
-            timeout=(
-                MultiWorkerVODConnectionManager.UPSTREAM_CONNECT_TIMEOUT_SECONDS,
-                MultiWorkerVODConnectionManager.UPSTREAM_READ_TIMEOUT_SECONDS,
-            ),
-            allow_redirects=True,
-        )
-
-    upstream_response = _fetch_probe_response(stream_url, provider_headers)
-    try:
-        upstream_response.raise_for_status()
-    except requests.HTTPError as exc:
-        if relation is None or not _is_stalker_expired_playback_http_error(exc):
-            raise
-
-        _mark_stalker_probe_462_cooldown(relation)
-        logger.warning(
-            "[VOD-PROBE] Provider returned expired Stalker playback URL (462) during probe for %s, resolving a fresh link",
-            content_name,
-        )
-        upstream_response.close()
-
-        fresh_context = resolve_vod_stream_context(
-            relation,
-            force_refresh=True,
-        )
-        fresh_stream_url = _transform_url_for_profile(
-            fresh_context.url,
-            m3u_profile,
-        )
-        provider_headers = _build_probe_headers(
-            fresh_context.input_headers or input_headers,
-        )
-        upstream_response = _fetch_probe_response(
-            fresh_stream_url,
-            provider_headers,
-        )
+def _estimate_probe_bitrate_bps(content_obj, relation):
+    for payload in _iter_probe_metadata_dicts(content_obj, relation):
+        raw_bitrate = payload.get("bitrate")
         try:
-            upstream_response.raise_for_status()
-        except requests.HTTPError as retry_exc:
-            if _is_stalker_expired_playback_http_error(retry_exc):
-                _mark_stalker_probe_462_cooldown(relation)
-                upstream_response.close()
-                logger.warning(
-                    "[VOD-PROBE] Fresh Stalker playback URL also returned 462 during probe for %s, returning soft probe response",
-                    content_name,
-                )
-                return _build_probe_skip_response(
-                    content_name=content_name,
-                    reason="stalker-462-retry-exhausted",
-                )
-            raise
+            bitrate = float(raw_bitrate)
+        except (TypeError, ValueError):
+            bitrate = None
+        if bitrate and bitrate > 0:
+            if bitrate >= 50000:
+                return int(bitrate)
+            if bitrate >= 100:
+                return int(bitrate * 1000)
+            return int(bitrate * 1000 * 1000)
 
-        _clear_stalker_probe_462_cooldown(relation)
-        stream_url = fresh_stream_url
+        video_info = payload.get("video")
+        if isinstance(video_info, dict):
+            for key in ("bitrate", "bit_rate"):
+                try:
+                    video_bitrate = float(video_info.get(key))
+                except (TypeError, ValueError):
+                    video_bitrate = None
+                if video_bitrate and video_bitrate > 0:
+                    if video_bitrate >= 50000:
+                        return int(video_bitrate)
+                    if video_bitrate >= 100:
+                        return int(video_bitrate * 1000)
+                    return int(video_bitrate * 1000 * 1000)
+    return None
 
+
+def _estimate_probe_content_length(content_obj, relation):
+    duration_secs = getattr(content_obj, "duration_secs", None) or 0
+    try:
+        duration_secs = int(duration_secs)
+    except (TypeError, ValueError):
+        duration_secs = 0
+
+    if duration_secs <= 0:
+        duration_secs = 7200 if hasattr(relation, "movie_id") else 2400
+
+    bitrate_bps = _estimate_probe_bitrate_bps(content_obj, relation)
+    if bitrate_bps is None:
+        bitrate_bps = 6_000_000 if hasattr(relation, "movie_id") else 3_000_000
+
+    estimated_size = int((duration_secs * bitrate_bps) / 8)
+    minimum_size = 32 * 1024 * 1024
+    maximum_size = 50 * 1024 * 1024 * 1024
+    return max(minimum_size, min(estimated_size, maximum_size))
+
+
+def _get_probe_container_extension(relation):
+    extension = getattr(relation, "container_extension", None)
+    if extension:
+        normalized = str(extension).strip().lower().lstrip(".")
+        if normalized:
+            return normalized
+    return "mp4"
+
+
+def _get_synthetic_probe_header_bytes(extension):
+    normalized = (extension or "mp4").lower()
+    if normalized in {"mp4", "m4v", "mov"}:
+        return b"\x00\x00\x00\x18ftypisom\x00\x00\x02\x00isomiso2"
+    if normalized in {"mkv", "webm"}:
+        return b"\x1A\x45\xDF\xA3\x93B\x82\x88matroska\x00\x00\x00"
+    if normalized == "avi":
+        return b"RIFF\x24\x00\x00\x00AVI LIST"
+    if normalized == "ts":
+        return bytes([0x47]) + (b"\x00" * 187)
+    if normalized in {"mpg", "mpeg"}:
+        return b"\x00\x00\x01\xBA" + (b"\x00" * 12)
+    return b"\x00\x00\x00\x18ftypisom\x00\x00\x02\x00isomiso2"
+
+
+def _build_synthetic_probe_response(*, content_name, content_obj, relation, range_header):
+    total_size = _estimate_probe_content_length(content_obj, relation)
+    extension = _get_probe_container_extension(relation)
     content_type_header = (
-        upstream_response.headers.get("Content-Type")
-        or upstream_response.headers.get("content-type")
-        or infer_content_type_from_url(upstream_response.url)
-        or infer_content_type_from_url(stream_url)
+        infer_content_type_from_url(f"http://dispatcharr.invalid/probe.{extension}")
         or "video/mp4"
     )
 
-    def stream_generator():
+    start = 0
+    if range_header:
         try:
-            for chunk in upstream_response.iter_content(chunk_size=8192):
-                if chunk:
-                    yield chunk
-        finally:
-            upstream_response.close()
+            range_spec = str(range_header).strip().lower()[len("bytes="):]
+            start_part, _ = range_spec.split("-", 1)
+            start = int(start_part) if start_part.strip() else 0
+        except (ValueError, TypeError):
+            start = 0
 
-    response = StreamingHttpResponse(
-        streaming_content=stream_generator(),
-        content_type=content_type_header,
-    )
-    response.status_code = upstream_response.status_code
+    if start >= total_size:
+        response = HttpResponse(status=416)
+        response["Content-Range"] = f"bytes */{total_size}"
+        response["Accept-Ranges"] = "bytes"
+        response["X-Dispatcharr-Probe-Mode"] = "1"
+        response["X-Dispatcharr-Probe-Synthetic"] = "1"
+        return response
+
+    body_length = min(2048, total_size - start)
+    header_bytes = _get_synthetic_probe_header_bytes(extension)
+
+    if start < len(header_bytes):
+        body = header_bytes[start:start + body_length]
+        if len(body) < body_length:
+            body += b"\x00" * (body_length - len(body))
+    else:
+        body = b"\x00" * body_length
+
+    end = start + body_length - 1
+    response = HttpResponse(body, status=206, content_type=content_type_header)
     response["Cache-Control"] = "no-cache"
     response["Pragma"] = "no-cache"
+    response["Accept-Ranges"] = "bytes"
+    response["Content-Length"] = str(body_length)
+    response["Content-Range"] = f"bytes {start}-{end}/{total_size}"
     response["X-Dispatcharr-Probe-Mode"] = "1"
-
-    for header_name in ("Accept-Ranges", "Content-Length", "Content-Range"):
-        header_value = upstream_response.headers.get(header_name)
-        if header_value:
-            response[header_name] = header_value
-
+    response["X-Dispatcharr-Probe-Synthetic"] = "1"
     logger.info(
-        "[VOD-PROBE] Lightweight probe response ready for %s (status: %s)",
+        "[VOD-PROBE] Returning synthetic local probe response for %s (ext=%s start=%s len=%s total=%s)",
         content_name,
-        response.status_code,
+        extension,
+        start,
+        body_length,
+        total_size,
     )
     return response
 
 
-def _build_probe_skip_response(*, content_name, reason):
-    response = HttpResponse(status=204)
-    response["Cache-Control"] = "no-cache"
-    response["Pragma"] = "no-cache"
-    response["X-Dispatcharr-Probe-Mode"] = "1"
-    response["X-Dispatcharr-Probe-Skipped"] = reason
-    logger.info(
-        "[VOD-PROBE] Returning soft probe skip response for %s (reason: %s)",
-        content_name,
-        reason,
+def _stream_stalker_probe_content(
+    *,
+    content_name,
+    content_obj,
+    relation,
+    range_header=None,
+):
+    return _build_synthetic_probe_response(
+        content_name=content_name,
+        content_obj=content_obj,
+        relation=relation,
+        range_header=range_header,
     )
-    return response
-
-
-def _get_stalker_probe_462_cooldown_key(relation):
-    account_id = getattr(getattr(relation, "m3u_account", None), "id", "unknown")
-    stream_id = getattr(relation, "stream_id", "") or ""
-    relation_type = "episode" if hasattr(relation, "episode_id") else "movie"
-    return f"{STALKER_PROBE_462_COOLDOWN_KEY_PREFIX}:{account_id}:{relation_type}:{stream_id}"
-
-
-def _is_stalker_probe_462_cooldown_active(relation):
-    redis_client = RedisClient.get_client()
-    if redis_client is None:
-        return False
-
-    cooldown_key = _get_stalker_probe_462_cooldown_key(relation)
-    try:
-        cooldown_state = redis_client.get(cooldown_key)
-    except Exception:
-        logger.debug(
-            "Failed to read Stalker probe 462 cooldown for key=%s",
-            cooldown_key,
-            exc_info=True,
-        )
-        return False
-    return bool(cooldown_state)
-
-
-def _mark_stalker_probe_462_cooldown(relation):
-    redis_client = RedisClient.get_client()
-    if redis_client is None:
-        return
-
-    cooldown_key = _get_stalker_probe_462_cooldown_key(relation)
-    try:
-        raw_count = redis_client.get(cooldown_key)
-        current_count = int(raw_count) if raw_count else 0
-    except Exception:
-        current_count = 0
-
-    next_count = min(current_count + 1, 5)
-    cooldown_seconds = min(
-        STALKER_PROBE_462_COOLDOWN_BASE_SECONDS * (2 ** (next_count - 1)),
-        STALKER_PROBE_462_COOLDOWN_MAX_SECONDS,
-    )
-    try:
-        redis_client.set(
-            cooldown_key,
-            str(next_count),
-            ex=cooldown_seconds,
-        )
-        logger.warning(
-            "[VOD-PROBE] Stored Stalker 462 probe cooldown for account=%s stream_id=%s key=%s count=%s ttl=%ss",
-            getattr(getattr(relation, "m3u_account", None), "id", None),
-            getattr(relation, "stream_id", None),
-            cooldown_key,
-            next_count,
-            cooldown_seconds,
-        )
-    except Exception:
-        logger.debug(
-            "Failed to store Stalker probe 462 cooldown for key=%s",
-            cooldown_key,
-            exc_info=True,
-        )
-
-
-def _clear_stalker_probe_462_cooldown(relation):
-    redis_client = RedisClient.get_client()
-    if redis_client is None:
-        return
-
-    cooldown_key = _get_stalker_probe_462_cooldown_key(relation)
-    try:
-        redis_client.delete(cooldown_key)
-    except Exception:
-        logger.debug(
-            "Failed to clear Stalker probe 462 cooldown for key=%s",
-            cooldown_key,
-            exc_info=True,
-        )
-
 
 def _active_vod_account_filters():
     return {
@@ -1101,6 +1024,14 @@ def stream_vod(request, content_type, content_id, session_id=None, profile_id=No
                     status=429
                 )
 
+        if probe_mode:
+            return _stream_stalker_probe_content(
+                content_name=getattr(content_obj, 'name', 'Unknown'),
+                content_obj=content_obj,
+                relation=relation,
+                range_header=range_header,
+            )
+
         # Resolve provider-specific playback context before profile transforms.
         stream_context = _get_stream_context_for_request(relation, session_id=session_id)
         stream_url = stream_context.get("url")
@@ -1129,18 +1060,6 @@ def stream_vod(request, content_type, content_id, session_id=None, profile_id=No
         if not final_stream_url or not final_stream_url.startswith(('http://', 'https://')):
             logger.error(f"[VOD-ERROR] Invalid stream URL: {final_stream_url}")
             return HttpResponse("Invalid stream URL", status=500)
-
-        if probe_mode:
-            return _stream_stalker_probe_content(
-                content_name=getattr(content_obj, 'name', 'Unknown'),
-                stream_url=final_stream_url,
-                m3u_profile=m3u_profile,
-                relation=relation,
-                client_user_agent=client_user_agent,
-                request=request,
-                input_headers=stream_context.get("input_headers"),
-                range_header=range_header,
-            )
 
         # Get connection manager (Redis-backed for multi-worker support)
         connection_manager = MultiWorkerVODConnectionManager.get_instance()

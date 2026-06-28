@@ -29,6 +29,18 @@ import hashlib
 logger = logging.getLogger(__name__)
 
 
+def _is_plex_catalog_metadata_request(request):
+    user_agent = (request.META.get("HTTP_USER_AGENT") or "").lower()
+    plex_product = (request.META.get("HTTP_X_PLEX_PRODUCT") or "").lower()
+    plex_client = (request.META.get("HTTP_X_PLEX_CLIENT_IDENTIFIER") or "").lower()
+
+    if "plex" in user_agent or "lavf/" in user_agent:
+        return True
+    if plex_product or plex_client:
+        return True
+    return False
+
+
 def _extract_relation_display_name(relation, fallback):
     relation_props = dict(getattr(relation, "custom_properties", None) or {})
     payloads = []
@@ -2736,6 +2748,11 @@ def xc_get_series_info(request, user, series_id):
         from apps.vod.tasks import stalker_episode_import_looks_stale
         stale_stalker_episode_import = stalker_episode_import_looks_stale(series_relation)
 
+        skip_refresh_for_plex_scan = (
+            series_relation.m3u_account.account_type == M3UAccount.Types.STALKER
+            and _is_plex_catalog_metadata_request(request)
+        )
+
         # Force refresh if episodes/details have never been fetched or time interval exceeded
         if (
             not episodes_fetched
@@ -2743,17 +2760,23 @@ def xc_get_series_info(request, user, series_id):
             or should_refresh
             or stale_stalker_episode_import
         ):
-            from apps.vod.tasks import refresh_series_episodes
-            account = series_relation.m3u_account
-            if account and account.is_active:
-                refresh_series_episodes(account, series, series_relation.external_series_id)
-                # Refresh objects from database after task completion
-                series.refresh_from_db()
-                series_relation.refresh_from_db()
-                relation_display_name = _extract_relation_display_name(
-                    series_relation,
-                    series.name,
+            if skip_refresh_for_plex_scan:
+                logger.info(
+                    "Skipping Stalker series metadata refresh for Plex catalog scan on relation %s",
+                    series_relation.id,
                 )
+            else:
+                from apps.vod.tasks import refresh_series_episodes
+                account = series_relation.m3u_account
+                if account and account.is_active:
+                    refresh_series_episodes(account, series, series_relation.external_series_id)
+                    # Refresh objects from database after task completion
+                    series.refresh_from_db()
+                    series_relation.refresh_from_db()
+                    relation_display_name = _extract_relation_display_name(
+                        series_relation,
+                        series.name,
+                    )
 
     except Exception as e:
         logger.error(f"Error refreshing series data for relation {series_relation.id}: {str(e)}")
@@ -2977,17 +3000,28 @@ def xc_get_vod_info(request, user, vod_id):
             movie_relation.last_advanced_refresh < timezone.now() - timedelta(hours=24)
         )
 
+        skip_refresh_for_plex_scan = (
+            movie_relation.m3u_account.account_type == M3UAccount.Types.STALKER
+            and _is_plex_catalog_metadata_request(request)
+        )
+
         if should_refresh:
-            # Trigger refresh of detailed info
-            from apps.vod.tasks import refresh_movie_advanced_data
-            refresh_movie_advanced_data(movie_relation.id)
-            # Refresh objects from database after task completion
-            movie.refresh_from_db()
-            movie_relation.refresh_from_db()
-            relation_display_name = _extract_relation_display_name(
-                movie_relation,
-                movie.name,
-            )
+            if skip_refresh_for_plex_scan:
+                logger.info(
+                    "Skipping Stalker movie metadata refresh for Plex catalog scan on relation %s",
+                    movie_relation.id,
+                )
+            else:
+                # Trigger refresh of detailed info
+                from apps.vod.tasks import refresh_movie_advanced_data
+                refresh_movie_advanced_data(movie_relation.id)
+                # Refresh objects from database after task completion
+                movie.refresh_from_db()
+                movie_relation.refresh_from_db()
+                relation_display_name = _extract_relation_display_name(
+                    movie_relation,
+                    movie.name,
+                )
 
         # Add detailed info from custom_properties if available
         if movie.custom_properties:

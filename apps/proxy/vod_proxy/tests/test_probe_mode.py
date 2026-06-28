@@ -1,7 +1,9 @@
-from django.test import TestCase
+from django.test import RequestFactory, TestCase
 from unittest.mock import patch
 
+from apps.m3u.models import M3UAccount
 from apps.proxy.vod_proxy import views
+from apps.vod.models import M3UMovieRelation, Movie
 
 
 class FakeProbeRedisPipeline:
@@ -225,3 +227,74 @@ class TestProbeModeHeuristics(TestCase):
                 utc_end=None,
             )
         )
+
+
+class TestProbeModeSyntheticResponse(TestCase):
+    def setUp(self):
+        self.factory = RequestFactory()
+        self.account = M3UAccount.objects.create(
+            name="probe-account",
+            account_type=M3UAccount.Types.STALKER,
+            is_active=True,
+            custom_properties={"enable_vod": True},
+        )
+        self.movie = Movie.objects.create(
+            name="Probe Movie",
+            duration_secs=5400,
+        )
+        self.relation = M3UMovieRelation.objects.create(
+            m3u_account=self.account,
+            movie=self.movie,
+            stream_id="probe-movie-1",
+            container_extension="mkv",
+            custom_properties={
+                "detailed_info": {
+                    "bitrate": 8000,
+                }
+            },
+        )
+
+    @patch("apps.proxy.vod_proxy.views.network_access_allowed", return_value=True)
+    @patch("apps.proxy.vod_proxy.views.resolve_vod_stream_context")
+    @patch.object(views.VODStreamView, "_get_m3u_profile")
+    @patch.object(views.VODStreamView, "_get_content_and_relation")
+    @patch(
+        "apps.proxy.vod_proxy.views._evaluate_probe_mode",
+        return_value={
+            "enabled": True,
+            "reason": "scan-burst-detected",
+            "backend": "memory",
+            "unique_content_count": 3,
+        },
+    )
+    def test_probe_mode_uses_synthetic_local_response_without_upstream_resolution(
+        self,
+        _mock_probe_eval,
+        mock_get_content_and_relation,
+        mock_get_m3u_profile,
+        mock_resolve_vod_stream_context,
+        _mock_network_access_allowed,
+    ):
+        mock_get_content_and_relation.return_value = (self.movie, self.relation)
+
+        request = self.factory.get(
+            f"/proxy/vod/movie/{self.movie.uuid}",
+            HTTP_USER_AGENT="Plex Media Server",
+            HTTP_RANGE="bytes=0-",
+        )
+
+        response = views.VODStreamView().get(
+            request,
+            "movie",
+            self.movie.uuid,
+            None,
+            None,
+        )
+
+        self.assertEqual(response.status_code, 206)
+        self.assertEqual(response["X-Dispatcharr-Probe-Mode"], "1")
+        self.assertEqual(response["X-Dispatcharr-Probe-Synthetic"], "1")
+        self.assertEqual(response["Content-Type"], "video/x-matroska")
+        self.assertTrue(response.content.startswith(b"\x1A\x45\xDF\xA3"))
+        mock_resolve_vod_stream_context.assert_not_called()
+        mock_get_m3u_profile.assert_not_called()
