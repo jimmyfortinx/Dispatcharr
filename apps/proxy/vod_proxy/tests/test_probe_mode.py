@@ -1,3 +1,4 @@
+import time
 from django.test import RequestFactory, TestCase
 from unittest.mock import patch
 
@@ -59,14 +60,34 @@ class FakeProbeRedisPipeline:
 class FakeProbeRedis:
     def __init__(self):
         self.sorted_sets = {}
+        self.values = {}
 
     def pipeline(self, transaction=False):
         return FakeProbeRedisPipeline(self)
+
+    def exists(self, key):
+        value = self.values.get(key)
+        if value is None:
+            return 0
+        expires_at = value.get("expires_at")
+        if expires_at is not None and expires_at <= time.time():
+            self.values.pop(key, None)
+            return 0
+        return 1
+
+    def set(self, key, value, ex=None):
+        expires_at = time.time() + ex if ex else None
+        self.values[key] = {
+            "value": value,
+            "expires_at": expires_at,
+        }
+        return True
 
 
 class TestProbeModeHeuristics(TestCase):
     def setUp(self):
         views._probe_activity.clear()
+        views._playback_suppression.clear()
         self.redis_client = FakeProbeRedis()
         self.redis_patcher = patch(
             "apps.proxy.vod_proxy.views.RedisClient.get_client",
@@ -76,6 +97,7 @@ class TestProbeModeHeuristics(TestCase):
 
     def tearDown(self):
         views._probe_activity.clear()
+        views._playback_suppression.clear()
         self.redis_patcher.stop()
 
     def test_probe_mode_requires_scan_burst(self):
@@ -214,6 +236,26 @@ class TestProbeModeHeuristics(TestCase):
                 utc_end=None,
             )
         )
+
+    def test_recent_real_playback_activity_disables_probe_mode(self):
+        user_agent = "Lavf/60.16.100"
+        client_ip = "10.0.0.10"
+        views._record_real_playback_activity(client_ip, user_agent, now=1000)
+
+        evaluation = views._evaluate_probe_mode(
+            client_ip=client_ip,
+            client_user_agent=user_agent,
+            content_type="movie",
+            content_id="movie-3",
+            range_header="bytes=0-",
+            session_id=None,
+            offset=None,
+            utc_start=None,
+            utc_end=None,
+        )
+
+        self.assertFalse(evaluation["enabled"])
+        self.assertEqual(evaluation["reason"], "recent-real-playback-activity")
         self.assertFalse(
             views._should_use_probe_mode(
                 client_ip="10.0.0.10",

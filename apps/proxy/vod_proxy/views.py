@@ -39,9 +39,11 @@ logger = logging.getLogger(__name__)
 
 _request_times = {}
 _probe_activity = {}
+_playback_suppression = {}
 PROBE_ACTIVITY_WINDOW_SECONDS = 30
 PROBE_ACTIVITY_MIN_UNIQUE_CONTENT = 3
 PROBE_ACTIVITY_REDIS_KEY_PREFIX = "vod_probe_activity"
+PROBE_PLAYBACK_SUPPRESSION_SECONDS = 180
 _SYNTHETIC_MP4_PROBE_SAMPLE_B64 = "AAAAIGZ0eXBpc29tAAACAGlzb21pc28yYXZjMW1wNDEAAAMUbW9vdgAAAGxtdmhkAAAAAAAAAAAAAAAAAAAD6AAAA+gAAQAAAQAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAgAAAj90cmFrAAAAXHRraGQAAAADAAAAAAAAAAAAAAABAAAAAAAAA+gAAAAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAABAAAAAABAAAAAQAAAAAAAkZWR0cwAAABxlbHN0AAAAAAAAAAEAAAPoAAAAAAABAAAAAAG3bWRpYQAAACBtZGhkAAAAAAAAAAAAAAAAAABAAAAAQABVxAAAAAAALWhkbHIAAAAAAAAAAHZpZGUAAAAAAAAAAAAAAABWaWRlb0hhbmRsZXIAAAABYm1pbmYAAAAUdm1oZAAAAAEAAAAAAAAAAAAAACRkaW5mAAAAHGRyZWYAAAAAAAAAAQAAAAx1cmwgAAAAAQAAASJzdGJsAAAAvnN0c2QAAAAAAAAAAQAAAK5hdmMxAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAABAAEABIAAAASAAAAAAAAAABFUxhdmM2Mi4xMS4xMDAgbGlieDI2NAAAAAAAAAAAAAAAGP//AAAANGF2Y0MBZAAK/+EAF2dkAAqs2V7ARAAAAwAEAAADAAg8SJZYAQAGaOvjyyLA/fj4AAAAABBwYXNwAAAAAQAAAAEAAAAUYnRydAAAAAAAABYoAAAAAAAAABhzdHRzAAAAAAAAAAEAAAABAABAAAAAABxzdHNjAAAAAAAAAAEAAAABAAAAAQAAAAEAAAAUc3RzegAAAAAAAALFAAAAAQAAABRzdGNvAAAAAAAAAAEAAANEAAAAYXVkdGEAAABZbWV0YQAAAAAAAAAhaGRscgAAAAAAAAAAbWRpcmFwcGwAAAAAAAAAAAAAAAAsaWxzdAAAACSpdG9vAAAAHGRhdGEAAAABAAAAAExhdmY2Mi4zLjEwMAAAAAhmcmVlAAACzW1kYXQAAAKtBgX//6ncRem95tlIt5Ys2CDZI+7veDI2NCAtIGNvcmUgMTY1IHIzMjIyIGIzNTYwNWEgLSBILjI2NC9NUEVHLTQgQVZDIGNvZGVjIC0gQ29weWxlZnQgMjAwMy0yMDI1IC0gaHR0cDovL3d3dy52aWRlb2xhbi5vcmcveDI2NC5odG1sIC0gb3B0aW9uczogY2FiYWM9MSByZWY9MyBkZWJsb2NrPTE6MDowIGFuYWx5c2U9MHgzOjB4MTEzIG1lPWhleCBzdWJtZT03IHBzeT0xIHBzeV9yZD0xLjAwOjAuMDAgbWl4ZWRfcmVmPTEgbWVfcmFuZ2U9MTYgY2hyb21hX21lPTEgdHJlbGxpcz0xIDh4OGRjdD0xIGNxbT0wIGRlYWR6b25lPTIxLDExIGZhc3RfcHNraXA9MSBjaHJvbWFfcXBfb2Zmc2V0PS0yIHRocmVhZHM9MSBsb29rYWhlYWRfdGhyZWFkcz0xIHNsaWNlZF90aHJlYWRzPTAgbnI9MCBkZWNpbWF0ZT0xIGludGVybGFjZWQ9MCBibHVyYXlfY29tcGF0PTAgY29uc3RyYWluZWRfaW50cmE9MCBiZnJhbWVzPTMgYl9weXJhbWlkPTIgYl9hZGFwdD0xIGJfYmlhcz0wIGRpcmVjdD0xIHdlaWdodGI9MSBvcGVuX2dvcD0wIHdlaWdodHA9MiBrZXlpbnQ9MjUwIGtleWludF9taW49MSBzY2VuZWN1dD00MCBpbnRyYV9yZWZyZXNoPTAgcmNfbG9va2FoZWFkPTQwIHJjPWNyZiBtYnRyZWU9MSBjcmY9MjMuMCBxY29tcD0wLjYwIHFwbWluPTAgcXBtYXg9NjkgcXBzdGVwPTQgaXBfcmF0aW89MS40MCBhcT0xOjEuMDAAgAAAABBliIQAFf/+98nvwKbr29+B"
 _SYNTHETIC_MATROSKA_PROBE_SAMPLE_B64 = (
     "GkXfo6NChoEBQveBAULygQRC84EIQoKIbWF0cm9za2FCh4EEQoWBAhhTgGcBAAAAAAAFChFNm3TAv4QmWQZVTbuLU6uEFUmpZlOsgaFN"
@@ -154,6 +156,56 @@ def _get_probe_activity_redis_key(client_ip, client_user_agent):
     return f"{PROBE_ACTIVITY_REDIS_KEY_PREFIX}:{fingerprint}"
 
 
+def _get_probe_playback_suppression_key(client_ip, client_user_agent):
+    fingerprint = hashlib.sha1(
+        f"{client_ip}:{client_user_agent or 'unknown'}".encode("utf-8")
+    ).hexdigest()
+    return f"{PROBE_ACTIVITY_REDIS_KEY_PREFIX}:playback:{fingerprint}"
+
+
+def _has_recent_real_playback_activity(client_ip, client_user_agent, now=None):
+    now = now or time.time()
+    suppression_key = _get_probe_playback_suppression_key(client_ip, client_user_agent)
+    redis_client = RedisClient.get_client()
+
+    if redis_client is not None:
+        try:
+            return bool(redis_client.exists(suppression_key))
+        except Exception:
+            logger.warning(
+                "[VOD-PROBE] Redis playback suppression lookup failed for %s",
+                suppression_key,
+                exc_info=True,
+            )
+
+    expires_at = _playback_suppression.get(suppression_key)
+    if expires_at is None:
+        return False
+    if expires_at <= now:
+        _playback_suppression.pop(suppression_key, None)
+        return False
+    return True
+
+
+def _record_real_playback_activity(client_ip, client_user_agent, now=None):
+    now = now or time.time()
+    suppression_key = _get_probe_playback_suppression_key(client_ip, client_user_agent)
+    redis_client = RedisClient.get_client()
+
+    if redis_client is not None:
+        try:
+            redis_client.set(suppression_key, "1", ex=PROBE_PLAYBACK_SUPPRESSION_SECONDS)
+            return
+        except Exception:
+            logger.warning(
+                "[VOD-PROBE] Redis playback suppression write failed for %s",
+                suppression_key,
+                exc_info=True,
+            )
+
+    _playback_suppression[suppression_key] = now + PROBE_PLAYBACK_SUPPRESSION_SECONDS
+
+
 def _should_use_probe_mode(
     *,
     client_ip,
@@ -210,6 +262,13 @@ def _evaluate_probe_mode(
         return {
             "enabled": False,
             "reason": "range-not-open-ended",
+            "backend": None,
+            "unique_content_count": None,
+        }
+    if _has_recent_real_playback_activity(client_ip, client_user_agent):
+        return {
+            "enabled": False,
+            "reason": "recent-real-playback-activity",
             "backend": None,
             "unique_content_count": None,
         }
@@ -1082,6 +1141,13 @@ def stream_vod(request, content_type, content_id, session_id=None, profile_id=No
                     {"error": f"Stream limit exceeded ({user.stream_limit} concurrent streams allowed)"},
                     status=429
                 )
+
+        if (
+            relation.m3u_account.account_type == M3UAccount.Types.STALKER
+            and session_id
+            and not probe_mode
+        ):
+            _record_real_playback_activity(client_ip, client_user_agent)
 
         if probe_mode:
             return _stream_stalker_probe_content(
