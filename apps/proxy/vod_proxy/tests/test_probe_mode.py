@@ -335,3 +335,10 @@ class TestProbeModeSyntheticResponse(TestCase):
         self.assertTrue(response["X-Dispatcharr-Session"].startswith("vod_"))
         mock_resolve_vod_stream_context.assert_not_called()
         mock_get_m3u_profile.assert_not_called()
+
+    def test_mp4_probe_payload_is_a_parseable_container_sample(self):
+        payload = views._get_synthetic_probe_header_bytes("mp4")
+
+        self.assertTrue(payload.startswith(b"\x00\x00\x00\x20ftypisom"))
+        self.assertIn(b"moov", payload)
+        self.assertIn(b"mdat", payload)
