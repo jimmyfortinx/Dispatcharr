@@ -158,48 +158,6 @@ class TestDecrementProfileConnectionsAtomic(TestCase):
         self.assertGreaterEqual(final, 0, "Counter must not go negative after concurrent decrements")
 
 
-class TestLocalTailProbeShortCircuit(TestCase):
-    def test_detects_plex_tail_probe_on_existing_session(self):
-        from apps.proxy.vod_proxy.multi_worker_connection_manager import (
-            _should_serve_existing_session_tail_probe_locally,
-        )
-
-        state = MagicMock()
-        state.content_length = "4067413760"
-        state.active_streams = 1
-
-        self.assertTrue(
-            _should_serve_existing_session_tail_probe_locally(
-                state,
-                "bytes=4067411510-",
-                "Lavf/60.16.100",
-            )
-        )
-
-    def test_builds_local_tail_probe_response(self):
-        from apps.proxy.vod_proxy.multi_worker_connection_manager import (
-            _build_local_existing_session_tail_probe_response,
-        )
-
-        state = MagicMock()
-        state.content_length = "4067413760"
-        state.content_type = "video/x-matroska"
-
-        response = _build_local_existing_session_tail_probe_response(
-            state=state,
-            range_header="bytes=4067411510-",
-        )
-
-        self.assertEqual(response.status_code, 206)
-        self.assertEqual(response["Content-Type"], "video/x-matroska")
-        self.assertEqual(response["Content-Length"], "2048")
-        self.assertEqual(
-            response["Content-Range"],
-            "bytes 4067411510-4067413557/4067413760",
-        )
-        self.assertEqual(response["X-Dispatcharr-Local-Tail-Probe"], "1")
-
-
 class TestDecrementActiveStreamsAndCheck(TestCase):
     """Bug 1 & 3: decrement_active_streams_and_check() must be atomic."""
 

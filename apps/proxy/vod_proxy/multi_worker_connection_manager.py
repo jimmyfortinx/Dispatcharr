@@ -22,8 +22,6 @@ from apps.vod.models import Movie, Episode
 from apps.m3u.models import M3UAccountProfile
 
 logger = logging.getLogger("vod_proxy")
-LOCAL_TAIL_PROBE_THRESHOLD_BYTES = 64 * 1024
-LOCAL_TAIL_PROBE_BODY_MAX_BYTES = 2048
 
 
 def _transform_url_for_profile(original_url, m3u_profile):
@@ -58,87 +56,6 @@ def _is_stalker_expired_playback_http_error(exc):
         "/play/" in parsed.path
         and "play_token" in query
     )
-
-
-def _is_plex_like_user_agent(user_agent: Optional[str]) -> bool:
-    normalized = (user_agent or "").lower()
-    return "lavf/" in normalized or "plex" in normalized
-
-
-def _parse_open_ended_range_start(range_header: Optional[str]) -> Optional[int]:
-    if not range_header:
-        return None
-
-    normalized = str(range_header).strip().lower()
-    if not normalized.startswith("bytes="):
-        return None
-
-    range_part = normalized[len("bytes="):]
-    if "," in range_part or "-" not in range_part:
-        return None
-
-    start_str, end_str = range_part.split("-", 1)
-    if end_str.strip():
-        return None
-
-    start_str = start_str.strip()
-    if not start_str.isdigit():
-        return None
-
-    return int(start_str)
-
-
-def _should_serve_existing_session_tail_probe_locally(
-    state,
-    range_header: Optional[str],
-    client_user_agent: Optional[str],
-) -> bool:
-    if state is None or not _is_plex_like_user_agent(client_user_agent):
-        return False
-
-    try:
-        content_length = int(getattr(state, "content_length", 0) or 0)
-    except (TypeError, ValueError):
-        return False
-
-    if content_length <= 0 or int(getattr(state, "active_streams", 0) or 0) <= 0:
-        return False
-
-    start = _parse_open_ended_range_start(range_header)
-    if start is None or start >= content_length:
-        return False
-
-    remaining_bytes = content_length - start
-    return remaining_bytes <= LOCAL_TAIL_PROBE_THRESHOLD_BYTES
-
-
-def _build_local_existing_session_tail_probe_response(
-    *,
-    state,
-    range_header: str,
-) -> HttpResponse:
-    content_length = int(state.content_length)
-    start = _parse_open_ended_range_start(range_header)
-    if start is None or start >= content_length:
-        return HttpResponse("Requested Range Not Satisfiable", status=416)
-
-    remaining_bytes = content_length - start
-    body_length = min(remaining_bytes, LOCAL_TAIL_PROBE_BODY_MAX_BYTES)
-    end = start + body_length - 1
-    body = b"\x00" * body_length
-
-    response = HttpResponse(
-        body,
-        status=206,
-        content_type=(state.content_type or "video/mp4"),
-    )
-    response["Accept-Ranges"] = "bytes"
-    response["Content-Length"] = str(body_length)
-    response["Content-Range"] = f"bytes {start}-{end}/{content_length}"
-    response["Cache-Control"] = "no-cache"
-    response["Pragma"] = "no-cache"
-    response["X-Dispatcharr-Local-Tail-Probe"] = "1"
-    return response
 
 
 def get_vod_client_stop_key(client_id):
@@ -923,10 +840,7 @@ class MultiWorkerVODConnectionManager:
     SESSION_REUSE_GRACE_SECONDS = 3
     IDLE_SESSION_REUSE_ENABLED = True
     UPSTREAM_CONNECT_TIMEOUT_SECONDS = 10
-    # VOD providers can pause chunk delivery for tens of seconds without the
-    # stream actually being dead. A short read timeout causes Plex to re-open
-    # the movie repeatedly even though the upstream would have resumed.
-    UPSTREAM_READ_TIMEOUT_SECONDS = 120
+    UPSTREAM_READ_TIMEOUT_SECONDS = 30
 
     @classmethod
     def get_instance(cls):
@@ -1215,20 +1129,6 @@ class MultiWorkerVODConnectionManager:
 
                 logger.info(f"[{client_id}] Worker {self.worker_id} - Created consolidated connection with session metadata")
             else:
-                if _should_serve_existing_session_tail_probe_locally(
-                    existing_state,
-                    range_header,
-                    client_user_agent,
-                ):
-                    logger.info(
-                        f"[{client_id}] Worker {self.worker_id} - Serving existing-session tail probe locally "
-                        f"(range={range_header} length={existing_state.content_length})"
-                    )
-                    return _build_local_existing_session_tail_probe_response(
-                        state=existing_state,
-                        range_header=range_header,
-                    )
-
                 logger.info(f"[{client_id}] Worker {self.worker_id} - Using existing Redis-backed connection")
 
                 # Immediately increment active_streams to prevent cleanup race condition.
