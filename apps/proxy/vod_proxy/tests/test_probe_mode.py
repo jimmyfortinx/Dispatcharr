@@ -303,8 +303,18 @@ class TestProbeModeSyntheticResponse(TestCase):
     @patch("apps.proxy.vod_proxy.views.resolve_vod_stream_context")
     @patch.object(views.VODStreamView, "_get_m3u_profile")
     @patch.object(views.VODStreamView, "_get_content_and_relation")
+    @patch(
+        "apps.proxy.vod_proxy.views._evaluate_probe_mode",
+        return_value={
+            "enabled": True,
+            "reason": "scan-burst-detected",
+            "backend": "memory",
+            "unique_content_count": 3,
+        },
+    )
     def test_head_uses_synthetic_local_response_for_stalker_plex_scan_requests(
         self,
+        _mock_probe_eval,
         mock_get_content_and_relation,
         mock_get_m3u_profile,
         mock_resolve_vod_stream_context,
@@ -335,6 +345,56 @@ class TestProbeModeSyntheticResponse(TestCase):
         self.assertTrue(response["X-Dispatcharr-Session"].startswith("vod_"))
         mock_resolve_vod_stream_context.assert_not_called()
         mock_get_m3u_profile.assert_not_called()
+
+    @patch("apps.proxy.vod_proxy.views.network_access_allowed", return_value=True)
+    @patch("apps.proxy.vod_proxy.views.requests.get")
+    @patch.object(views.VODStreamView, "_get_m3u_profile")
+    @patch.object(views.VODStreamView, "_get_content_and_relation")
+    @patch(
+        "apps.proxy.vod_proxy.views._evaluate_probe_mode",
+        return_value={
+            "enabled": False,
+            "reason": "scan-burst-not-detected",
+            "backend": "memory",
+            "unique_content_count": 1,
+        },
+    )
+    def test_head_does_not_use_synthetic_response_when_probe_mode_disabled(
+        self,
+        _mock_probe_eval,
+        mock_get_content_and_relation,
+        mock_get_m3u_profile,
+        mock_requests_get,
+        _mock_network_access_allowed,
+    ):
+        mock_get_content_and_relation.return_value = (self.movie, self.relation)
+        mock_get_m3u_profile.return_value = (MagicMock(id=1), 0)
+
+        upstream_response = MagicMock()
+        upstream_response.status_code = 206
+        upstream_response.headers = {
+            "Content-Range": "bytes 0-1/5400000000",
+            "Content-Type": "video/x-matroska",
+        }
+        mock_requests_get.return_value = upstream_response
+
+        request = self.factory.head(
+            f"/proxy/vod/movie/{self.movie.uuid}",
+            HTTP_USER_AGENT="Lavf/60.16.100",
+        )
+
+        response = views.VODStreamView().head(
+            request,
+            "movie",
+            self.movie.uuid,
+            None,
+            None,
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn("X-Dispatcharr-Probe-Synthetic", response)
+        self.assertEqual(response["Content-Type"], "video/x-matroska")
+        mock_requests_get.assert_called_once()
 
     def test_mp4_probe_payload_is_a_parseable_container_sample(self):
         payload = views._get_synthetic_probe_header_bytes("mp4")

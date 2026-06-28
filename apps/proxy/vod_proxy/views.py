@@ -1206,10 +1206,41 @@ def head_vod(request, content_type, content_id, session_id=None, profile_id=None
             logger.error(f"[VOD-HEAD] Content or relation not found: {content_type} {content_id}")
             return HttpResponse("Content not found", status=404)
 
-        if (
+        head_probe_evaluation = (
+            _evaluate_probe_mode(
+                client_ip=client_ip,
+                client_user_agent=client_user_agent,
+                content_type=content_type,
+                content_id=content_id,
+                range_header=None,
+                session_id=session_id,
+                offset=None,
+                utc_start=None,
+                utc_end=None,
+            )
+            if relation.m3u_account.account_type == M3UAccount.Types.STALKER
+            else {
+                "enabled": False,
+                "reason": "non-stalker-provider",
+                "backend": None,
+                "unique_content_count": None,
+            }
+        )
+        head_probe_mode = (
             relation.m3u_account.account_type == M3UAccount.Types.STALKER
-            and _is_plex_scan_request(request, client_user_agent)
-        ):
+            and head_probe_evaluation["enabled"]
+        )
+        logger.info(
+            "[VOD-HEAD-PROBE] Probe mode enabled=%s reason=%s unique_count=%s threshold=%s backend=%s session_id=%s",
+            head_probe_mode,
+            head_probe_evaluation["reason"],
+            head_probe_evaluation["unique_content_count"],
+            PROBE_ACTIVITY_MIN_UNIQUE_CONTENT,
+            head_probe_evaluation["backend"],
+            bool(session_id),
+        )
+
+        if head_probe_mode:
             return _build_synthetic_probe_head_response(
                 session_url=session_url,
                 session_id=session_id,

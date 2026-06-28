@@ -63,6 +63,46 @@ def get_vod_client_stop_key(client_id):
     return f"vod_proxy:client:{client_id}:stop"
 
 
+def _parse_range_start(range_header: Optional[str]) -> Optional[int]:
+    if not range_header:
+        return None
+
+    normalized = str(range_header).strip().lower()
+    if not normalized.startswith("bytes="):
+        return None
+
+    range_part = normalized[len("bytes="):]
+    if "," in range_part or "-" not in range_part:
+        return None
+
+    start_str, _end_str = range_part.split("-", 1)
+    start_str = start_str.strip()
+    if not start_str.isdigit():
+        return None
+
+    return int(start_str)
+
+
+def _parse_response_range_start(response: requests.Response) -> Optional[int]:
+    content_range = (
+        response.headers.get("Content-Range")
+        or response.headers.get("content-range")
+        or ""
+    )
+    if not content_range.lower().startswith("bytes "):
+        return None
+
+    try:
+        range_part = content_range.split(" ", 1)[1].split("/", 1)[0]
+        start_str, _end_str = range_part.split("-", 1)
+        start_str = start_str.strip()
+        if not start_str.isdigit():
+            return None
+        return int(start_str)
+    except (IndexError, ValueError):
+        return None
+
+
 def infer_content_type_from_url(url: str) -> Optional[str]:
     """
     Infer MIME type from file extension in URL
@@ -1236,12 +1276,43 @@ class MultiWorkerVODConnectionManager:
 
             # Get connection headers
             connection_headers = redis_connection.get_headers()
+            requested_range_start = _parse_range_start(range_header)
+            upstream_range_start = _parse_response_range_start(upstream_response)
+            bytes_to_discard = 0
+
+            if requested_range_start is not None:
+                if upstream_range_start is None:
+                    if upstream_response.status_code == 200 and requested_range_start > 0:
+                        bytes_to_discard = requested_range_start
+                        logger.warning(
+                            f"[{client_id}] Worker {self.worker_id} - Upstream ignored Range {range_header}; "
+                            f"discarding {bytes_to_discard} leading bytes locally"
+                        )
+                elif upstream_range_start < requested_range_start:
+                    bytes_to_discard = requested_range_start - upstream_range_start
+                    logger.warning(
+                        f"[{client_id}] Worker {self.worker_id} - Upstream started at byte {upstream_range_start} "
+                        f"for requested range {range_header}; discarding {bytes_to_discard} leading bytes locally"
+                    )
+                elif upstream_range_start > requested_range_start:
+                    logger.error(
+                        f"[{client_id}] Worker {self.worker_id} - Upstream started after requested range: "
+                        f"requested={requested_range_start} actual={upstream_range_start}"
+                    )
+                    if existing_state:
+                        redis_connection.decrement_active_streams()
+                    if profile_connections_incremented:
+                        self._decrement_profile_connections(m3u_profile.id)
+                        profile_connections_incremented = False
+                    upstream_response.close()
+                    return HttpResponse("Upstream range mismatch", status=502)
 
             # Create streaming generator
             def stream_generator():
                 stream_decremented = False
                 profile_decremented = False
                 stop_signal_detected = False
+                bytes_to_skip = bytes_to_discard
                 try:
                     logger.info(f"[{client_id}] Worker {self.worker_id} - Starting Redis-backed stream")
 
@@ -1272,6 +1343,13 @@ class MultiWorkerVODConnectionManager:
 
                     for chunk in upstream_response.iter_content(chunk_size=8192):
                         if chunk:
+                            if bytes_to_skip:
+                                if len(chunk) <= bytes_to_skip:
+                                    bytes_to_skip -= len(chunk)
+                                    continue
+                                chunk = chunk[bytes_to_skip:]
+                                bytes_to_skip = 0
+
                             yield chunk
                             bytes_sent += len(chunk)
                             chunk_count += 1
