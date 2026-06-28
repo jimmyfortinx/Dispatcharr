@@ -298,3 +298,40 @@ class TestProbeModeSyntheticResponse(TestCase):
         self.assertTrue(response.content.startswith(b"\x1A\x45\xDF\xA3"))
         mock_resolve_vod_stream_context.assert_not_called()
         mock_get_m3u_profile.assert_not_called()
+
+    @patch("apps.proxy.vod_proxy.views.network_access_allowed", return_value=True)
+    @patch("apps.proxy.vod_proxy.views.resolve_vod_stream_context")
+    @patch.object(views.VODStreamView, "_get_m3u_profile")
+    @patch.object(views.VODStreamView, "_get_content_and_relation")
+    def test_head_uses_synthetic_local_response_for_stalker_plex_scan_requests(
+        self,
+        mock_get_content_and_relation,
+        mock_get_m3u_profile,
+        mock_resolve_vod_stream_context,
+        _mock_network_access_allowed,
+    ):
+        mock_get_content_and_relation.return_value = (self.movie, self.relation)
+
+        request = self.factory.head(
+            f"/proxy/vod/movie/{self.movie.uuid}",
+            HTTP_USER_AGENT="Lavf/60.16.100",
+        )
+
+        response = views.VODStreamView().head(
+            request,
+            "movie",
+            self.movie.uuid,
+            None,
+            None,
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response["X-Dispatcharr-Probe-Mode"], "1")
+        self.assertEqual(response["X-Dispatcharr-Probe-Synthetic"], "1")
+        self.assertEqual(response["Content-Type"], "video/x-matroska")
+        self.assertEqual(response["Accept-Ranges"], "bytes")
+        self.assertEqual(response["Content-Length"], "5400000000")
+        self.assertIn("/proxy/vod/movie/", response["X-Session-URL"])
+        self.assertTrue(response["X-Dispatcharr-Session"].startswith("vod_"))
+        mock_resolve_vod_stream_context.assert_not_called()
+        mock_get_m3u_profile.assert_not_called()

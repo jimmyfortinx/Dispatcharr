@@ -50,6 +50,17 @@ def _is_plex_probe_user_agent(user_agent):
     return "lavf/" in normalized or "plex" in normalized
 
 
+def _is_plex_scan_request(request, user_agent=None):
+    normalized_user_agent = (user_agent or request.META.get("HTTP_USER_AGENT") or "").lower()
+    if "lavf/" in normalized_user_agent or "plex" in normalized_user_agent:
+        return True
+
+    if request.META.get("HTTP_X_PLEX_PRODUCT") or request.META.get("HTTP_X_PLEX_CLIENT_IDENTIFIER"):
+        return True
+
+    return False
+
+
 def _is_open_ended_probe_range(range_header):
     if not range_header:
         return False
@@ -339,6 +350,32 @@ def _build_synthetic_probe_response(*, content_name, content_obj, relation, rang
         start,
         body_length,
         total_size,
+    )
+    return response
+
+
+def _build_synthetic_probe_head_response(*, session_url, session_id, content_obj, relation):
+    total_size = _estimate_probe_content_length(content_obj, relation)
+    extension = _get_probe_container_extension(relation)
+    content_type_header = (
+        infer_content_type_from_url(f"http://dispatcharr.invalid/probe.{extension}")
+        or "video/mp4"
+    )
+
+    response = HttpResponse(status=200, content_type=content_type_header)
+    response["Content-Length"] = str(total_size)
+    response["Accept-Ranges"] = "bytes"
+    response["Cache-Control"] = "no-cache"
+    response["Pragma"] = "no-cache"
+    response["X-Session-URL"] = session_url
+    response["X-Dispatcharr-Session"] = session_id
+    response["X-Dispatcharr-Probe-Mode"] = "1"
+    response["X-Dispatcharr-Probe-Synthetic"] = "1"
+    logger.info(
+        "[VOD-HEAD] Returning synthetic local HEAD response (ext=%s total=%s session=%s)",
+        extension,
+        total_size,
+        session_id,
     )
     return response
 
@@ -1146,6 +1183,17 @@ def head_vod(request, content_type, content_id, session_id=None, profile_id=None
         if not content_obj or not relation:
             logger.error(f"[VOD-HEAD] Content or relation not found: {content_type} {content_id}")
             return HttpResponse("Content not found", status=404)
+
+        if (
+            relation.m3u_account.account_type == M3UAccount.Types.STALKER
+            and _is_plex_scan_request(request, client_user_agent)
+        ):
+            return _build_synthetic_probe_head_response(
+                session_url=session_url,
+                session_id=session_id,
+                content_obj=content_obj,
+                relation=relation,
+            )
 
         # Get M3U account and stream URL
         m3u_account = relation.m3u_account
