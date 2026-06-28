@@ -923,7 +923,10 @@ class MultiWorkerVODConnectionManager:
     SESSION_REUSE_GRACE_SECONDS = 3
     IDLE_SESSION_REUSE_ENABLED = True
     UPSTREAM_CONNECT_TIMEOUT_SECONDS = 10
-    UPSTREAM_READ_TIMEOUT_SECONDS = 30
+    # VOD providers can pause chunk delivery for tens of seconds without the
+    # stream actually being dead. A short read timeout causes Plex to re-open
+    # the movie repeatedly even though the upstream would have resumed.
+    UPSTREAM_READ_TIMEOUT_SECONDS = 120
 
     @classmethod
     def get_instance(cls):
