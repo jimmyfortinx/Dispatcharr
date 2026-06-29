@@ -31,6 +31,7 @@ const SystemSettingsForm = React.memo(({ active }) => {
   );
 
   const [saved, setSaved] = useState(false);
+  const [probeModeSaving, setProbeModeSaving] = useState(false);
 
   const form = useForm({
     mode: 'controlled',
@@ -63,6 +64,25 @@ const SystemSettingsForm = React.memo(({ active }) => {
       // Error notifications are already shown by API functions
       // Just don't show the success message
       console.error('Error saving settings:', error);
+    }
+  };
+
+  const handleForceProbeModeToggle = async () => {
+    if (!settings) return;
+
+    const nextValue = !form.values.force_vod_probe_mode;
+    setProbeModeSaving(true);
+    setSaved(false);
+
+    try {
+      await saveChangedSettings(settings, {
+        force_vod_probe_mode: nextValue,
+      });
+      form.setFieldValue('force_vod_probe_mode', nextValue);
+    } catch (error) {
+      console.error('Error saving force probe mode setting:', error);
+    } finally {
+      setProbeModeSaving(false);
     }
   };
 
@@ -134,6 +154,33 @@ const SystemSettingsForm = React.memo(({ active }) => {
           <ConnectionSecurityPanel />
         </>
       )}
+      <Divider my="md" label="Plex Probe Mode" labelPosition="left" />
+      <Group justify="space-between" align="flex-start">
+        <div>
+          <Text size="sm" fw={500}>
+            Manual Probe Override
+          </Text>
+          <Text size="xs" c="dimmed">
+            Force Plex-like Stalker VOD requests into probe mode. Use this only
+            while Plex is scanning, because real playback attempts from Plex
+            will also get synthetic probe responses until you disable it.
+          </Text>
+          <Text size="xs" c={form.values.force_vod_probe_mode ? 'orange' : 'dimmed'}>
+            {form.values.force_vod_probe_mode
+              ? 'Forced probe mode is enabled.'
+              : 'Forced probe mode is disabled.'}
+          </Text>
+        </div>
+        <Button
+          onClick={handleForceProbeModeToggle}
+          disabled={probeModeSaving || !settings}
+          variant={form.values.force_vod_probe_mode ? 'filled' : 'default'}
+        >
+          {form.values.force_vod_probe_mode
+            ? 'Disable Forced Probe Mode'
+            : 'Force Probe Mode'}
+        </Button>
+      </Group>
       <Flex mih={50} gap="xs" justify="flex-end" align="flex-end">
         <Button
           onClick={form.onSubmit(onSubmit)}

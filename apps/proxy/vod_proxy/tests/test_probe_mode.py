@@ -5,6 +5,7 @@ from unittest.mock import patch
 from apps.m3u.models import M3UAccount
 from apps.proxy.vod_proxy import views
 from apps.vod.models import M3UMovieRelation, Movie
+from core.models import CoreSettings, SYSTEM_SETTINGS_KEY
 
 
 class FakeProbeRedisPipeline:
@@ -269,6 +270,54 @@ class TestProbeModeHeuristics(TestCase):
                 utc_end=None,
             )
         )
+
+    def test_manual_override_forces_probe_mode_for_plex_like_requests(self):
+        CoreSettings.objects.update_or_create(
+            key=SYSTEM_SETTINGS_KEY,
+            defaults={
+                "name": "System Settings",
+                "value": {"force_vod_probe_mode": True},
+            },
+        )
+
+        evaluation = views._evaluate_probe_mode(
+            client_ip="10.0.0.10",
+            client_user_agent="Lavf/60.16.100",
+            content_type="movie",
+            content_id="movie-1",
+            range_header="bytes=100-200",
+            session_id="vod_existing",
+            offset=None,
+            utc_start=None,
+            utc_end=None,
+        )
+
+        self.assertTrue(evaluation["enabled"])
+        self.assertEqual(evaluation["reason"], "manual-override")
+
+    def test_manual_override_does_not_force_probe_mode_for_non_plex_requests(self):
+        CoreSettings.objects.update_or_create(
+            key=SYSTEM_SETTINGS_KEY,
+            defaults={
+                "name": "System Settings",
+                "value": {"force_vod_probe_mode": True},
+            },
+        )
+
+        evaluation = views._evaluate_probe_mode(
+            client_ip="10.0.0.10",
+            client_user_agent="Mozilla/5.0",
+            content_type="movie",
+            content_id="movie-1",
+            range_header="bytes=0-",
+            session_id=None,
+            offset=None,
+            utc_start=None,
+            utc_end=None,
+        )
+
+        self.assertFalse(evaluation["enabled"])
+        self.assertEqual(evaluation["reason"], "non-plex-user-agent")
 
 
 class TestProbeModeSyntheticResponse(TestCase):

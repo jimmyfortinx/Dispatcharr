@@ -68,6 +68,7 @@ export const saveChangedSettings = async (settings, changedSettings) => {
     'preferred_region',
     'auto_import_mapped_files',
     'enable_ip_lookup',
+    'force_vod_probe_mode',
   ];
 
   for (const formKey in changedSettings) {
@@ -135,6 +136,7 @@ export const saveChangedSettings = async (settings, changedSettings) => {
       'schedule_enabled',
       'auto_import_mapped_files',
       'enable_ip_lookup',
+      'force_vod_probe_mode',
     ];
     if (booleanFields.includes(formKey) && value != null) {
       value = typeof value === 'boolean' ? value : Boolean(value);
@@ -364,6 +366,10 @@ export const parseSettings = (settings) => {
       typeof systemSettings.enable_ip_lookup === 'boolean'
         ? systemSettings.enable_ip_lookup
         : true;
+    parsed.force_vod_probe_mode =
+      typeof systemSettings.force_vod_probe_mode === 'boolean'
+        ? systemSettings.force_vod_probe_mode
+        : Boolean(systemSettings.force_vod_probe_mode);
   }
 
   // Proxy and network access are already grouped objects

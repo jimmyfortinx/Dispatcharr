@@ -34,6 +34,7 @@ from apps.accounts.authentication import ApiKeyAuthentication, QueryParamJWTAuth
 from apps.proxy.utils import check_user_stream_limits
 from dispatcharr.utils import network_access_allowed
 from core.utils import RedisClient, dispatcharr_user_agent
+from core.models import CoreSettings
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +73,14 @@ def _is_plex_probe_user_agent(user_agent):
         return False
     normalized = user_agent.lower()
     return "lavf/" in normalized or "plex" in normalized
+
+
+def _is_vod_probe_mode_forced():
+    try:
+        return CoreSettings.get_force_vod_probe_mode()
+    except Exception:
+        logger.warning("[VOD-PROBE] Failed to load manual probe override", exc_info=True)
+        return False
 
 
 def _is_plex_scan_request(request, user_agent=None):
@@ -244,6 +253,13 @@ def _evaluate_probe_mode(
     utc_start=None,
     utc_end=None,
 ):
+    if _is_plex_probe_user_agent(client_user_agent) and _is_vod_probe_mode_forced():
+        return {
+            "enabled": True,
+            "reason": "manual-override",
+            "backend": "settings",
+            "unique_content_count": None,
+        }
     if session_id or offset or utc_start or utc_end:
         return {
             "enabled": False,
