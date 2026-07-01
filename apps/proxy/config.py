@@ -39,11 +39,12 @@ class BaseConfig:
             # Return defaults if database query fails
             return {
                 "buffering_timeout": 15,
-                "buffering_speed": 0.95,
+                "buffering_speed": 1.0,
                 "redis_chunk_ttl": 60,
-                "channel_shutdown_delay": 5,
-                "channel_init_grace_period": 5,
-                "new_client_behind_seconds": 15,
+                "channel_shutdown_delay": 0,
+                "channel_init_grace_period": 60,
+                "channel_client_wait_period": 5,
+                "new_client_behind_seconds": 5,
                 "connection_ready_chunks": 16,
                 "max_reconnect_attempts": 5,
                 "min_stable_time_before_reconnect": 10,
@@ -145,7 +146,13 @@ class TSConfig(BaseConfig):
     def get_channel_init_grace_period(cls):
         """Max seconds to wait for initial buffer fill during channel startup."""
         settings = cls.get_proxy_settings()
-        return settings.get("channel_init_grace_period", 5)
+        return settings.get("channel_init_grace_period", 60)
+
+    @classmethod
+    def get_channel_client_wait_period(cls):
+        """Seconds to keep a ready channel alive waiting for the first client to connect."""
+        settings = cls.get_proxy_settings()
+        return settings.get("channel_client_wait_period", 5)
 
     @classmethod
     def get_connection_ready_chunks(cls):
@@ -193,3 +200,7 @@ class TSConfig(BaseConfig):
     @property
     def MIN_STABLE_TIME_BEFORE_RECONNECT(self):
         return self.get_min_stable_time_before_reconnect()
+
+    @property
+    def CHANNEL_CLIENT_WAIT_PERIOD(self):
+        return self.get_channel_client_wait_period()

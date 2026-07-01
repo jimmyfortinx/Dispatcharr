@@ -217,11 +217,12 @@ class ProxySettingsViewSet(viewsets.ViewSet):
     def _default_settings():
         return {
             "buffering_timeout": 15,
-            "buffering_speed": 0.95,
+            "buffering_speed": 1.0,
             "redis_chunk_ttl": 60,
-            "channel_shutdown_delay": 5,
-            "channel_init_grace_period": 5,
-            "new_client_behind_seconds": 15,
+            "channel_shutdown_delay": 0,
+            "channel_init_grace_period": 60,
+            "channel_client_wait_period": 5,
+            "new_client_behind_seconds": 5,
             "connection_ready_chunks": 16,
             "max_reconnect_attempts": 5,
             "min_stable_time_before_reconnect": 10,

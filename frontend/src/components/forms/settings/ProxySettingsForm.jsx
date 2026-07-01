@@ -5,97 +5,132 @@ import { updateSetting } from '../../../utils/pages/SettingsUtils.js';
 import {
   Alert,
   Button,
+  Collapse,
   Flex,
   NumberInput,
   Stack,
   TextInput,
 } from '@mantine/core';
+import { ChevronDown, ChevronRight } from 'lucide-react';
 import { PROXY_SETTINGS_OPTIONS } from '../../../constants.js';
 import {
   getProxySettingDefaults,
   getProxySettingsFormInitialValues,
 } from '../../../utils/forms/settings/ProxySettingsFormUtils.js';
 
+const isNumericField = (key) => {
+  return [
+    'buffering_timeout',
+    'redis_chunk_ttl',
+    'channel_shutdown_delay',
+    'channel_init_grace_period',
+    'channel_client_wait_period',
+    'new_client_behind_seconds',
+    'connection_ready_chunks',
+    'max_reconnect_attempts',
+    'min_stable_time_before_reconnect',
+  ].includes(key);
+};
+
+const isFloatField = (key) => key === 'buffering_speed';
+
+const getNumericFieldMin = (key) => {
+  if (key === 'connection_ready_chunks') return 1;
+  if (key === 'max_reconnect_attempts') return 1;
+  return 0;
+};
+
+const getNumericFieldMax = (key) => {
+  if (key === 'buffering_timeout') return 300;
+  if (key === 'redis_chunk_ttl') return 3600;
+  if (key === 'channel_shutdown_delay') return 300;
+  if (key === 'channel_init_grace_period') return 300;
+  if (key === 'channel_client_wait_period') return 300;
+  if (key === 'new_client_behind_seconds') return 120;
+  if (key === 'connection_ready_chunks') return 64;
+  if (key === 'max_reconnect_attempts') return 20;
+  if (key === 'min_stable_time_before_reconnect') return 300;
+  return 300;
+};
+
+const renderProxySettingField = (key, config, proxySettingsForm) => {
+  if (isNumericField(key)) {
+    return (
+      <NumberInput
+        key={key}
+        label={config.label}
+        {...proxySettingsForm.getInputProps(key)}
+        description={config.description || null}
+        min={getNumericFieldMin(key)}
+        max={getNumericFieldMax(key)}
+      />
+    );
+  }
+
+  if (isFloatField(key)) {
+    return (
+      <NumberInput
+        key={key}
+        label={config.label}
+        {...proxySettingsForm.getInputProps(key)}
+        description={config.description || null}
+        min={0.0}
+        max={10.0}
+        step={0.01}
+        precision={1}
+      />
+    );
+  }
+
+  return (
+    <TextInput
+      key={key}
+      label={config.label}
+      {...proxySettingsForm.getInputProps(key)}
+      description={config.description || null}
+    />
+  );
+};
+
 const ProxySettingsOptions = React.memo(({ proxySettingsForm }) => {
-  const isNumericField = (key) => {
-    // Determine if this field should be a NumberInput
-    return [
-      'buffering_timeout',
-      'redis_chunk_ttl',
-      'channel_shutdown_delay',
-      'channel_init_grace_period',
-      'new_client_behind_seconds',
-      'connection_ready_chunks',
-      'max_reconnect_attempts',
-      'min_stable_time_before_reconnect',
-    ].includes(key);
-  };
-  const isFloatField = (key) => {
-    return key === 'buffering_speed';
-  };
-  const getNumericFieldMin = (key) => {
-    return [
-      'connection_ready_chunks',
-      'max_reconnect_attempts',
-    ].includes(key)
-      ? 1
-      : 0;
-  };
-  const getNumericFieldMax = (key) => {
-    return key === 'buffering_timeout'
-      ? 300
-      : key === 'redis_chunk_ttl'
-        ? 3600
-        : key === 'channel_shutdown_delay'
-          ? 300
-          : key === 'new_client_behind_seconds'
-            ? 120
-            : key === 'connection_ready_chunks'
-              ? 64
-              : key === 'max_reconnect_attempts'
-                ? 20
-                : key === 'min_stable_time_before_reconnect'
-                  ? 300
-            : 60;
-  };
+  const [advancedOpen, setAdvancedOpen] = useState(false);
+  const entries = Object.entries(PROXY_SETTINGS_OPTIONS);
+  const mainEntries = entries.filter(([, config]) => !config.advanced);
+  const advancedEntries = entries.filter(([, config]) => config.advanced);
+
   return (
     <>
-      {Object.entries(PROXY_SETTINGS_OPTIONS).map(([key, config]) => {
-        if (isNumericField(key)) {
-          return (
-            <NumberInput
-              key={key}
-              label={config.label}
-              {...proxySettingsForm.getInputProps(key)}
-              description={config.description || null}
-              min={getNumericFieldMin(key)}
-              max={getNumericFieldMax(key)}
-            />
-          );
-        } else if (isFloatField(key)) {
-          return (
-            <NumberInput
-              key={key}
-              label={config.label}
-              {...proxySettingsForm.getInputProps(key)}
-              description={config.description || null}
-              min={0.0}
-              max={10.0}
-              step={0.01}
-              precision={1}
-            />
-          );
-        } else {
-          return (
-            <TextInput
-              key={key}
-              label={config.label}
-              {...proxySettingsForm.getInputProps(key)}
-              description={config.description || null}
-            />
-          );
-        }
-      })}
+      {mainEntries.map(([key, config]) =>
+        renderProxySettingField(key, config, proxySettingsForm)
+      )}
+
+      {advancedEntries.length > 0 && (
+        <>
+          <Button
+            variant="subtle"
+            size="xs"
+            leftSection={
+              advancedOpen ? (
+                <ChevronDown size={12} />
+              ) : (
+                <ChevronRight size={12} />
+              )
+            }
+            onClick={() => setAdvancedOpen((open) => !open)}
+            c="dimmed"
+            styles={{ root: { alignSelf: 'flex-start' } }}
+          >
+            {advancedOpen ? 'Hide' : 'Show'} Advanced Settings
+          </Button>
+          <Collapse in={advancedOpen}>
+            <Stack gap="sm">
+              {advancedEntries.map(([key, config]) =>
+                renderProxySettingField(key, config, proxySettingsForm)
+              )}
+            </Stack>
+          </Collapse>
+        </>
+      )}
     </>
   );
 });
