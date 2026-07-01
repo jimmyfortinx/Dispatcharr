@@ -2,20 +2,17 @@ from django.test import TestCase, Client, RequestFactory
 from django.http import Http404
 from django.utils import timezone
 from django.urls import reverse
-from datetime import timedelta
-from urllib.parse import parse_qs, urlparse
 from unittest.mock import patch
+from urllib.parse import parse_qs, urlparse
 from apps.accounts.models import User
 from apps.channels.models import Channel, ChannelGroup
 from apps.epg.models import EPGData, EPGSource
 from apps.m3u.models import M3UAccount
 from apps.vod.models import (
-    Episode,
     Movie,
     Series,
     VODCategory,
     M3UMovieRelation,
-    M3UEpisodeRelation,
     M3USeriesRelation,
     M3UVODCategoryRelation,
 )
@@ -598,149 +595,4 @@ class OutputXtreamRelationSelectionTest(TestCase):
         self.assertEqual(
             response["info"]["category_id"],
             str(self.fr_series_category.id),
-        )
-
-
-class OutputXtreamPlexStalkerCatalogOptimizationTest(TestCase):
-    def setUp(self):
-        self.factory = RequestFactory()
-        self.account = M3UAccount.objects.create(
-            name="stalker-plex-account",
-            account_type=M3UAccount.Types.STALKER,
-            is_active=True,
-            custom_properties={"enable_vod": True},
-        )
-        self.movie_category = VODCategory.objects.create(
-            name="Movies",
-            category_type="movie",
-        )
-        self.series_category = VODCategory.objects.create(
-            name="Series",
-            category_type="series",
-        )
-        M3UVODCategoryRelation.objects.create(
-            m3u_account=self.account,
-            category=self.movie_category,
-            enabled=True,
-        )
-        M3UVODCategoryRelation.objects.create(
-            m3u_account=self.account,
-            category=self.series_category,
-            enabled=True,
-        )
-
-        self.movie = Movie.objects.create(
-            name="Catalog Movie",
-            custom_properties={"director": "Cached Director"},
-        )
-        self.movie_relation = M3UMovieRelation.objects.create(
-            m3u_account=self.account,
-            movie=self.movie,
-            category=self.movie_category,
-            stream_id="catalog-movie",
-            last_advanced_refresh=timezone.now() - timedelta(days=2),
-        )
-
-        self.series = Series.objects.create(name="Catalog Series")
-        self.series_relation = M3USeriesRelation.objects.create(
-            m3u_account=self.account,
-            series=self.series,
-            category=self.series_category,
-            external_series_id="catalog-series",
-            last_episode_refresh=timezone.now() - timedelta(days=2),
-            custom_properties={
-                "episodes_fetched": True,
-                "detailed_fetched": True,
-            },
-        )
-        self.episode = Episode.objects.create(
-            series=self.series,
-            name="Episode 1",
-            season_number=1,
-            episode_number=1,
-        )
-        M3UEpisodeRelation.objects.create(
-            m3u_account=self.account,
-            episode=self.episode,
-            series_relation=self.series_relation,
-            stream_id="catalog-series-episode-1",
-        )
-
-    @patch("apps.vod.tasks.refresh_movie_advanced_data")
-    def test_xc_get_vod_info_skips_stalker_refresh_for_plex_catalog_requests(
-        self,
-        mock_refresh_movie_advanced_data,
-    ):
-        request = self.factory.get(
-            "/player_api.php",
-            HTTP_USER_AGENT="Plex Media Server",
-        )
-
-        response = xc_get_vod_info(
-            request,
-            user=None,
-            vod_id=self.movie_relation.id,
-        )
-
-        mock_refresh_movie_advanced_data.assert_not_called()
-        self.assertEqual(response["info"]["name"], "Catalog Movie")
-
-    @patch("apps.vod.tasks.refresh_movie_advanced_data")
-    def test_xc_get_vod_info_refreshes_for_non_plex_requests(
-        self,
-        mock_refresh_movie_advanced_data,
-    ):
-        request = self.factory.get(
-            "/player_api.php",
-            HTTP_USER_AGENT="VLC/3.0",
-        )
-
-        xc_get_vod_info(
-            request,
-            user=None,
-            vod_id=self.movie_relation.id,
-        )
-
-        mock_refresh_movie_advanced_data.assert_called_once_with(self.movie_relation.id)
-
-    @patch("apps.vod.tasks.refresh_series_episodes")
-    def test_xc_get_series_info_skips_stalker_refresh_for_plex_catalog_requests(
-        self,
-        mock_refresh_series_episodes,
-    ):
-        request = self.factory.get(
-            "/player_api.php",
-            HTTP_X_PLEX_PRODUCT="Plex Media Server",
-        )
-
-        response = xc_get_series_info(
-            request,
-            user=None,
-            series_id=self.series_relation.id,
-        )
-
-        mock_refresh_series_episodes.assert_not_called()
-        self.assertEqual(response["info"]["name"], "Catalog Series")
-        self.assertIn("1", response["episodes"])
-
-    @patch("apps.vod.tasks.refresh_series_episodes")
-    def test_xc_get_series_info_refreshes_for_non_plex_requests(
-        self,
-        mock_refresh_series_episodes,
-    ):
-        request = self.factory.get(
-            "/player_api.php",
-            HTTP_USER_AGENT="Kodi",
-        )
-
-        xc_get_series_info(
-            request,
-            user=None,
-            series_id=self.series_relation.id,
-        )
-
-        mock_refresh_series_episodes.assert_called_once_with(
-            self.account,
-            self.series,
-            self.series_relation.external_series_id,
         )

@@ -114,8 +114,6 @@ const setupMocks = ({
     max_system_events: settings?.max_system_events ?? 100,
     preferred_region: '',
     auto_import_mapped_files: true,
-    enable_ip_lookup: true,
-    force_vod_probe_mode: false,
   };
 
   const formMock = {
@@ -209,12 +207,6 @@ describe('SystemSettingsForm', () => {
       ).toBeInTheDocument();
     });
 
-    it('renders the force probe mode button', () => {
-      setupMocks();
-      render(<SystemSettingsForm active={true} />);
-      expect(screen.getByText('Force Probe Mode')).toBeInTheDocument();
-    });
-
     it('does not show success alert on initial render', () => {
       setupMocks();
       render(<SystemSettingsForm active={true} />);
@@ -294,8 +286,6 @@ describe('SystemSettingsForm', () => {
         max_system_events: 100,
         preferred_region: '',
         auto_import_mapped_files: true,
-        enable_ip_lookup: true,
-        force_vod_probe_mode: false,
       });
     });
 
@@ -417,23 +407,6 @@ describe('SystemSettingsForm', () => {
         );
       });
       consoleSpy.mockRestore();
-    });
-
-    it('toggles forced probe mode immediately', async () => {
-      const { formMock } = setupMocks();
-      render(<SystemSettingsForm active={true} />);
-
-      fireEvent.click(screen.getByText('Force Probe Mode'));
-
-      await waitFor(() => {
-        expect(saveChangedSettings).toHaveBeenCalledWith(makeSettings(), {
-          force_vod_probe_mode: true,
-        });
-      });
-      expect(formMock.setFieldValue).toHaveBeenCalledWith(
-        'force_vod_probe_mode',
-        true
-      );
     });
   });
 

@@ -2,12 +2,11 @@ import base64
 import json
 import logging
 import re
-import time
 from datetime import date, datetime, time as dt_time, timezone as dt_timezone
 from dataclasses import dataclass
 from secrets import token_hex
 from posixpath import dirname, join
-from urllib.parse import parse_qs, quote, quote_plus, urlparse, urlunparse
+from urllib.parse import quote, quote_plus, urlparse, urlunparse
 from zoneinfo import ZoneInfo
 
 import requests
@@ -43,10 +42,6 @@ class StalkerError(Exception):
 
 
 class StalkerRecoverableError(StalkerError):
-    pass
-
-
-class StalkerAuthError(StalkerRecoverableError):
     pass
 
 
@@ -497,7 +492,6 @@ class StalkerClient:
 
     def handshake(self, portal_url):
         headers = self._handshake_headers(portal_url)
-        started_at = time.monotonic()
         try:
             response = self.session.request(
                 "GET",
@@ -512,21 +506,7 @@ class StalkerClient:
                 timeout=self.timeout,
             )
             response.raise_for_status()
-            logger.info(
-                "[STALKER] Handshake succeeded for %s in %.3fs (status=%s)",
-                portal_url,
-                time.monotonic() - started_at,
-                response.status_code,
-            )
         except requests.RequestException as exc:
-            logger.warning(
-                "[STALKER] Handshake failed for %s in %.3fs: %s",
-                portal_url,
-                time.monotonic() - started_at,
-                exc,
-            )
-            if self._is_auth_status_error(exc):
-                raise StalkerAuthError(f"Request failed: {exc}") from exc
             raise StalkerError(f"Request failed: {exc}") from exc
 
         try:
@@ -847,7 +827,7 @@ class StalkerClient:
 
         encoded_cmd = quote(
             normalized_cmd,
-            safe="!$&'()*+,;=:@-._~",
+            safe="!$&'()*+,;:@-._~",
         )
         request_url = (
             f"{portal_url}?action=create_link&type=vod"
@@ -910,11 +890,6 @@ class StalkerClient:
         self.handshake(portal_url)
         self._authenticate_portal(portal_url)
         self._prepared_portal_url = portal_url
-
-    def reset_session_state(self, regenerate_token=False):
-        self._prepared_portal_url = None
-        if regenerate_token:
-            self.token = token_hex(16).upper()
 
     def prepare_playback_session(self, portal_url, force=False):
         if force:
@@ -1074,25 +1049,10 @@ class StalkerClient:
             return self._resolve_playback_url_once(portal_url, channel_metadata)
 
     def resolve_vod_playback_url(self, portal_url, cmd, series=None):
-        started_at = time.monotonic()
         try:
-            resolved_url = self._resolve_vod_playback_url_once(portal_url, cmd, series=series)
-            logger.info(
-                "[STALKER] Resolved VOD playback URL on first attempt for %s in %.3fs",
-                portal_url,
-                time.monotonic() - started_at,
-            )
-            return resolved_url
+            return self._resolve_vod_playback_url_once(portal_url, cmd, series=series)
         except StalkerError as exc:
-            should_retry = self._should_retry_playback_resolution(exc)
-            logger.warning(
-                "[STALKER] VOD playback resolution failed for %s after %.3fs (retry=%s): %s",
-                portal_url,
-                time.monotonic() - started_at,
-                should_retry,
-                exc,
-            )
-            if not should_retry:
+            if not self._should_retry_playback_resolution(exc):
                 raise
 
             logger.info(
@@ -1100,14 +1060,8 @@ class StalkerClient:
                 portal_url,
                 exc,
             )
-            self.reset_session_state(regenerate_token=True)
-            resolved_url = self._resolve_vod_playback_url_once(portal_url, cmd, series=series)
-            logger.info(
-                "[STALKER] Resolved VOD playback URL on retry for %s in %.3fs",
-                portal_url,
-                time.monotonic() - started_at,
-            )
-            return resolved_url
+            self._prepared_portal_url = None
+            return self._resolve_vod_playback_url_once(portal_url, cmd, series=series)
 
     def clone_for_parallel_catalog(self):
         cloned = type(self)(
@@ -1683,8 +1637,6 @@ class StalkerClient:
 
     def _request(self, method, portal_url, query=None, data=None, with_auth=False):
         headers = self._headers(portal_url, with_auth=with_auth)
-        started_at = time.monotonic()
-        action = self._request_action_label(portal_url, query=query, data=data)
         request_kwargs = {
             "headers": headers,
             "timeout": self.timeout,
@@ -1698,30 +1650,9 @@ class StalkerClient:
             response = self.session.request(method, portal_url, **request_kwargs)
             response.raise_for_status()
         except requests.RequestException as exc:
-            logger.warning(
-                "[STALKER] Request failed method=%s action=%s auth=%s url=%s elapsed=%.3fs error=%s",
-                method,
-                action,
-                with_auth,
-                portal_url,
-                time.monotonic() - started_at,
-                exc,
-            )
             if with_auth and self._is_auth_status_error(exc):
-                raise StalkerAuthError(f"Request failed: {exc}") from exc
+                raise StalkerRecoverableError(f"Request failed: {exc}") from exc
             raise StalkerError(f"Request failed: {exc}") from exc
-
-        elapsed = time.monotonic() - started_at
-        if elapsed >= 1.0:
-            logger.info(
-                "[STALKER] Slow request method=%s action=%s auth=%s status=%s url=%s elapsed=%.3fs",
-                method,
-                action,
-                with_auth,
-                response.status_code,
-                portal_url,
-                elapsed,
-            )
 
         try:
             payload = response.json()
@@ -1740,32 +1671,6 @@ class StalkerClient:
     def _payload_error_text(self, payload, default_message):
         text = str(payload.get("text") or "").strip()
         return text or default_message
-
-    def _request_action_label(self, portal_url, query=None, data=None):
-        parsed = urlparse(portal_url)
-        parsed_query = parse_qs(parsed.query)
-
-        def _first(mapping, key):
-            if not mapping:
-                return None
-            value = mapping.get(key)
-            if isinstance(value, list):
-                return value[0] if value else None
-            return value
-
-        action = (
-            _first(parsed_query, "action")
-            or _first(query, "action")
-            or _first(data, "action")
-            or "unknown"
-        )
-        request_type = (
-            _first(parsed_query, "type")
-            or _first(query, "type")
-            or _first(data, "type")
-            or "unknown"
-        )
-        return f"{request_type}:{action}"
 
     def _is_auth_status_error(self, exc):
         response = getattr(exc, "response", None)

@@ -14,7 +14,7 @@ import base64
 import os
 import socket
 import mimetypes
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import urlparse
 from typing import Optional, Dict, Any
 from django.http import StreamingHttpResponse, HttpResponse
 from core.utils import RedisClient
@@ -24,91 +24,9 @@ from apps.m3u.models import M3UAccountProfile
 logger = logging.getLogger("vod_proxy")
 
 
-def _is_plex_like_user_agent(user_agent: Optional[str]) -> bool:
-    if not user_agent:
-        return False
-
-    normalized = str(user_agent).lower()
-    return "plex" in normalized or "lavf/" in normalized
-
-
-def _transform_url_for_profile(original_url, m3u_profile):
-    if not m3u_profile or not original_url:
-        return original_url
-
-    try:
-        import regex
-
-        search_pattern = m3u_profile.search_pattern
-        replace_pattern = m3u_profile.replace_pattern
-        safe_replace_pattern = regex.sub(r'\$<([^>]+)>', r'\\g<\1>', replace_pattern)
-        safe_replace_pattern = regex.sub(r'\$(\d+)', r'\\\1', safe_replace_pattern)
-
-        if search_pattern and replace_pattern:
-            return regex.sub(search_pattern, safe_replace_pattern, original_url)
-        return original_url
-    except Exception as exc:
-        logger.warning(f"Error transforming URL for profile retry: {exc}")
-        return original_url
-
-
-def _is_stalker_expired_playback_http_error(exc):
-    response = getattr(exc, "response", None)
-    if response is None or response.status_code != 462:
-        return False
-
-    url = getattr(response, "url", "") or ""
-    parsed = urlparse(url)
-    query = parse_qs(parsed.query)
-    return (
-        "/play/" in parsed.path
-        and "play_token" in query
-    )
-
-
 def get_vod_client_stop_key(client_id):
     """Get the Redis key for signaling a VOD client to stop"""
     return f"vod_proxy:client:{client_id}:stop"
-
-
-def _parse_range_start(range_header: Optional[str]) -> Optional[int]:
-    if not range_header:
-        return None
-
-    normalized = str(range_header).strip().lower()
-    if not normalized.startswith("bytes="):
-        return None
-
-    range_part = normalized[len("bytes="):]
-    if "," in range_part or "-" not in range_part:
-        return None
-
-    start_str, _end_str = range_part.split("-", 1)
-    start_str = start_str.strip()
-    if not start_str.isdigit():
-        return None
-
-    return int(start_str)
-
-
-def _parse_response_range_start(response: requests.Response) -> Optional[int]:
-    content_range = (
-        response.headers.get("Content-Range")
-        or response.headers.get("content-range")
-        or ""
-    )
-    if not content_range.lower().startswith("bytes "):
-        return None
-
-    try:
-        range_part = content_range.split(" ", 1)[1].split("/", 1)[0]
-        start_str, _end_str = range_part.split("-", 1)
-        start_str = start_str.strip()
-        if not start_str.isdigit():
-            return None
-        return int(start_str)
-    except (IndexError, ValueError):
-        return None
 
 
 def infer_content_type_from_url(url: str) -> Optional[str]:
@@ -492,9 +410,10 @@ class RedisBackedVODConnection:
 
             # If the cached final_url returned an error (e.g. an ephemeral dispatcharr session
             # that has since expired), clear it and retry from the original stream_url.
-            if response.status_code >= 400 and state.final_url:
+            response_status_code = getattr(response, "status_code", 200)
+            if response_status_code >= 400 and state.final_url:
                 logger.warning(
-                    f"[{self.session_id}] Cached final_url returned {response.status_code}, "
+                    f"[{self.session_id}] Cached final_url returned {response_status_code}, "
                     f"clearing and retrying from stream_url"
                 )
                 response.close()
@@ -886,9 +805,12 @@ class MultiWorkerVODConnectionManager:
 
     _instance = None
     SESSION_REUSE_GRACE_SECONDS = 3
-    IDLE_SESSION_REUSE_ENABLED = True
+    IDLE_SESSION_REUSE_ENABLED = False
     UPSTREAM_CONNECT_TIMEOUT_SECONDS = 10
-    UPSTREAM_READ_TIMEOUT_SECONDS = 30
+    # VOD providers can pause chunk delivery for tens of seconds without the
+    # stream actually being dead. A short read timeout causes Plex to re-open
+    # the movie repeatedly even though the upstream would have resumed.
+    UPSTREAM_READ_TIMEOUT_SECONDS = 120
 
     @classmethod
     def get_instance(cls):
@@ -1086,7 +1008,7 @@ class MultiWorkerVODConnectionManager:
     def stream_content_with_session(self, session_id, content_obj, stream_url, m3u_profile,
                                   client_ip, client_user_agent, request,
                                   utc_start=None, utc_end=None, offset=None, range_header=None,
-                                  input_headers=None, user=None, relation=None):
+                                  input_headers=None, user=None):
         """Stream content with Redis-backed persistent connection"""
 
         # Generate client ID
@@ -1234,43 +1156,7 @@ class MultiWorkerVODConnectionManager:
                     )
 
             # Get stream from Redis-backed connection
-            try:
-                upstream_response = redis_connection.get_stream(range_header)
-            except requests.HTTPError as exc:
-                if relation is None or not _is_stalker_expired_playback_http_error(exc):
-                    raise
-
-                logger.warning(
-                    f"[{client_id}] Worker {self.worker_id} - Provider returned expired Stalker playback URL (462), resolving a fresh link"
-                )
-
-                from apps.vod.resolvers import resolve_vod_stream_context
-
-                fresh_context = resolve_vod_stream_context(
-                    relation,
-                    force_refresh=True,
-                )
-                fresh_stream_url = _transform_url_for_profile(
-                    fresh_context.url,
-                    m3u_profile,
-                )
-                modified_stream_url = self._apply_timeshift_parameters(
-                    fresh_stream_url,
-                    utc_start,
-                    utc_end,
-                    offset,
-                )
-                headers = self._build_provider_request_headers(
-                    m3u_profile,
-                    client_user_agent,
-                    request,
-                    input_headers=fresh_context.input_headers or input_headers,
-                )
-                redis_connection.refresh_connection_target(
-                    modified_stream_url,
-                    headers,
-                )
-                upstream_response = redis_connection.get_stream(range_header)
+            upstream_response = redis_connection.get_stream(range_header)
 
             if upstream_response is None:
                 logger.warning(f"[{client_id}] Worker {self.worker_id} - Range not satisfiable")
@@ -1284,43 +1170,12 @@ class MultiWorkerVODConnectionManager:
 
             # Get connection headers
             connection_headers = redis_connection.get_headers()
-            requested_range_start = _parse_range_start(range_header)
-            upstream_range_start = _parse_response_range_start(upstream_response)
-            bytes_to_discard = 0
-
-            if requested_range_start is not None:
-                if upstream_range_start is None:
-                    if upstream_response.status_code == 200 and requested_range_start > 0:
-                        bytes_to_discard = requested_range_start
-                        logger.warning(
-                            f"[{client_id}] Worker {self.worker_id} - Upstream ignored Range {range_header}; "
-                            f"discarding {bytes_to_discard} leading bytes locally"
-                        )
-                elif upstream_range_start < requested_range_start:
-                    bytes_to_discard = requested_range_start - upstream_range_start
-                    logger.warning(
-                        f"[{client_id}] Worker {self.worker_id} - Upstream started at byte {upstream_range_start} "
-                        f"for requested range {range_header}; discarding {bytes_to_discard} leading bytes locally"
-                    )
-                elif upstream_range_start > requested_range_start:
-                    logger.error(
-                        f"[{client_id}] Worker {self.worker_id} - Upstream started after requested range: "
-                        f"requested={requested_range_start} actual={upstream_range_start}"
-                    )
-                    if existing_state:
-                        redis_connection.decrement_active_streams()
-                    if profile_connections_incremented:
-                        self._decrement_profile_connections(m3u_profile.id)
-                        profile_connections_incremented = False
-                    upstream_response.close()
-                    return HttpResponse("Upstream range mismatch", status=502)
 
             # Create streaming generator
             def stream_generator():
                 stream_decremented = False
                 profile_decremented = False
                 stop_signal_detected = False
-                bytes_to_skip = bytes_to_discard
                 try:
                     logger.info(f"[{client_id}] Worker {self.worker_id} - Starting Redis-backed stream")
 
@@ -1351,13 +1206,6 @@ class MultiWorkerVODConnectionManager:
 
                     for chunk in upstream_response.iter_content(chunk_size=8192):
                         if chunk:
-                            if bytes_to_skip:
-                                if len(chunk) <= bytes_to_skip:
-                                    bytes_to_skip -= len(chunk)
-                                    continue
-                                chunk = chunk[bytes_to_skip:]
-                                bytes_to_skip = 0
-
                             yield chunk
                             bytes_sent += len(chunk)
                             chunk_count += 1
@@ -1852,11 +1700,6 @@ class MultiWorkerVODConnectionManager:
             return None
         if not self.IDLE_SESSION_REUSE_ENABLED:
             logger.debug("Idle VOD session reuse disabled; skipping idle-session scan")
-            return None
-        if _is_plex_like_user_agent(client_user_agent):
-            logger.debug(
-                "Skipping idle VOD session reuse for Plex-like client user agent"
-            )
             return None
 
         try:

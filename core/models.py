@@ -415,7 +415,6 @@ class CoreSettings(models.Model):
             "preferred_region": None,
             "auto_import_mapped_files": True,
             "enable_ip_lookup": True,
-            "force_vod_probe_mode": False,
         })
 
     @classmethod
@@ -427,15 +426,6 @@ class CoreSettings(models.Model):
         value = (tz_name or "").strip() or getattr(settings, "TIME_ZONE", "UTC") or "UTC"
         cls._update_group(SYSTEM_SETTINGS_KEY, "System Settings", {"time_zone": value})
         return value
-
-    @classmethod
-    def get_force_vod_probe_mode(cls):
-        value = cls.get_system_settings().get("force_vod_probe_mode", False)
-        if isinstance(value, bool):
-            return value
-        if isinstance(value, str):
-            return value.lower() in {"1", "true", "yes", "on"}
-        return bool(value)
 
     @classmethod
     def get_hdhr_output_profile_id(cls):

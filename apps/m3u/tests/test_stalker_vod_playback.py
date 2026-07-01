@@ -2,33 +2,17 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from django.http import HttpResponse
-from requests import HTTPError
 from django.test import RequestFactory, TestCase
 
 from apps.m3u.models import M3UAccount, M3UAccountProfile
 from apps.m3u.stalker import (
     DEFAULT_USER_AGENT,
-    StalkerAuthError,
     StalkerClient,
     StalkerRecoverableError,
 )
 from apps.proxy.vod_proxy.views import VODStreamView
 from apps.vod.models import M3UMovieRelation, Movie
 from apps.vod.resolvers import resolve_vod_stream_context
-
-
-class ResolverFakeRedis:
-    def __init__(self):
-        self._data = {}
-
-    def get(self, key):
-        return self._data.get(key)
-
-    def set(self, key, value, ex=None, nx=False):
-        if nx and key in self._data:
-            return False
-        self._data[key] = value
-        return True
 
 
 class StalkerPhase14MovieResolverTests(TestCase):
@@ -126,41 +110,6 @@ class StalkerPhase14MovieResolverTests(TestCase):
         )
         mock_watchdog.assert_not_called()
 
-    def test_resolve_vod_playback_url_regenerates_token_before_retry(self):
-        client = StalkerClient(
-            server_url=self.account.server_url,
-            mac="00:1A:79:00:00:94",
-            username=self.account.username,
-            password=self.account.password,
-            custom_properties={"token": "OLD-TOKEN"},
-        )
-
-        tokens_seen = []
-
-        def fake_prepare(portal_url):
-            tokens_seen.append(client.token)
-
-        with patch.object(
-            client,
-            "prepare_vod_playback_session",
-            side_effect=fake_prepare,
-        ), patch.object(
-            client,
-            "create_vod_link",
-            side_effect=[
-                StalkerAuthError("Request failed: 403 Client Error: Forbidden"),
-                "http://resolved.example.com/movie-100.mkv",
-            ],
-        ):
-            resolved = client.resolve_vod_playback_url(
-                "http://portal.example.com/stalker_portal/server/load.php",
-                "ffmpeg http://provider.example.com/movie-100.mkv",
-            )
-
-        self.assertEqual(resolved, "http://resolved.example.com/movie-100.mkv")
-        self.assertEqual(tokens_seen[0], "OLD-TOKEN")
-        self.assertNotEqual(tokens_seen[1], "OLD-TOKEN")
-
     @patch("apps.vod.resolvers.StalkerClient.resolve_vod_playback_url", autospec=True)
     @patch("apps.vod.resolvers.StalkerClient.discover_vod_categories", autospec=True)
     def test_resolver_builds_stalker_movie_link_and_persists_runtime_state(
@@ -246,64 +195,6 @@ class StalkerPhase14MovieResolverTests(TestCase):
             self.account.custom_properties["stalker_vod_portal_url"],
             "http://portal.example.com/stalker_portal/server/load.php",
         )
-
-    @patch("apps.vod.resolvers.RedisClient.get_client")
-    @patch("apps.vod.resolvers.StalkerClient.resolve_vod_playback_url", autospec=True)
-    @patch("apps.vod.resolvers.StalkerClient.discover_vod_categories", autospec=True)
-    def test_resolver_reuses_short_lived_cached_stalker_vod_context(
-        self,
-        mock_discover_vod_categories,
-        mock_resolve_vod_playback_url,
-        mock_get_redis_client,
-    ):
-        fake_redis = ResolverFakeRedis()
-        mock_get_redis_client.return_value = fake_redis
-        mock_discover_vod_categories.return_value = SimpleNamespace(
-            normalized_portal_url="http://portal.example.com/stalker_portal/server/load.php"
-        )
-        mock_resolve_vod_playback_url.return_value = (
-            "http://resolved.example.com/movie-100.mkv"
-        )
-
-        first_context = resolve_vod_stream_context(self.relation)
-        second_context = resolve_vod_stream_context(self.relation)
-
-        self.assertEqual(
-            first_context.url,
-            "http://resolved.example.com/movie-100.mkv",
-        )
-        self.assertEqual(second_context.url, first_context.url)
-        self.assertEqual(mock_resolve_vod_playback_url.call_count, 1)
-        self.assertEqual(mock_discover_vod_categories.call_count, 1)
-
-    @patch("apps.vod.resolvers.RedisClient.get_client")
-    @patch("apps.vod.resolvers.StalkerClient.resolve_vod_playback_url", autospec=True)
-    @patch("apps.vod.resolvers.StalkerClient.discover_vod_categories", autospec=True)
-    def test_resolver_sets_short_auth_failure_cooldown_for_stalker_403(
-        self,
-        mock_discover_vod_categories,
-        mock_resolve_vod_playback_url,
-        mock_get_redis_client,
-    ):
-        fake_redis = ResolverFakeRedis()
-        mock_get_redis_client.return_value = fake_redis
-        mock_discover_vod_categories.return_value = SimpleNamespace(
-            normalized_portal_url="http://portal.example.com/stalker_portal/server/load.php"
-        )
-        mock_resolve_vod_playback_url.side_effect = StalkerAuthError(
-            "Request failed: 403 Client Error: Forbidden"
-        )
-
-        with self.assertRaises(StalkerAuthError):
-            resolve_vod_stream_context(self.relation)
-
-        with self.assertRaisesMessage(
-            Exception,
-            "Recent Stalker authentication failure cooldown is active.",
-        ):
-            resolve_vod_stream_context(self.relation)
-
-        self.assertEqual(mock_resolve_vod_playback_url.call_count, 1)
 
     def test_resolver_keeps_xtream_movie_urls_on_existing_route_pattern(self):
         account = M3UAccount.objects.create(
@@ -423,15 +314,9 @@ from django.test import RequestFactory, TestCase
 from apps.m3u.models import M3UAccount, M3UAccountProfile
 from apps.m3u.stalker import DEFAULT_USER_AGENT, StalkerClient
 from apps.proxy.vod_proxy.multi_worker_connection_manager import (
-    MultiWorkerVODConnectionManager,
     RedisBackedVODConnection,
 )
-from apps.proxy.vod_proxy.views import (
-    VODStreamView,
-    _get_stalker_probe_462_cooldown_key,
-    _get_stream_context_for_request,
-    _stream_stalker_probe_content,
-)
+from apps.proxy.vod_proxy.views import VODStreamView, _get_stream_context_for_request
 from apps.vod.models import Episode, M3UEpisodeRelation, Series
 from apps.vod.resolvers import resolve_vod_stream_context
 
@@ -440,9 +325,6 @@ class _FakeRedis:
     def __init__(self):
         self.hashes = {}
         self.values = {}
-
-    def get(self, key):
-        return self.values.get(key)
 
     def hgetall(self, key):
         return dict(self.hashes.get(key, {}))
@@ -482,7 +364,6 @@ class _FakeHeadResponse:
 class _FakeUpstreamResponse:
     def __init__(self, url, headers=None):
         self.url = url
-        self.status_code = 200
         self.headers = headers or {
             "content-length": "4096",
             "content-type": "video/mp4",
@@ -491,26 +372,8 @@ class _FakeUpstreamResponse:
     def raise_for_status(self):
         return None
 
-    def iter_content(self, chunk_size=8192):
-        yield b"fake-chunk"
-
     def close(self):
         return None
-
-
-class _Fake462Response:
-    def __init__(self, url):
-        self.url = url
-        self.status_code = 462
-
-
-class _Raising462Session:
-    def __init__(self, url):
-        self.url = url
-
-    def get_stream(self, range_header=None):
-        response = _Fake462Response(self.url)
-        raise HTTPError(response=response)
 
 
 class StalkerPhase15EpisodeResolverTests(TestCase):
@@ -613,7 +476,7 @@ class StalkerPhase15SeriesCreateLinkTests(TestCase):
         self.assertEqual(resolved, "http://media.example.com/episode-1.avi")
         mock_request.assert_called_once_with(
             "GET",
-            "http://portal.example.com/stalker_portal/portal.php?action=create_link&type=vod&cmd=eyJzZXJpZXNfaWQiOjcxNDEsInNlYXNvbl9udW0iOjEsInR5cGUiOiJzZXJpZXMifQ==&series=1&JsHttpRequest=1-xml",
+            "http://portal.example.com/stalker_portal/portal.php?action=create_link&type=vod&cmd=eyJzZXJpZXNfaWQiOjcxNDEsInNlYXNvbl9udW0iOjEsInR5cGUiOiJzZXJpZXMifQ%3D%3D&series=1&JsHttpRequest=1-xml",
             with_auth=True,
         )
 
@@ -785,361 +648,6 @@ class StalkerPhase15SessionRefreshTests(TestCase):
             final_state.final_url,
             "http://fresh-cdn.example.com/episode-1.mkv",
         )
-
-    @patch("apps.vod.resolvers.resolve_vod_stream_context")
-    @patch("apps.proxy.vod_proxy.multi_worker_connection_manager.MultiWorkerVODConnectionManager.find_matching_idle_session")
-    @patch("apps.proxy.vod_proxy.multi_worker_connection_manager.MultiWorkerVODConnectionManager._check_and_reserve_profile_slot")
-    @patch("apps.proxy.vod_proxy.multi_worker_connection_manager.MultiWorkerVODConnectionManager._build_provider_request_headers")
-    @patch("apps.proxy.vod_proxy.multi_worker_connection_manager.RedisBackedVODConnection")
-    def test_stream_content_with_session_refreshes_stalker_url_after_462(
-        self,
-        mock_connection_cls,
-        mock_build_headers,
-        mock_check_profile_slot,
-        mock_find_matching_idle_session,
-        mock_resolve_vod_stream_context,
-    ):
-        account = M3UAccount.objects.create(
-            name="462 Retry Account",
-            account_type=M3UAccount.Types.STALKER,
-            server_url="http://portal.example.com/c/",
-            custom_properties={
-                "mac": "00:1A:79:00:00:AA",
-                "enable_vod": True,
-            },
-        )
-        profile = M3UAccountProfile.objects.create(
-            m3u_account=account,
-            name="Retry Profile",
-            is_default=True,
-            is_active=True,
-            search_pattern=r"/movie/",
-            replace_pattern="/movie-hd/",
-        )
-        movie = Movie.objects.create(name="Retry Movie")
-        relation = M3UMovieRelation.objects.create(
-            m3u_account=account,
-            movie=movie,
-            stream_id="555",
-            custom_properties={"cmd": "ffmpeg http://provider.example.com/movie-555.mkv"},
-        )
-
-        request = RequestFactory().get(
-            f"/proxy/vod/movie/{movie.uuid}/retry-session",
-            HTTP_USER_AGENT="DispatcharrTestClient/1.0",
-        )
-
-        redis_connection = Mock()
-        redis_connection._get_connection_state.return_value = None
-        redis_connection.create_connection.return_value = True
-        redis_connection.refresh_connection_target.return_value = True
-        redis_connection.get_headers.return_value = {
-            "content_length": "4096",
-            "content_type": "video/mp4",
-        }
-        redis_connection.get_stream.side_effect = [
-            HTTPError(
-                response=_Fake462Response(
-                    "http://diablo-pro.com:2095/play/movie.php?mac=00:1A:79:BB:8B:B9&stream=555.mp4&play_token=OLD&type=movie&sn2="
-                )
-            ),
-            _FakeUpstreamResponse("http://fresh-cdn.example.com/movie-555.mkv"),
-        ]
-        mock_connection_cls.return_value = redis_connection
-        def _build_headers(_profile, _client_user_agent, _request, input_headers=None):
-            return dict(input_headers or {})
-
-        mock_build_headers.side_effect = _build_headers
-        mock_check_profile_slot.return_value = True
-        mock_find_matching_idle_session.return_value = None
-        mock_resolve_vod_stream_context.return_value = SimpleNamespace(
-            url="http://resolved.example.com/movie/555.mkv",
-            user_agent=DEFAULT_USER_AGENT,
-            input_headers={
-                "Authorization": "Bearer NEW-TOKEN",
-                "User-Agent": DEFAULT_USER_AGENT,
-            },
-        )
-
-        manager = MultiWorkerVODConnectionManager()
-        manager.redis_client = _FakeRedis()
-
-        response = manager.stream_content_with_session(
-            session_id="retry-session",
-            content_obj=movie,
-            stream_url="http://resolved.example.com/movie/555.mkv",
-            m3u_profile=profile,
-            client_ip="127.0.0.1",
-            client_user_agent="DispatcharrTestClient/1.0",
-            request=request,
-            input_headers={
-                "Authorization": "Bearer OLD-TOKEN",
-                "User-Agent": "DispatcharrTestClient/1.0",
-            },
-            relation=relation,
-        )
-
-        self.assertEqual(response.status_code, 200)
-        mock_resolve_vod_stream_context.assert_called_once_with(
-            relation,
-            force_refresh=True,
-        )
-        redis_connection.refresh_connection_target.assert_called_once()
-        refresh_args = redis_connection.refresh_connection_target.call_args[0]
-        self.assertEqual(
-            refresh_args[0],
-            "http://resolved.example.com/movie-hd/555.mkv",
-        )
-        self.assertEqual(
-            refresh_args[1]["Authorization"],
-            "Bearer NEW-TOKEN",
-        )
-
-    @patch("apps.proxy.vod_proxy.views.requests.get")
-    @patch("apps.proxy.vod_proxy.views.resolve_vod_stream_context")
-    def test_probe_stream_refreshes_stalker_url_after_462(
-        self,
-        mock_resolve_vod_stream_context,
-        mock_requests_get,
-    ):
-        account = M3UAccount.objects.create(
-            name="462 Probe Retry Account",
-            account_type=M3UAccount.Types.STALKER,
-            server_url="http://portal.example.com/c/",
-            custom_properties={
-                "mac": "00:1A:79:00:00:AB",
-                "enable_vod": True,
-            },
-        )
-        profile = M3UAccountProfile.objects.create(
-            m3u_account=account,
-            name="Probe Retry Profile",
-            is_default=True,
-            is_active=True,
-            search_pattern=r"/movie/",
-            replace_pattern="/movie-hd/",
-        )
-        movie = Movie.objects.create(name="Probe Retry Movie")
-        relation = M3UMovieRelation.objects.create(
-            m3u_account=account,
-            movie=movie,
-            stream_id="556",
-            custom_properties={"cmd": "ffmpeg http://provider.example.com/movie-556.mkv"},
-        )
-        request = RequestFactory().get(
-            f"/proxy/vod/movie/{movie.uuid}",
-            HTTP_USER_AGENT="Lavf/60.16.100",
-            HTTP_RANGE="bytes=0-",
-        )
-
-        first_response = _FakeUpstreamResponse(
-            "http://diablo-pro.com:2095/play/movie.php?mac=00:1A:79:BB:8B:B9&stream=556.mp4&play_token=OLD&type=movie&sn2="
-        )
-        first_response.status_code = 462
-        first_response.raise_for_status = Mock(
-            side_effect=HTTPError(response=_Fake462Response(first_response.url))
-        )
-        second_response = _FakeUpstreamResponse(
-            "http://fresh-cdn.example.com/movie-556.mkv"
-        )
-        mock_requests_get.side_effect = [
-            first_response,
-            second_response,
-        ]
-        mock_resolve_vod_stream_context.return_value = SimpleNamespace(
-            url="http://resolved.example.com/movie/556.mkv",
-            user_agent=DEFAULT_USER_AGENT,
-            input_headers={
-                "Authorization": "Bearer NEW-TOKEN",
-                "User-Agent": DEFAULT_USER_AGENT,
-            },
-        )
-
-        response = _stream_stalker_probe_content(
-            content_name=movie.name,
-            stream_url="http://diablo-pro.com:2095/play/movie.php?mac=00:1A:79:BB:8B:B9&stream=556.mp4&play_token=OLD&type=movie&sn2=",
-            m3u_profile=profile,
-            relation=relation,
-            client_user_agent="Lavf/60.16.100",
-            request=request,
-            input_headers={
-                "Authorization": "Bearer OLD-TOKEN",
-                "User-Agent": "Lavf/60.16.100",
-            },
-            range_header="bytes=0-",
-        )
-
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response["X-Dispatcharr-Probe-Mode"], "1")
-        mock_resolve_vod_stream_context.assert_called_once_with(
-            relation,
-            force_refresh=True,
-        )
-        self.assertEqual(mock_requests_get.call_count, 2)
-        first_call_args, first_call_kwargs = mock_requests_get.call_args_list[0]
-        second_call_args, second_call_kwargs = mock_requests_get.call_args_list[1]
-        self.assertIn("play_token=OLD", first_call_args[0])
-        self.assertEqual(first_call_kwargs["headers"]["Authorization"], "Bearer OLD-TOKEN")
-        self.assertEqual(
-            second_call_args[0],
-            "http://resolved.example.com/movie-hd/556.mkv",
-        )
-        self.assertEqual(second_call_kwargs["headers"]["Authorization"], "Bearer NEW-TOKEN")
-        self.assertEqual(second_call_kwargs["headers"]["Range"], "bytes=0-")
-
-    @patch("apps.proxy.vod_proxy.views.RedisClient.get_client")
-    @patch("apps.proxy.vod_proxy.views.requests.get")
-    @patch("apps.proxy.vod_proxy.views.resolve_vod_stream_context")
-    def test_probe_stream_returns_soft_response_after_double_462(
-        self,
-        mock_resolve_vod_stream_context,
-        mock_requests_get,
-        mock_get_redis_client,
-    ):
-        fake_redis = _FakeRedis()
-        mock_get_redis_client.return_value = fake_redis
-        account = M3UAccount.objects.create(
-            name="462 Probe Soft Retry Account",
-            account_type=M3UAccount.Types.STALKER,
-            server_url="http://portal.example.com/c/",
-            custom_properties={
-                "mac": "00:1A:79:00:00:AC",
-                "enable_vod": True,
-            },
-        )
-        profile = M3UAccountProfile.objects.create(
-            m3u_account=account,
-            name="Probe Soft Retry Profile",
-            is_default=True,
-            is_active=True,
-        )
-        movie = Movie.objects.create(name="Probe Soft Retry Movie")
-        relation = M3UMovieRelation.objects.create(
-            m3u_account=account,
-            movie=movie,
-            stream_id="557",
-            custom_properties={"cmd": "ffmpeg http://provider.example.com/movie-557.mkv"},
-        )
-        request = RequestFactory().get(
-            f"/proxy/vod/movie/{movie.uuid}",
-            HTTP_USER_AGENT="Lavf/60.16.100",
-            HTTP_RANGE="bytes=0-",
-        )
-
-        first_response = _FakeUpstreamResponse(
-            "http://diablo-pro.com:2095/play/movie.php?mac=00:1A:79:BB:8B:B9&stream=557.mp4&play_token=OLD&type=movie&sn2="
-        )
-        first_response.status_code = 462
-        first_response.raise_for_status = Mock(
-            side_effect=HTTPError(response=_Fake462Response(first_response.url))
-        )
-        second_response = _FakeUpstreamResponse(
-            "http://diablo-pro.com:2095/play/movie.php?mac=00:1A:79:BB:8B:B9&stream=557.mp4&play_token=NEW&type=movie&sn2="
-        )
-        second_response.status_code = 462
-        second_response.raise_for_status = Mock(
-            side_effect=HTTPError(response=_Fake462Response(second_response.url))
-        )
-        mock_requests_get.side_effect = [
-            first_response,
-            second_response,
-        ]
-        mock_resolve_vod_stream_context.return_value = SimpleNamespace(
-            url="http://resolved.example.com/movie/557.mkv",
-            user_agent=DEFAULT_USER_AGENT,
-            input_headers={
-                "Authorization": "Bearer NEW-TOKEN",
-                "User-Agent": DEFAULT_USER_AGENT,
-            },
-        )
-
-        response = _stream_stalker_probe_content(
-            content_name=movie.name,
-            stream_url=first_response.url,
-            m3u_profile=profile,
-            relation=relation,
-            client_user_agent="Lavf/60.16.100",
-            request=request,
-            input_headers={
-                "Authorization": "Bearer OLD-TOKEN",
-                "User-Agent": "Lavf/60.16.100",
-            },
-            range_header="bytes=0-",
-        )
-
-        cooldown_key = _get_stalker_probe_462_cooldown_key(relation)
-        self.assertEqual(response.status_code, 204)
-        self.assertEqual(response["X-Dispatcharr-Probe-Mode"], "1")
-        self.assertEqual(
-            response["X-Dispatcharr-Probe-Skipped"],
-            "stalker-462-retry-exhausted",
-        )
-        self.assertEqual(mock_requests_get.call_count, 2)
-        self.assertEqual(fake_redis.get(cooldown_key), "2")
-
-    @patch("apps.proxy.vod_proxy.views.RedisClient.get_client")
-    @patch("apps.proxy.vod_proxy.views.requests.get")
-    def test_probe_stream_skips_upstream_during_active_462_cooldown(
-        self,
-        mock_requests_get,
-        mock_get_redis_client,
-    ):
-        fake_redis = _FakeRedis()
-        mock_get_redis_client.return_value = fake_redis
-        account = M3UAccount.objects.create(
-            name="462 Probe Cooldown Account",
-            account_type=M3UAccount.Types.STALKER,
-            server_url="http://portal.example.com/c/",
-            custom_properties={
-                "mac": "00:1A:79:00:00:AD",
-                "enable_vod": True,
-            },
-        )
-        profile = M3UAccountProfile.objects.create(
-            m3u_account=account,
-            name="Probe Cooldown Profile",
-            is_default=True,
-            is_active=True,
-        )
-        movie = Movie.objects.create(name="Probe Cooldown Movie")
-        relation = M3UMovieRelation.objects.create(
-            m3u_account=account,
-            movie=movie,
-            stream_id="558",
-            custom_properties={"cmd": "ffmpeg http://provider.example.com/movie-558.mkv"},
-        )
-        request = RequestFactory().get(
-            f"/proxy/vod/movie/{movie.uuid}",
-            HTTP_USER_AGENT="Lavf/60.16.100",
-            HTTP_RANGE="bytes=0-",
-        )
-        fake_redis.set(
-            _get_stalker_probe_462_cooldown_key(relation),
-            "2",
-            ex=4,
-        )
-
-        response = _stream_stalker_probe_content(
-            content_name=movie.name,
-            stream_url="http://diablo-pro.com:2095/play/movie.php?mac=00:1A:79:BB:8B:B9&stream=558.mp4&play_token=OLD&type=movie&sn2=",
-            m3u_profile=profile,
-            relation=relation,
-            client_user_agent="Lavf/60.16.100",
-            request=request,
-            input_headers={
-                "Authorization": "Bearer OLD-TOKEN",
-                "User-Agent": "Lavf/60.16.100",
-            },
-            range_header="bytes=0-",
-        )
-
-        self.assertEqual(response.status_code, 204)
-        self.assertEqual(response["X-Dispatcharr-Probe-Mode"], "1")
-        self.assertEqual(
-            response["X-Dispatcharr-Probe-Skipped"],
-            "stalker-462-cooldown",
-        )
-        mock_requests_get.assert_not_called()
 
 
 class StalkerPhase15SessionReuseTests(TestCase):

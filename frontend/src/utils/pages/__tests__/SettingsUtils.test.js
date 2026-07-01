@@ -162,7 +162,6 @@ describe('SettingsUtils', () => {
       const changedSettings = {
         comskip_enabled: true,
         auto_import_mapped_files: false,
-        force_vod_probe_mode: true,
       };
 
       API.updateSetting.mockResolvedValue({});
@@ -179,10 +178,7 @@ describe('SettingsUtils', () => {
       expect(API.updateSetting).toHaveBeenCalledWith(
         expect.objectContaining({
           key: 'system_settings',
-          value: {
-            auto_import_mapped_files: false,
-            force_vod_probe_mode: true,
-          },
+          value: { auto_import_mapped_files: false },
         })
       );
     });
@@ -281,7 +277,6 @@ describe('SettingsUtils', () => {
           value: {
             preferred_region: 'US',
             auto_import_mapped_files: true,
-            force_vod_probe_mode: true,
           },
         },
         dvr_settings: {
@@ -304,7 +299,6 @@ describe('SettingsUtils', () => {
       expect(result.m3u_hash_key).toEqual(['channel_name', 'channel_number']);
       expect(result.preferred_region).toBe('US');
       expect(result.auto_import_mapped_files).toBe(true);
-      expect(result.force_vod_probe_mode).toBe(true);
 
       // Check DVR settings
       expect(result.tv_template).toBe('/media/tv/{show}/{season}/');
