@@ -347,8 +347,19 @@ class LogoNegativeCacheTests(TestCase):
             self._fetch_logo(logo)
         self.assertNotIn(url, self._failures)
 
-    def test_request_exception_cached(self):
-        """Network errors are cached the same as non-200 responses."""
+    def test_connection_error_not_cached(self):
+        """Transport errors should not poison the negative cache."""
+        import requests
+        logo = Logo.objects.create(name="Timeout", url="https://timeout.com/logo.png")
+        with patch("apps.channels.api_views.requests.get", side_effect=requests.ConnectionError("network down")), \
+             patch("apps.channels.api_views.CoreSettings.get_default_user_agent_id", return_value="1"), \
+             patch("apps.channels.api_views.UserAgent.objects.get", return_value=MagicMock(user_agent="Test/1.0")):
+            response = self._fetch_logo(logo)
+        self.assertEqual(response.status_code, 404)
+        self.assertNotIn("https://timeout.com/logo.png", self._failures)
+
+    def test_timeout_still_cached(self):
+        """Read/connect timeout remains negatively cached to protect workers."""
         import requests
         logo = Logo.objects.create(name="Timeout", url="https://timeout.com/logo.png")
         with patch("apps.channels.api_views.requests.get", side_effect=requests.Timeout("timed out")), \
@@ -357,6 +368,28 @@ class LogoNegativeCacheTests(TestCase):
             response = self._fetch_logo(logo)
         self.assertEqual(response.status_code, 404)
         self.assertIn("https://timeout.com/logo.png", self._failures)
+
+    def test_scheme_fallback_after_connection_error(self):
+        """Retry the alternate scheme when the first transport attempt fails."""
+        import requests
+
+        logo = Logo.objects.create(name="Fallback", url="http://example.com/logo.png")
+        mock_resp = MagicMock(status_code=200)
+        mock_resp.headers = {"Content-Type": "image/png"}
+        mock_resp.iter_content = MagicMock(return_value=[b"img"])
+
+        with patch(
+            "apps.channels.api_views.requests.get",
+            side_effect=[requests.ConnectionError("network down"), mock_resp],
+        ) as mock_get, \
+             patch("apps.channels.api_views.CoreSettings.get_default_user_agent_id", return_value="1"), \
+             patch("apps.channels.api_views.UserAgent.objects.get", return_value=MagicMock(user_agent="Test/1.0")):
+            response = self._fetch_logo(logo)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(mock_get.call_args_list[0].args[0], "http://example.com/logo.png")
+        self.assertEqual(mock_get.call_args_list[1].args[0], "https://example.com/logo.png")
+        self.assertNotIn("http://example.com/logo.png", self._failures)
 
     def test_eviction_when_cache_exceeds_256(self):
         """Stale entries are evicted when the cache grows past 256."""

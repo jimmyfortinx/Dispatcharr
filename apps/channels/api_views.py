@@ -14,7 +14,7 @@ from django.db import connection, transaction
 from django.db.models import Count, F, Prefetch
 from django.db.models import Q
 import os, json, requests, logging, mimetypes, threading, time
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse, urlunparse
 from datetime import timedelta
 from django.utils.http import http_date
 from apps.accounts.permissions import (
@@ -81,6 +81,36 @@ logger = logging.getLogger(__name__)
 # from exhausting Daphne workers.  Keyed by URL, value is expiry timestamp.
 _logo_fetch_failures = {}
 _LOGO_FAIL_TTL = 300  # seconds
+REMOTE_IMAGE_REQUEST_HEADERS = {
+    "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Connection": "close",
+}
+
+
+def _logo_scheme_fallback_url(url):
+    parsed = urlparse(str(url or "").strip())
+    if not parsed.netloc or parsed.scheme not in {"http", "https"}:
+        return None
+
+    fallback_scheme = "https" if parsed.scheme == "http" else "http"
+    return urlunparse(parsed._replace(scheme=fallback_scheme))
+
+
+def _logo_candidate_urls(url):
+    candidates = []
+    for candidate in (str(url or "").strip(), _logo_scheme_fallback_url(url)):
+        if candidate and candidate not in candidates:
+            candidates.append(candidate)
+    return candidates
+
+
+def _prune_logo_failure_cache(now):
+    if len(_logo_fetch_failures) <= 256:
+        return
+
+    for key in [k for k, expiry in _logo_fetch_failures.items() if expiry <= now]:
+        _logo_fetch_failures.pop(key, None)
 
 
 class OrInFilter(django_filters.Filter):
@@ -2786,13 +2816,33 @@ class LogoViewSet(viewsets.ModelViewSet):
                 _LOGO_TOTAL_TIMEOUT = 10  # seconds
                 _LOGO_MAX_BYTES = 5 * 1024 * 1024  # 5 MB
 
-                remote_response = requests.get(
-                    logo_url,
-                    stream=True,
-                    timeout=(3, 5),  # (connect_timeout, read_timeout per chunk)
-                    headers={'User-Agent': user_agent}
-                )
-                if remote_response.status_code == 200:
+                request_headers = dict(REMOTE_IMAGE_REQUEST_HEADERS)
+                request_headers["User-Agent"] = user_agent
+                transport_error = None
+
+                for candidate_url in _logo_candidate_urls(logo_url):
+                    try:
+                        remote_response = requests.get(
+                            candidate_url,
+                            stream=True,
+                            timeout=(3, 5),  # (connect_timeout, read_timeout per chunk)
+                            headers=request_headers,
+                        )
+                    except requests.ConnectionError as exc:
+                        transport_error = exc
+                        logger.warning(
+                            "Connection error fetching logo from %s: %s",
+                            candidate_url,
+                            exc,
+                        )
+                        continue
+                    except requests.RequestException as exc:
+                        transport_error = exc
+                        break
+
+                    if remote_response.status_code != 200:
+                        continue
+
                     # Eagerly read the full image with a total time + size cap
                     # so the greenlet is released quickly.
                     chunks = []
@@ -2807,6 +2857,7 @@ class LogoViewSet(viewsets.ModelViewSet):
                             remote_response.close()
                             now = time.monotonic()
                             _logo_fetch_failures[logo_url] = now + _LOGO_FAIL_TTL
+                            _prune_logo_failure_cache(now)
                             raise Http404("Remote image fetch timed out")
                         chunks.append(chunk)
                     body = b"".join(chunks)
@@ -2819,7 +2870,7 @@ class LogoViewSet(viewsets.ModelViewSet):
 
                     # If no content type in headers or it's empty, guess based on URL
                     if not content_type:
-                        content_type, _ = mimetypes.guess_type(logo_url)
+                        content_type, _ = mimetypes.guess_type(candidate_url)
 
                     # If still no content type, default to common image type
                     if not content_type:
@@ -2835,22 +2886,27 @@ class LogoViewSet(viewsets.ModelViewSet):
                     if remote_response.headers.get("Last-Modified"):
                         response["Last-Modified"] = remote_response.headers.get("Last-Modified")
                     response["Content-Disposition"] = 'inline; filename="{}"'.format(
-                        os.path.basename(logo_url)
+                        os.path.basename(candidate_url)
                     )
                     return response
-                # Non-200 response — cache the failure and evict stale entries
+
+                if transport_error is not None:
+                    logger.warning(f"Error fetching logo from {logo_url}: {transport_error}")
+                    raise Http404("Error fetching remote image")
+
+                # Non-200 response across all candidates — cache the failure and evict stale entries
                 now = time.monotonic()
                 _logo_fetch_failures[logo_url] = now + _LOGO_FAIL_TTL
-                if len(_logo_fetch_failures) > 256:
-                    for k in [k for k, v in _logo_fetch_failures.items() if v <= now]:
-                        _logo_fetch_failures.pop(k, None)
+                _prune_logo_failure_cache(now)
                 raise Http404("Remote image not found")
             except requests.RequestException as e:
+                if isinstance(e, requests.ConnectionError):
+                    logger.warning(f"Error fetching logo from {logo_url}: {e}")
+                    raise Http404("Error fetching remote image")
+
                 now = time.monotonic()
                 _logo_fetch_failures[logo_url] = now + _LOGO_FAIL_TTL
-                if len(_logo_fetch_failures) > 256:
-                    for k in [k for k, v in _logo_fetch_failures.items() if v <= now]:
-                        _logo_fetch_failures.pop(k, None)
+                _prune_logo_failure_cache(now)
                 logger.warning(f"Error fetching logo from {logo_url}: {e}")
                 raise Http404("Error fetching remote image")
 
