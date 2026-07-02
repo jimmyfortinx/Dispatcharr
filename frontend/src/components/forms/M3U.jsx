@@ -287,7 +287,7 @@ const M3U = ({
         (values.account_type === 'XC' || values.account_type === 'STALKER') &&
         values.enable_vod
       ) {
-        await fetchCategories();
+        await fetchCategories({ includeEmpty: true });
       }
 
       setPlaylist(updatedPlaylist);
@@ -738,7 +738,7 @@ const M3U = ({
                         playlist?.account_type === 'STALKER') &&
                       playlist?.enable_vod
                     ) {
-                      fetchCategories();
+                      fetchCategories({ includeEmpty: true });
                     }
                     setGroupFilterModalOpen(true);
                   }}

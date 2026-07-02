@@ -291,9 +291,9 @@ const useVODStore = create((set, get) => ({
     }
   },
 
-  fetchCategories: async () => {
+  fetchCategories: async (options = {}) => {
     try {
-      const response = await api.getVODCategories();
+      const response = await api.getVODCategories(options);
       // Handle both array and paginated responses
       const results = response.results || response;
 

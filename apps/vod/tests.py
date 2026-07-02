@@ -216,7 +216,50 @@ class VODCategoryVisibilityTests(TestCase):
         )
         self.view = VODCategoryViewSet.as_view({"get": "list"})
 
-    def test_categories_include_disabled_relations_for_vod_enabled_accounts(self):
+    def test_categories_hide_empty_relations_by_default(self):
+        enabled_account = M3UAccount.objects.create(
+            name="Category Enabled VOD",
+            account_type=M3UAccount.Types.STALKER,
+            is_active=True,
+            custom_properties={"enable_vod": True, "mac": "00:1A:79:00:00:95"},
+        )
+        empty_category = VODCategory.objects.create(
+            name="Empty Category",
+            category_type="movie",
+        )
+        populated_category = VODCategory.objects.create(
+            name="Populated Category",
+            category_type="movie",
+        )
+        movie = Movie.objects.create(name="Visible Movie")
+
+        M3UVODCategoryRelation.objects.create(
+            m3u_account=enabled_account,
+            category=empty_category,
+            enabled=True,
+        )
+        M3UVODCategoryRelation.objects.create(
+            m3u_account=enabled_account,
+            category=populated_category,
+            enabled=True,
+        )
+        M3UMovieRelation.objects.create(
+            m3u_account=enabled_account,
+            movie=movie,
+            category=populated_category,
+            stream_id="movie-1",
+        )
+
+        request = self.factory.get("/api/vod/categories/")
+        force_authenticate(request, user=self.user)
+        response = self.view(request)
+
+        self.assertEqual(response.status_code, 200)
+        category_names = {row["name"] for row in response.data}
+        self.assertIn("Populated Category", category_names)
+        self.assertNotIn("Empty Category", category_names)
+
+    def test_categories_include_empty_relations_for_vod_enabled_accounts_when_requested(self):
         enabled_account = M3UAccount.objects.create(
             name="Category Enabled VOD",
             account_type=M3UAccount.Types.STALKER,
@@ -249,7 +292,7 @@ class VODCategoryVisibilityTests(TestCase):
             enabled=True,
         )
 
-        request = self.factory.get("/api/vod/categories/")
+        request = self.factory.get("/api/vod/categories/?include_empty=true")
         force_authenticate(request, user=self.user)
         response = self.view(request)
 

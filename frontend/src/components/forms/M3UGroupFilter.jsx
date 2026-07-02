@@ -81,7 +81,7 @@ const M3UGroupFilter = ({ playlist = null, isOpen, onClose }) => {
       playlist &&
       supportsVodFilters
     ) {
-      fetchCategories();
+      fetchCategories({ includeEmpty: true });
     }
   }, [isOpen, supportsVodFilters, fetchCategories]);
 

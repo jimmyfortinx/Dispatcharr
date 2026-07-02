@@ -3655,9 +3655,15 @@ export default class API {
     }
   }
 
-  static async getVODCategories() {
+  static async getVODCategories(options = {}) {
     try {
-      const response = await request(`${host}/api/vod/categories/`);
+      const params = new URLSearchParams();
+      if (options.includeEmpty) {
+        params.append('include_empty', 'true');
+      }
+      const response = await request(
+        `${host}/api/vod/categories/${params.toString() ? `?${params.toString()}` : ''}`
+      );
       return response;
     } catch (e) {
       errorNotification('Failed to retrieve VOD categories', e);

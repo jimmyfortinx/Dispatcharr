@@ -139,6 +139,10 @@ def _vod_catalog_account_filters(prefix="m3u_account__"):
     }
 
 
+def _query_param_is_truthy(value):
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _parse_category_filter_value(category_value):
     text = str(category_value or "").strip()
     if not text:
@@ -833,14 +837,66 @@ class VODCategoryViewSet(viewsets.ReadOnlyModelViewSet):
             return [Authenticated()]
 
     def get_queryset(self):
+        if _query_param_is_truthy(self.request.query_params.get("include_empty")):
+            visible_category_relations = M3UVODCategoryRelation.objects.filter(
+                category_id=OuterRef("pk"),
+                **_vod_enabled_account_filters(),
+            )
+
+            return (
+                VODCategory.objects.annotate(
+                    has_visible_relations=Exists(visible_category_relations)
+                )
+                .filter(has_visible_relations=True)
+                .order_by("name")
+            )
+
+        enabled_movie_relations = M3UMovieRelation.objects.filter(
+            category_id=OuterRef("pk"),
+            category__category_type="movie",
+            **_vod_enabled_account_filters(),
+        ).annotate(
+            category_enabled=Exists(
+                M3UVODCategoryRelation.objects.filter(
+                    m3u_account_id=OuterRef("m3u_account_id"),
+                    category_id=OuterRef("category_id"),
+                    enabled=True,
+                )
+            )
+        ).filter(category_enabled=True)
+
+        enabled_series_relations = M3USeriesRelation.objects.filter(
+            category_id=OuterRef("pk"),
+            category__category_type="series",
+            **_vod_enabled_account_filters(),
+        ).annotate(
+            category_enabled=Exists(
+                M3UVODCategoryRelation.objects.filter(
+                    m3u_account_id=OuterRef("m3u_account_id"),
+                    category_id=OuterRef("category_id"),
+                    enabled=True,
+                )
+            )
+        ).filter(category_enabled=True)
+
         visible_category_relations = M3UVODCategoryRelation.objects.filter(
             category_id=OuterRef("pk"),
             **_vod_enabled_account_filters(),
         )
 
         return (
-            VODCategory.objects.annotate(has_visible_relations=Exists(visible_category_relations))
-            .filter(has_visible_relations=True)
+            VODCategory.objects.annotate(
+                has_visible_relations=Exists(visible_category_relations),
+                has_visible_movie_content=Exists(enabled_movie_relations),
+                has_visible_series_content=Exists(enabled_series_relations),
+            )
+            .filter(
+                has_visible_relations=True,
+            )
+            .filter(
+                Q(category_type="movie", has_visible_movie_content=True)
+                | Q(category_type="series", has_visible_series_content=True)
+            )
             .order_by("name")
         )
 

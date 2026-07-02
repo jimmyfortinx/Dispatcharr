@@ -500,11 +500,23 @@ describe('useVODStore', () => {
       await result.current.fetchCategories();
     });
 
-    expect(api.getVODCategories).toHaveBeenCalled();
+    expect(api.getVODCategories).toHaveBeenCalledWith({});
     expect(result.current.categories).toEqual({
       1: { id: 1, name: 'Action' },
       2: { id: 2, name: 'Comedy' },
     });
+  });
+
+  it('should pass fetch category options through to the API', async () => {
+    api.getVODCategories.mockResolvedValue([]);
+
+    const { result } = renderHook(() => useVODStore());
+
+    await act(async () => {
+      await result.current.fetchCategories({ includeEmpty: true });
+    });
+
+    expect(api.getVODCategories).toHaveBeenCalledWith({ includeEmpty: true });
   });
 
   it('should fetch categories successfully with paginated response', async () => {
