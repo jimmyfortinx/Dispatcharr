@@ -2935,9 +2935,6 @@ def xc_get_series_info(request, user, series_id):
 
 def xc_get_vod_info(request, user, vod_id):
     """Get detailed VOD (movie) information"""
-    from django.utils import timezone
-    from datetime import timedelta
-
     if not vod_id:
         raise Http404()
 
@@ -2971,11 +2968,9 @@ def xc_get_vod_info(request, user, vod_id):
 
     # Duplicate the provider_info logic for detailed information
     try:
-        # Check if we need to refresh detailed info (same logic as provider_info)
-        should_refresh = (
-            not movie_relation.last_advanced_refresh or
-            movie_relation.last_advanced_refresh < timezone.now() - timedelta(hours=24)
-        )
+        # Refresh only when the movie does not already have cached advanced metadata.
+        from apps.vod.tasks import movie_relation_has_cached_advanced_data
+        should_refresh = not movie_relation_has_cached_advanced_data(movie_relation)
 
         if should_refresh:
             # Trigger refresh of detailed info
@@ -2989,13 +2984,13 @@ def xc_get_vod_info(request, user, vod_id):
                 movie.name,
             )
 
-        # Add detailed info from custom_properties if available
-        if movie.custom_properties:
-            custom_data = movie.custom_properties or {}
+        # Add detailed info from stored movie/relation metadata if available
+        custom_data = movie.custom_properties or {}
+        relation_custom_data = movie_relation.custom_properties or {}
+        if custom_data or relation_custom_data:
 
             # Extract detailed info
-            #detailed_info = custom_data.get('detailed_info', {})
-            detailed_info = movie_relation.custom_properties.get('detailed_info', {})
+            detailed_info = relation_custom_data.get('detailed_info', {})
             # Update movie_data with detailed info
             movie_data.update({
                 'director': custom_data.get('director') or detailed_info.get('director', ''),

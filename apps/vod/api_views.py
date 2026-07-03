@@ -407,12 +407,8 @@ class MovieViewSet(viewsets.ReadOnlyModelViewSet):
             )
 
         force_refresh = request.query_params.get('force_refresh', 'false').lower() == 'true'
-        now = timezone.now()
-        needs_refresh = (
-            force_refresh or
-            not relation.last_advanced_refresh or
-            (now - relation.last_advanced_refresh).total_seconds() > 86400
-        )
+        from apps.vod.tasks import movie_relation_has_cached_advanced_data
+        needs_refresh = force_refresh or not movie_relation_has_cached_advanced_data(relation)
 
         if needs_refresh:
             # Trigger advanced data refresh

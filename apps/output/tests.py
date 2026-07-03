@@ -541,6 +541,34 @@ class OutputXtreamRelationSelectionTest(TestCase):
             str(self.fr_movie_category.id),
         )
 
+    @patch("apps.vod.tasks.refresh_movie_advanced_data")
+    def test_xc_get_vod_info_reuses_cached_movie_details_without_refresh(
+        self,
+        mock_refresh_movie_advanced_data,
+    ):
+        self.fr_movie_relation.custom_properties = {
+            "detailed_fetched": True,
+            "detailed_info": {
+                "name": "FR - Accused (2026)",
+                "plot": "Cached movie plot",
+                "director": "Cached Director",
+            },
+        }
+        self.fr_movie_relation.last_advanced_refresh = None
+        self.fr_movie_relation.save(update_fields=["custom_properties", "last_advanced_refresh"])
+
+        request = self.factory.get("/player_api.php")
+
+        response = xc_get_vod_info(
+            request,
+            user=None,
+            vod_id=self.fr_movie_relation.id,
+        )
+
+        mock_refresh_movie_advanced_data.assert_not_called()
+        self.assertEqual(response["info"]["plot"], "Cached movie plot")
+        self.assertEqual(response["info"]["director"], "Cached Director")
+
     def test_xc_movie_stream_redirects_with_selected_relation_stream(self):
         request = self.factory.get("/movie/xtream-user/secret/1.mp4")
 

@@ -4123,6 +4123,13 @@ def should_update_field(existing_value, new_value):
     return new_string is not None and (existing_string is None or not existing_string)
 
 
+def movie_relation_has_cached_advanced_data(relation):
+    custom_props = relation.custom_properties or {}
+    detailed_info = custom_props.get("detailed_info") or {}
+    detailed_fetched = bool(custom_props.get("detailed_fetched"))
+    return detailed_fetched and isinstance(detailed_info, dict) and bool(detailed_info)
+
+
 @shared_task
 def refresh_movie_advanced_data(m3u_movie_relation_id, force_refresh=False):
     """
@@ -4131,9 +4138,8 @@ def refresh_movie_advanced_data(m3u_movie_relation_id, force_refresh=False):
     """
     try:
         relation = M3UMovieRelation.objects.select_related('movie', 'm3u_account').get(id=m3u_movie_relation_id)
-        now = timezone.now()
-        if not force_refresh and relation.last_advanced_refresh and (now - relation.last_advanced_refresh).total_seconds() < 86400:
-            return "Advanced data recently fetched, skipping."
+        if not force_refresh and movie_relation_has_cached_advanced_data(relation):
+            return "Advanced data already cached, skipping."
 
         account = relation.m3u_account
         movie = relation.movie
