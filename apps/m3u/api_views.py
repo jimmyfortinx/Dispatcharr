@@ -38,7 +38,13 @@ from .serializers import (
     M3UAccountProfileSerializer,
 )
 
-from .tasks import refresh_single_m3u_account, refresh_m3u_accounts, refresh_account_info
+from .tasks import (
+    refresh_single_m3u_account,
+    refresh_m3u_accounts,
+    refresh_account_info,
+    mark_pending_group_settings_refresh,
+    request_group_settings_refresh_cancel,
+)
 import json
 from .stalker import StalkerClient, StalkerError
 
@@ -701,6 +707,12 @@ class M3UAccountViewSet(viewsets.ModelViewSet):
                         unique_fields=["m3u_account", "category"],
                         update_fields=["enabled", "custom_properties"],
                     )
+
+            if is_task_lock_held("refresh_single_m3u_account", account.id):
+                mark_pending_group_settings_refresh(account.id)
+                request_group_settings_refresh_cancel(account.id)
+            else:
+                refresh_single_m3u_account.delay(account.id)
 
             return Response({"message": "Group settings updated successfully"})
 

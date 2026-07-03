@@ -5,7 +5,14 @@ from django.test import TestCase
 from apps.channels.models import ChannelGroupM3UAccount
 from apps.m3u.models import M3UAccount
 from apps.m3u.stalker import StalkerAccountInfoResult, StalkerGenreDiscoveryResult
-from apps.m3u.tasks import refresh_m3u_groups, refresh_single_m3u_account
+from apps.m3u.tasks import (
+    consume_group_settings_refresh_cancel,
+    consume_pending_group_settings_refresh,
+    mark_pending_group_settings_refresh,
+    request_group_settings_refresh_cancel,
+    refresh_m3u_groups,
+    refresh_single_m3u_account,
+)
 
 
 class StalkerPhase2GroupDiscoveryTests(TestCase):
@@ -268,6 +275,164 @@ class StalkerPhase3GroupSettingsTests(TestCase):
         self.assertEqual(self.relation.auto_sync_channel_start, 101)
         self.assertEqual(self.relation.custom_properties["stalker_genre_id"], "10")
         self.assertEqual(self.relation.custom_properties["custom_epg_id"], 123)
+
+    @patch("apps.m3u.api_views.refresh_single_m3u_account.delay")
+    @patch("apps.m3u.api_views.is_task_lock_held", return_value=True)
+    def test_group_settings_update_marks_follow_up_refresh_when_refresh_running(
+        self,
+        _mock_lock_held,
+        mock_refresh_delay,
+    ):
+        response = self.client.patch(
+            f"/api/m3u/accounts/{self.account.id}/group-settings/",
+            {
+                "group_settings": [
+                    {
+                        "channel_group": self.group.id,
+                        "enabled": False,
+                        "auto_channel_sync": True,
+                    }
+                ],
+                "category_settings": [],
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.account.refresh_from_db()
+        self.assertTrue(
+            self.account.custom_properties.get("pending_group_settings_refresh")
+        )
+        self.assertTrue(
+            self.account.custom_properties.get("cancel_group_settings_refresh")
+        )
+        mock_refresh_delay.assert_not_called()
+
+    @patch("apps.m3u.api_views.refresh_single_m3u_account.delay")
+    @patch("apps.m3u.api_views.is_task_lock_held", return_value=False)
+    def test_group_settings_update_queues_refresh_when_idle(
+        self,
+        _mock_lock_held,
+        mock_refresh_delay,
+    ):
+        response = self.client.patch(
+            f"/api/m3u/accounts/{self.account.id}/group-settings/",
+            {
+                "group_settings": [
+                    {
+                        "channel_group": self.group.id,
+                        "enabled": False,
+                        "auto_channel_sync": True,
+                    }
+                ],
+                "category_settings": [],
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.account.refresh_from_db()
+        self.assertNotIn(
+            "pending_group_settings_refresh",
+            self.account.custom_properties,
+        )
+        mock_refresh_delay.assert_called_once_with(self.account.id)
+
+
+class StalkerPhase3RefreshRerunTests(TestCase):
+    def setUp(self):
+        self.account = M3UAccount.objects.create(
+            name="Stalker Rerun",
+            account_type=M3UAccount.Types.STALKER,
+            server_url="http://portal.example.com/c/",
+            custom_properties={"mac": "00:1A:79:00:00:31"},
+        )
+
+    @patch("apps.m3u.tasks.refresh_single_m3u_account.delay")
+    @patch("apps.m3u.tasks._release_task_db_connection")
+    @patch("apps.m3u.tasks.release_task_lock")
+    @patch("apps.m3u.tasks._ensure_m3u_refresh_terminal_status")
+    @patch("apps.m3u.tasks.TaskLockRenewer")
+    @patch("apps.m3u.tasks.acquire_task_lock", return_value=True)
+    @patch("apps.m3u.tasks._refresh_single_m3u_account_impl", return_value="ok")
+    def test_refresh_single_queues_follow_up_when_pending_flag_present(
+        self,
+        _mock_impl,
+        _mock_lock,
+        _mock_renewer_cls,
+        _mock_terminal_status,
+        mock_release,
+        mock_release_db,
+        mock_refresh_delay,
+    ):
+        mark_pending_group_settings_refresh(self.account.id)
+
+        result = refresh_single_m3u_account(self.account.id)
+
+        self.assertEqual(result, "ok")
+        self.account.refresh_from_db()
+        self.assertNotIn(
+            "pending_group_settings_refresh",
+            self.account.custom_properties,
+        )
+        self.assertGreaterEqual(mock_release_db.call_count, 1)
+        mock_release.assert_called_once_with(
+            "refresh_single_m3u_account",
+            self.account.id,
+        )
+        mock_refresh_delay.assert_called_once_with(self.account.id)
+
+    @patch("apps.m3u.tasks.refresh_single_m3u_account.delay")
+    @patch("apps.m3u.tasks._release_task_db_connection")
+    @patch("apps.m3u.tasks.release_task_lock")
+    @patch("apps.m3u.tasks._ensure_m3u_refresh_terminal_status")
+    @patch("apps.m3u.tasks.TaskLockRenewer")
+    @patch("apps.m3u.tasks.acquire_task_lock", return_value=True)
+    @patch(
+        "apps.m3u.tasks.refresh_m3u_groups",
+        return_value=([], {"News": {"stalker_genre_id": "10"}}),
+    )
+    def test_refresh_single_aborts_after_group_discovery_when_cancel_requested(
+        self,
+        _mock_refresh_groups,
+        _mock_lock,
+        _mock_renewer_cls,
+        _mock_terminal_status,
+        _mock_release_db,
+        _mock_release,
+        mock_refresh_delay,
+    ):
+        mark_pending_group_settings_refresh(self.account.id)
+        request_group_settings_refresh_cancel(self.account.id)
+
+        result = refresh_single_m3u_account(self.account.id)
+
+        self.assertIn("Refresh canceled due to group selection changes", result)
+        self.account.refresh_from_db()
+        self.assertEqual(self.account.status, M3UAccount.Status.IDLE)
+        self.assertNotIn(
+            "pending_group_settings_refresh",
+            self.account.custom_properties,
+        )
+        self.assertNotIn(
+            "cancel_group_settings_refresh",
+            self.account.custom_properties,
+        )
+        mock_refresh_delay.assert_called_once_with(self.account.id)
+
+    def test_consume_pending_group_settings_refresh_is_idempotent(self):
+        self.assertFalse(consume_pending_group_settings_refresh(self.account.id))
+
+        mark_pending_group_settings_refresh(self.account.id)
+        self.assertTrue(consume_pending_group_settings_refresh(self.account.id))
+        self.assertFalse(consume_pending_group_settings_refresh(self.account.id))
+
+    def test_consume_group_settings_refresh_cancel_is_idempotent(self):
+        self.assertFalse(consume_group_settings_refresh_cancel(self.account.id))
+
+        request_group_settings_refresh_cancel(self.account.id)
+        self.assertTrue(consume_group_settings_refresh_cancel(self.account.id))
+        self.assertFalse(consume_group_settings_refresh_cancel(self.account.id))
 
 
 from unittest.mock import patch

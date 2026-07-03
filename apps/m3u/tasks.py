@@ -38,6 +38,8 @@ _NON_TERMINAL_REFRESH_STATUSES = frozenset({
     M3UAccount.Status.FETCHING,
     M3UAccount.Status.PARSING,
 })
+_PENDING_GROUP_SETTINGS_REFRESH_FLAG = "pending_group_settings_refresh"
+_CANCEL_GROUP_SETTINGS_REFRESH_FLAG = "cancel_group_settings_refresh"
 
 
 def _release_task_db_connection():
@@ -77,6 +79,50 @@ def _get_active_m3u_account(account_id):
         lambda: M3UAccount.objects.get(id=account_id, is_active=True),
         label=f"load active M3U account {account_id}",
     )
+
+
+def mark_pending_group_settings_refresh(account_id):
+    """Record that a new account refresh should run after the current one finishes."""
+    account = M3UAccount.objects.only("id", "custom_properties").get(id=account_id)
+    custom_props = ensure_custom_properties_dict(account.custom_properties).copy()
+    if custom_props.get(_PENDING_GROUP_SETTINGS_REFRESH_FLAG):
+        return
+    custom_props[_PENDING_GROUP_SETTINGS_REFRESH_FLAG] = True
+    account.custom_properties = custom_props
+    account.save(update_fields=["custom_properties"])
+
+
+def request_group_settings_refresh_cancel(account_id):
+    """Ask an in-flight refresh to stop at the next safe checkpoint."""
+    account = M3UAccount.objects.only("id", "custom_properties").get(id=account_id)
+    custom_props = ensure_custom_properties_dict(account.custom_properties).copy()
+    if custom_props.get(_CANCEL_GROUP_SETTINGS_REFRESH_FLAG):
+        return
+    custom_props[_CANCEL_GROUP_SETTINGS_REFRESH_FLAG] = True
+    account.custom_properties = custom_props
+    account.save(update_fields=["custom_properties"])
+
+
+def consume_group_settings_refresh_cancel(account_id):
+    """Clear and return the cooperative cancel request flag."""
+    account = M3UAccount.objects.only("id", "custom_properties").get(id=account_id)
+    custom_props = ensure_custom_properties_dict(account.custom_properties).copy()
+    if not custom_props.pop(_CANCEL_GROUP_SETTINGS_REFRESH_FLAG, False):
+        return False
+    account.custom_properties = custom_props
+    account.save(update_fields=["custom_properties"])
+    return True
+
+
+def consume_pending_group_settings_refresh(account_id):
+    """Clear and return the pending post-refresh rerun flag."""
+    account = M3UAccount.objects.only("id", "custom_properties").get(id=account_id)
+    custom_props = ensure_custom_properties_dict(account.custom_properties).copy()
+    if not custom_props.pop(_PENDING_GROUP_SETTINGS_REFRESH_FLAG, False):
+        return False
+    account.custom_properties = custom_props
+    account.save(update_fields=["custom_properties"])
+    return True
 
 
 def _set_m3u_account_status(
@@ -131,6 +177,36 @@ def _ensure_m3u_refresh_terminal_status(account_id):
         logger.debug(
             f"Could not verify terminal refresh status for account {account_id}: {e}"
         )
+
+
+def _cancel_refresh_if_requested(account_id, *, progress=0, action="parsing"):
+    """Stop the current refresh cleanly when group settings changed mid-run."""
+    try:
+        should_cancel = consume_group_settings_refresh_cancel(account_id)
+    except M3UAccount.DoesNotExist:
+        return None
+
+    if not should_cancel:
+        return None
+
+    message = "Refresh canceled due to group selection changes. Restarting with updated settings."
+    logger.info(
+        "Canceling in-flight M3U refresh for account %s because group settings changed",
+        account_id,
+    )
+    _set_m3u_account_status(
+        account_id,
+        M3UAccount.Status.IDLE,
+        message,
+    )
+    send_m3u_update(
+        account_id,
+        action,
+        progress,
+        status="idle",
+        message=message,
+    )
+    return message
 
 _EXTINF_ATTR_RE = re.compile(r'([^\s=]+)\s*=\s*(["\'])(.*?)\2')
 
@@ -3561,6 +3637,24 @@ def refresh_single_m3u_account(account_id):
         _release_task_db_connection()
         lock_renewer.stop()
         release_task_lock("refresh_single_m3u_account", account_id)
+        try:
+            if consume_pending_group_settings_refresh(account_id):
+                logger.info(
+                    "Queueing follow-up M3U refresh for account %s after group settings changed mid-refresh",
+                    account_id,
+                )
+                refresh_single_m3u_account.delay(account_id)
+        except M3UAccount.DoesNotExist:
+            logger.debug(
+                "Skipping follow-up M3U refresh queue for deleted account %s",
+                account_id,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed to queue follow-up M3U refresh for account %s: %s",
+                account_id,
+                exc,
+            )
 
 
 def _refresh_single_m3u_account_impl(account_id):
@@ -3703,6 +3797,14 @@ def _refresh_single_m3u_account_impl(account_id):
             )
             return "Failed to update m3u account"
 
+    cancel_message = _cancel_refresh_if_requested(
+        account_id,
+        progress=0,
+        action="processing_groups",
+    )
+    if cancel_message:
+        return cancel_message
+
     # Only proceed with parsing if we actually have data and no errors were encountered
     # Get account type to handle XC accounts differently
     try:
@@ -3814,6 +3916,13 @@ def _refresh_single_m3u_account_impl(account_id):
                         )
 
                         logger.debug(f"Thread batch {completed_batches}/{total_batches} completed")
+
+                        cancel_message = _cancel_refresh_if_requested(
+                            account_id,
+                            progress=progress,
+                        )
+                        if cancel_message:
+                            return cancel_message
 
                     except Exception as e:
                         logger.error(f"Error in thread batch {batch_idx}: {str(e)}")
@@ -3928,6 +4037,13 @@ def _refresh_single_m3u_account_impl(account_id):
 
                             logger.debug(f"XC thread batch {completed_batches}/{total_batches} completed")
 
+                            cancel_message = _cancel_refresh_if_requested(
+                                account_id,
+                                progress=progress,
+                            )
+                            if cancel_message:
+                                return cancel_message
+
                         except Exception as e:
                             logger.error(f"Error in XC thread batch {batch_idx}: {str(e)}")
                             completed_batches += 1  # Still count it to avoid hanging
@@ -4031,6 +4147,13 @@ def _refresh_single_m3u_account_impl(account_id):
                                 time_remaining=time_remaining,
                                 streams_processed=streams_created + streams_updated,
                             )
+
+                            cancel_message = _cancel_refresh_if_requested(
+                                account_id,
+                                progress=progress,
+                            )
+                            if cancel_message:
+                                return cancel_message
                         except Exception as e:
                             logger.error(
                                 "Error in Stalker thread batch %s: %s",
@@ -4043,6 +4166,9 @@ def _refresh_single_m3u_account_impl(account_id):
         logger.info(
             f"All thread processing completed, ensuring DB transactions are committed before cleanup"
         )
+        cancel_message = _cancel_refresh_if_requested(account_id, progress=100)
+        if cancel_message:
+            return cancel_message
         # Force a simple DB query to ensure connection sync
         Stream.objects.filter(
             id=-1
