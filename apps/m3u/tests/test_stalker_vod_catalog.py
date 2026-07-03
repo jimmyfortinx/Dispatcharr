@@ -2009,6 +2009,14 @@ class StalkerPhase13SeriesImportTests(StalkerPhase13Base):
             "ffmpeg http://provider.example.com/ep1.mkv",
         )
         self.assertEqual(second_relation.custom_properties["stalker_episode_id"], "9002")
+        self.assertEqual(
+            self.series_relation.custom_properties["stalker_complete_through_season"],
+            2,
+        )
+        self.assertEqual(
+            self.series_relation.custom_properties["stalker_latest_complete_episode"],
+            1,
+        )
 
         mock_get_series_seasons.side_effect = [
             [
@@ -2066,12 +2074,49 @@ class StalkerPhase13SeriesImportTests(StalkerPhase13Base):
 
         updated_episode = Episode.objects.get(series=self.series, season_number=1, episode_number=1)
         updated_relation = M3UEpisodeRelation.objects.get(stream_id="9001")
-        self.assertEqual(updated_episode.name, "Episode 1 Updated")
-        self.assertEqual(updated_episode.description, "Pilot updated")
+        self.assertEqual(updated_episode.name, "Episode 1")
+        self.assertEqual(updated_episode.description, "Pilot")
         self.assertEqual(updated_relation.container_extension, "mkv")
         self.assertEqual(
             updated_relation.custom_properties["cmd"],
-            "ffmpeg http://provider.example.com/ep1-updated.mkv",
+            "ffmpeg http://provider.example.com/ep1.mkv",
+        )
+        mock_prepare_authenticated_session.assert_called()
+
+    @patch("apps.vod.tasks.StalkerClient.get_series_episodes")
+    @patch("apps.vod.tasks.StalkerClient.get_series_seasons")
+    @patch("apps.vod.tasks.StalkerClient.prepare_authenticated_session")
+    def test_refresh_series_episodes_resumes_after_last_complete_season(
+        self,
+        mock_prepare_authenticated_session,
+        mock_get_series_seasons,
+        mock_get_series_episodes,
+    ):
+        self.series_relation.custom_properties = {
+            **(self.series_relation.custom_properties or {}),
+            "stalker_complete_through_season": 1,
+            "stalker_latest_complete_episode": 1,
+        }
+        self.series_relation.save(update_fields=["custom_properties"])
+        mock_get_series_seasons.side_effect = self.get_series_seasons_side_effect
+        mock_get_series_episodes.side_effect = self.get_series_episodes_side_effect
+
+        refresh_series_episodes(
+            self.account,
+            self.series,
+            self.external_series_id,
+        )
+
+        self.series_relation.refresh_from_db()
+
+        requested_season_ids = [call.args[2] for call in mock_get_series_episodes.call_args_list]
+        self.assertTrue(requested_season_ids)
+        self.assertTrue(all(season_id in {"2", "5002"} for season_id in requested_season_ids))
+        self.assertNotIn("1", requested_season_ids)
+        self.assertNotIn("5001", requested_season_ids)
+        self.assertEqual(
+            self.series_relation.custom_properties["stalker_complete_through_season"],
+            2,
         )
         mock_prepare_authenticated_session.assert_called()
 

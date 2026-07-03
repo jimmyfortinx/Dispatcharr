@@ -2854,6 +2854,54 @@ def update_series_from_detail_payload(series, detail_data):
         series.save()
 
 
+def get_stalker_series_refresh_progress(series_relation):
+    custom_props = dict(series_relation.custom_properties or {})
+
+    complete_through_season = extract_int_from_value(
+        custom_props.get("stalker_complete_through_season")
+    )
+    if complete_through_season is None or complete_through_season < 0:
+        complete_through_season = 0
+
+    latest_complete_episode = extract_int_from_value(
+        custom_props.get("stalker_latest_complete_episode")
+    )
+    if latest_complete_episode is None or latest_complete_episode < 0:
+        latest_complete_episode = 0
+
+    return {
+        "complete_through_season": complete_through_season,
+        "latest_complete_episode": latest_complete_episode,
+    }
+
+
+def build_stalker_series_refresh_progress(season_episode_numbers):
+    complete_through_season = 0
+    latest_complete_episode = 0
+
+    for season_number in sorted(number for number in season_episode_numbers if number > 0):
+        episode_numbers = sorted(set(season_episode_numbers.get(season_number) or []))
+        if not episode_numbers:
+            break
+
+        expected_episode = 1
+        for episode_number in episode_numbers:
+            if episode_number != expected_episode:
+                return {
+                    "complete_through_season": complete_through_season,
+                    "latest_complete_episode": latest_complete_episode,
+                }
+            expected_episode += 1
+
+        complete_through_season = season_number
+        latest_complete_episode = episode_numbers[-1]
+
+    return {
+        "complete_through_season": complete_through_season,
+        "latest_complete_episode": latest_complete_episode,
+    }
+
+
 def refresh_stalker_series_episodes(account, series_relation):
     client = StalkerClient(
         server_url=account.server_url,
@@ -2887,6 +2935,8 @@ def refresh_stalker_series_episodes(account, series_relation):
     detail_data = build_stalker_series_detail_data(series_relation, season_items)
     episodes_data = {}
     prefer_embedded_episode_rows = {"value": False}
+    previous_progress = get_stalker_series_refresh_progress(series_relation)
+    season_episode_numbers = {}
 
     season_jobs = [
         (season_index, season_item)
@@ -2900,6 +2950,13 @@ def refresh_stalker_series_episodes(account, series_relation):
             return None
 
         season_number = extract_stalker_season_number(season_item, fallback=season_index)
+        if season_number > 0 and season_number <= previous_progress["complete_through_season"]:
+            logger.debug(
+                "Skipping Stalker season refresh for series %s season %s because it is already marked complete",
+                series_relation.external_series_id,
+                season_number,
+            )
+            return None
         embedded_episode_rows = build_stalker_embedded_episode_rows(
             season_item,
             season_relation_id=season_id,
@@ -3009,8 +3066,31 @@ def refresh_stalker_series_episodes(account, series_relation):
             continue
         season_number, normalized_episodes = season_result
         episodes_data.setdefault(str(season_number), []).extend(normalized_episodes)
+        if season_number > 0:
+            season_episode_numbers.setdefault(season_number, [])
+            season_episode_numbers[season_number].extend(
+                [
+                    extract_int_from_value(episode.get("episode_num"))
+                    for episode in normalized_episodes
+                    if extract_int_from_value(episode.get("episode_num")) is not None
+                ]
+            )
 
-    return detail_data, episodes_data
+    refresh_progress = build_stalker_series_refresh_progress(season_episode_numbers)
+    refresh_progress["complete_through_season"] = max(
+        previous_progress["complete_through_season"],
+        refresh_progress["complete_through_season"],
+    )
+    if (
+        refresh_progress["complete_through_season"]
+        == previous_progress["complete_through_season"]
+    ):
+        refresh_progress["latest_complete_episode"] = max(
+            previous_progress["latest_complete_episode"],
+            refresh_progress["latest_complete_episode"],
+        )
+
+    return detail_data, episodes_data, refresh_progress
 
 
 def build_episode_relation_custom_properties(
@@ -3105,6 +3185,7 @@ def refresh_series_episodes(
             )
             return
         detail_data = None
+        refresh_progress = None
 
         if not episodes_data:
             if account.account_type == M3UAccount.Types.STALKER:
@@ -3112,7 +3193,7 @@ def refresh_series_episodes(
                     raise ValueError(
                         f"Missing Stalker series relation for external_series_id={external_series_id}"
                     )
-                detail_data, episodes_data = refresh_stalker_series_episodes(
+                detail_data, episodes_data, refresh_progress = refresh_stalker_series_episodes(
                     account,
                     series_relation,
                 )
@@ -3146,6 +3227,13 @@ def refresh_series_episodes(
             custom_props = dict(series_relation.custom_properties or {})
             if detail_data:
                 custom_props['detail_data'] = detail_data
+            if refresh_progress:
+                custom_props["stalker_complete_through_season"] = refresh_progress[
+                    "complete_through_season"
+                ]
+                custom_props["stalker_latest_complete_episode"] = refresh_progress[
+                    "latest_complete_episode"
+                ]
             custom_props['episodes_fetched'] = True
             custom_props['detailed_fetched'] = True
             series_relation.custom_properties = custom_props
