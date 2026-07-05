@@ -895,7 +895,16 @@ class StalkerClient:
         if force:
             self._prepared_portal_url = None
         self.prepare_authenticated_session(portal_url)
-        self.watchdog_update(portal_url)
+        try:
+            self.watchdog_update(portal_url)
+        except StalkerError as exc:
+            if not self._should_ignore_watchdog_error(exc):
+                raise
+            logger.info(
+                "Skipping non-critical Stalker watchdog update for %s: %s",
+                portal_url,
+                exc,
+            )
 
     def prepare_vod_playback_session(self, portal_url, force=False):
         if force:
@@ -957,8 +966,37 @@ class StalkerClient:
             "forbidden",
             "unauthorized",
             "access denied",
+            "timed out",
+            "timeout",
+            "connection aborted",
+            "connection reset",
+            "temporarily unavailable",
+            "ssl",
+            "unexpected eof while reading",
+            "eof occurred in violation",
         )
         return any(marker in message for marker in retry_markers)
+
+    def _should_ignore_watchdog_error(self, exc):
+        message = str(exc).lower()
+        ignore_markers = (
+            "404",
+            "405",
+            "501",
+            "not found",
+            "method not allowed",
+            "watchdog",
+            "get_events",
+            "timed out",
+            "timeout",
+            "connection aborted",
+            "connection reset",
+            "temporarily unavailable",
+            "ssl",
+            "unexpected eof while reading",
+            "eof occurred in violation",
+        )
+        return any(marker in message for marker in ignore_markers)
 
     def get_fresh_channel_cmd(self, portal_url, channel_metadata):
         target_channel_id = str(

@@ -10,7 +10,7 @@ from apps.m3u.stalker import (
     StalkerError,
     StalkerRecoverableError,
 )
-from apps.proxy.ts_proxy.url_utils import generate_stream_url, resolve_live_stream_url
+from apps.proxy.live_proxy.url_utils import generate_stream_url, resolve_live_stream_url
 from core.models import PROXY_PROFILE_NAME, StreamProfile, UserAgent
 
 
@@ -69,7 +69,7 @@ class StalkerPhase5PreviewTests(TestCase):
             stream_hash="standard-stream-hash",
         )
 
-        with patch("apps.proxy.ts_proxy.url_utils.StalkerClient.create_link") as mock_create_link:
+        with patch("apps.proxy.live_proxy.url_utils.StalkerClient.create_link") as mock_create_link:
             self.assertEqual(
                 resolve_live_stream_url(stream),
                 "http://playlist.example.com/live/standard.ts",
@@ -91,12 +91,12 @@ class StalkerPhase5PreviewTests(TestCase):
             return "http://resolved.example.com/live/world-news"
 
         with patch.object(Stream, "get_stream", return_value=(self.stream.id, self.account_profile.id, None)), patch(
-            "apps.proxy.ts_proxy.url_utils.M3UAccountProfile.objects.get",
+            "apps.proxy.live_proxy.url_utils.M3UAccountProfile.objects.get",
             return_value=self.account_profile,
         ), patch.object(
             Stream, "get_stream_profile", return_value=self.proxy_profile
         ), patch(
-            "apps.proxy.ts_proxy.url_utils.StalkerClient.resolve_playback_url",
+            "apps.proxy.live_proxy.url_utils.StalkerClient.resolve_playback_url",
             autospec=True,
             side_effect=fake_resolve_playback_url,
         ):
@@ -297,6 +297,55 @@ class StalkerPhase5PreviewTests(TestCase):
             "stale",
         )
 
+    def test_prepare_playback_session_ignores_non_critical_watchdog_failures(self):
+        client = StalkerClient(
+            server_url="http://portal.example.com/stalker_portal/portal.php",
+            mac="00:1A:79:00:00:40",
+        )
+
+        with patch.object(
+            client,
+            "prepare_authenticated_session",
+        ) as mock_prepare, patch.object(
+            client,
+            "watchdog_update",
+            side_effect=StalkerError(
+                "Request failed: 404 Client Error: Not Found for url: http://portal.example.com/stalker_portal/portal.php?action=get_events"
+            ),
+        ) as mock_watchdog:
+            client.prepare_playback_session(
+                "http://portal.example.com/stalker_portal/portal.php"
+            )
+
+        mock_prepare.assert_called_once_with(
+            "http://portal.example.com/stalker_portal/portal.php"
+        )
+        mock_watchdog.assert_called_once_with(
+            "http://portal.example.com/stalker_portal/portal.php"
+        )
+
+    def test_prepare_playback_session_still_fails_for_non_watchdog_errors(self):
+        client = StalkerClient(
+            server_url="http://portal.example.com/stalker_portal/portal.php",
+            mac="00:1A:79:00:00:40",
+        )
+
+        with patch.object(
+            client,
+            "prepare_authenticated_session",
+        ), patch.object(
+            client,
+            "watchdog_update",
+            side_effect=StalkerError("Request failed: 500 Server Error"),
+        ):
+            with self.assertRaisesMessage(
+                StalkerError,
+                "Request failed: 500 Server Error",
+            ):
+                client.prepare_playback_session(
+                    "http://portal.example.com/stalker_portal/portal.php"
+                )
+
     def test_prepare_authenticated_session_does_not_fallback_without_device_ids(self):
         client = StalkerClient(
             server_url="http://portal.example.com/stalker_portal/portal.php",
@@ -474,7 +523,7 @@ from django.test import TestCase
 from apps.channels.models import Stream
 from apps.m3u.models import M3UAccount
 from apps.m3u.stalker import StalkerClient, StalkerError, StalkerRecoverableError
-from apps.proxy.ts_proxy.url_utils import resolve_live_stream_url
+from apps.proxy.live_proxy.url_utils import resolve_live_stream_url
 
 
 class StalkerPhase6ResolverHardeningTests(TestCase):
@@ -621,6 +670,42 @@ class StalkerPhase6ResolverHardeningTests(TestCase):
         mock_prepare.assert_called_once()
         mock_get_fresh_cmd.assert_not_called()
         mock_create_link.assert_called_once()
+
+    def test_resolve_playback_url_retries_transient_transport_failures_once(self):
+        client = StalkerClient(
+            server_url=self.account.server_url,
+            mac="00:1A:79:00:00:40",
+            username=self.account.username,
+            password=self.account.password,
+            custom_properties={"token": "OLD-TOKEN"},
+        )
+
+        with patch.object(client, "prepare_playback_session") as mock_prepare, patch.object(
+            client,
+            "get_fresh_channel_cmd",
+            return_value="ffmpeg http://upstream.example.com/live/world-news",
+        ) as mock_get_fresh_cmd, patch.object(
+            client,
+            "create_link",
+            side_effect=[
+                StalkerError(
+                    "Request failed: HTTPSConnectionPool(host='portal.example.com', port=443): Read timed out."
+                ),
+                "http://resolved.example.com/live/world-news",
+            ],
+        ) as mock_create_link:
+            resolved = client.resolve_playback_url(
+                "http://portal.example.com/stalker_portal/server/load.php",
+                self.stream.custom_properties,
+            )
+
+        self.assertEqual(
+            resolved,
+            "http://resolved.example.com/live/world-news",
+        )
+        self.assertEqual(mock_prepare.call_count, 2)
+        mock_get_fresh_cmd.assert_not_called()
+        self.assertEqual(mock_create_link.call_count, 2)
 
     def test_resolve_playback_url_refreshes_cmd_before_retrying_session(self):
         client = StalkerClient(
