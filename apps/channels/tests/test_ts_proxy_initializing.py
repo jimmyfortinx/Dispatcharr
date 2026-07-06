@@ -259,10 +259,10 @@ class ConnectionReadyThresholdTests(TestCase):
         redis.get.side_effect = get_side_effect
 
         with patch(
-            "apps.proxy.ts_proxy.stream_manager.ConfigHelper.connection_ready_chunks",
+            "apps.proxy.live_proxy.input.manager.ConfigHelper.connection_ready_chunks",
             return_value=1,
         ), patch(
-            "apps.proxy.ts_proxy.stream_manager.ConfigHelper.initial_behind_chunks",
+            "apps.proxy.live_proxy.input.manager.ConfigHelper.initial_behind_chunks",
             return_value=4,
         ):
             result = sm._set_waiting_for_clients()
@@ -277,3 +277,58 @@ class ConnectionReadyThresholdTests(TestCase):
                 ChannelMetadataField.BUFFER_CHUNKS: "1",
             },
         )
+
+
+class StreamManagerFastReconnectTests(TestCase):
+    def _make_manager(self):
+        sm = StreamManager.__new__(StreamManager)
+        sm.channel_id = CHANNEL_ID
+        sm.running = True
+        sm.connected = True
+        sm.stop_requested = False
+        sm.needs_stream_switch = False
+        sm.needs_reconnect = False
+        sm.url_switching = False
+        sm.consecutive_read_timeouts = 2
+        sm.fast_reconnect_timeout_threshold = 2
+        sm.last_data_time = 120.0
+        sm.connection_start_time = 100.0
+        sm.last_transport_failure = {"reason": "chunk_read_timeout"}
+        sm.buffer = MagicMock()
+        sm.buffer.redis_client = None
+        sm._close_socket = MagicMock()
+        sm._record_transport_failure = MagicMock()
+        sm._log_reconnect_diagnostics = MagicMock()
+        return sm
+
+    def test_should_trigger_fast_reconnect_for_stable_timeout_series(self):
+        sm = self._make_manager()
+
+        with patch(
+            "apps.proxy.live_proxy.input.manager.ConfigHelper.min_stable_time_before_reconnect",
+            return_value=10,
+        ):
+            self.assertTrue(sm._should_trigger_fast_reconnect())
+
+    def test_should_not_trigger_fast_reconnect_before_stable_threshold(self):
+        sm = self._make_manager()
+        sm.connection_start_time = 115.0
+
+        with patch(
+            "apps.proxy.live_proxy.input.manager.ConfigHelper.min_stable_time_before_reconnect",
+            return_value=10,
+        ):
+            self.assertFalse(sm._should_trigger_fast_reconnect())
+
+    def test_process_stream_data_requests_fast_reconnect_after_consecutive_timeouts(self):
+        sm = self._make_manager()
+        sm.fetch_chunk = MagicMock(side_effect=[False])
+
+        with patch(
+            "apps.proxy.live_proxy.input.manager.ConfigHelper.min_stable_time_before_reconnect",
+            return_value=10,
+        ):
+            sm._process_stream_data()
+
+        self.assertTrue(sm.needs_reconnect)
+        sm._close_socket.assert_called_once()

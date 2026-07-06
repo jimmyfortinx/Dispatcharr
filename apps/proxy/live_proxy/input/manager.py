@@ -142,6 +142,10 @@ class StreamManager:
         self.last_transport_failure = None
         self.last_transport_failure_at = None
         self.recent_stderr_lines = deque(maxlen=20)
+        self.consecutive_read_timeouts = 0
+        self.fast_reconnect_timeout_threshold = ConfigHelper.get(
+            'CONSECUTIVE_TIMEOUTS_BEFORE_RECONNECT', 2
+        )
 
         # Output bitrate smoothing / throttled DB persistence
         self._smoothed_output_bitrate = None
@@ -1410,9 +1414,31 @@ class StreamManager:
             while self.running and self.connected and not self.stop_requested and not self.needs_stream_switch:
                 if self.fetch_chunk():
                     self.last_data_time = time.time()
+                    self.consecutive_read_timeouts = 0
                 else:
                     # fetch_chunk() returned False - could be timeout, no data, or error
                     if not self.running:
+                        break
+                    if self._should_trigger_fast_reconnect():
+                        self._record_transport_failure(
+                            "consecutive_read_timeouts",
+                            consecutive_read_timeouts=self.consecutive_read_timeouts,
+                            stable_time=round(self._stable_connection_time(), 3),
+                            timeout_threshold=self.fast_reconnect_timeout_threshold,
+                        )
+                        self._log_reconnect_diagnostics(
+                            "fast_reconnect_after_timeouts",
+                            level="info",
+                            consecutive_read_timeouts=self.consecutive_read_timeouts,
+                            stable_time=round(self._stable_connection_time(), 3),
+                            timeout_threshold=self.fast_reconnect_timeout_threshold,
+                        )
+                        logger.info(
+                            f"Fast reconnect triggered after {self.consecutive_read_timeouts} "
+                            f"consecutive read timeouts for channel {self.channel_id}"
+                        )
+                        self.needs_reconnect = True
+                        self._close_socket()
                         break
                     # Brief sleep before retry to avoid tight loop
                     gevent.sleep(0.1)
@@ -1421,6 +1447,26 @@ class StreamManager:
 
         # If we exit the loop, connection is closed or failed
         self.connected = False
+
+    def _stable_connection_time(self):
+        connection_start_time = getattr(self, 'connection_start_time', 0) or 0
+        if connection_start_time <= 0:
+            return 0.0
+        return max(0.0, self.last_data_time - connection_start_time)
+
+    def _should_trigger_fast_reconnect(self):
+        if not self.connected or self.stop_requested or self.url_switching:
+            return False
+
+        failure_reason = ((self.last_transport_failure or {}).get("reason") or "").lower()
+        if failure_reason not in {"chunk_read_timeout", "socket_timeout"}:
+            return False
+
+        if self.consecutive_read_timeouts < self.fast_reconnect_timeout_threshold:
+            return False
+
+        stable_time = self._stable_connection_time()
+        return stable_time >= ConfigHelper.min_stable_time_before_reconnect()
 
     def _transport_shutdown_expected(self):
         """Return True when read errors are a normal side effect of shutdown."""
@@ -2061,9 +2107,11 @@ class StreamManager:
 
                     if not ready:
                         logger.debug(f"Chunk read timeout ({chunk_timeout}s) for channel {self.channel_id}")
+                        self.consecutive_read_timeouts += 1
                         self._record_transport_failure(
                             "chunk_read_timeout",
                             chunk_timeout=chunk_timeout,
+                            consecutive_read_timeouts=self.consecutive_read_timeouts,
                         )
                         return False
 
@@ -2081,9 +2129,11 @@ class StreamManager:
             except socket.timeout:
                 # Socket timeout occurred
                 logger.debug(f"Socket timeout ({chunk_timeout}s) for channel {self.channel_id}")
+                self.consecutive_read_timeouts += 1
                 self._record_transport_failure(
                     "socket_timeout",
                     chunk_timeout=chunk_timeout,
+                    consecutive_read_timeouts=self.consecutive_read_timeouts,
                 )
                 return False
 
@@ -2121,6 +2171,8 @@ class StreamManager:
 
             # Add directly to buffer without TS-specific processing
             success = self.buffer.add_chunk(chunk)
+            if success:
+                self.consecutive_read_timeouts = 0
 
             if success and hasattr(self.buffer, 'redis_client') and self.buffer.redis_client:
                 last_data_key = RedisKeys.last_data(self.buffer.channel_id)
