@@ -247,6 +247,7 @@ jobs:
           file: ./docker/Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
+          provenance: false
           cache-from: type=gha,scope=dispatcharr-app
           cache-to: type=gha,mode=max,scope=dispatcharr-app
           build-args: |
@@ -255,12 +256,38 @@ jobs:
             REPO_URL=https://github.com/${{ github.repository }}
             TIMESTAMP=${{ needs.prepare.outputs.timestamp }}
           tags: |
-            ghcr.io/${{ needs.prepare.outputs.repo_owner }}/${{ needs.prepare.outputs.repo_name }}:${{ needs.prepare.outputs.branch_tag }}
-            ghcr.io/${{ needs.prepare.outputs.repo_owner }}/${{ needs.prepare.outputs.repo_name }}:${{ needs.prepare.outputs.version }}-${{ needs.prepare.outputs.timestamp }}
-            ghcr.io/${{ needs.prepare.outputs.repo_owner }}/${{ needs.prepare.outputs.repo_name }}:sha-${{ needs.prepare.outputs.sha_short }}
+            ghcr.io/${{ needs.prepare.outputs.repo_owner }}/${{ needs.prepare.outputs.repo_name }}:dev
           labels: |
             org.opencontainers.image.title=${{ needs.prepare.outputs.repo_name }}
             org.opencontainers.image.description=Dispatcharr fork development image.
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ needs.prepare.outputs.commit_sha }}
             org.opencontainers.image.version=${{ needs.prepare.outputs.version }}-${{ needs.prepare.outputs.timestamp }}
+
+      - name: Keep only the current multi-platform image
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const versions = await github.paginate(
+              github.rest.packages.getAllPackageVersionsForPackageOwnedByUser,
+              {
+                package_type: 'container',
+                package_name: context.repo.repo.toLowerCase(),
+                username: context.repo.owner,
+                per_page: 100,
+              },
+            );
+
+            // A two-platform image without provenance contains one index and
+            // two platform manifests. Keep that complete three-version group.
+            const staleVersions = versions
+              .sort((left, right) => new Date(right.created_at) - new Date(left.created_at))
+              .slice(3);
+
+            for (const version of staleVersions) {
+              await github.rest.packages.deletePackageVersionForAuthenticatedUser({
+                package_type: 'container',
+                package_name: context.repo.repo.toLowerCase(),
+                package_version_id: version.id,
+              });
+            }
