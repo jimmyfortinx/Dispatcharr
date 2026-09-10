@@ -90,9 +90,25 @@ class ConfigHelper:
         """Get stable time required to reset reconnect budget."""
         return Config.get_min_stable_time_before_reconnect()
 
+    @staticmethod
+    def retry_window_seconds():
+        """Reset the retry counter after this many seconds without a failure."""
+        return ConfigHelper.get('RETRY_WINDOW_SECONDS', 1800)
+
+    @staticmethod
+    def stable_connection_threshold():
+        """Seconds of stable playback before switch rotation state resets."""
+        return ConfigHelper.get('STABLE_CONNECTION_THRESHOLD', 30)
+
+    @staticmethod
     def max_stream_switches():
         """Get maximum number of stream switch attempts"""
         return ConfigHelper.get('MAX_STREAM_SWITCHES', 10)
+
+    @staticmethod
+    def failover_rotation_cooldown():
+        """Seconds to wait after exhausting all streams before wrapping rotation."""
+        return ConfigHelper.get('FAILOVER_ROTATION_COOLDOWN', 60)
 
     @staticmethod
     def retry_wait_interval():

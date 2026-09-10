@@ -214,11 +214,12 @@ class DoStatsUpdateTests(TestCase):
         """_do_stats_update must call send_websocket_update with channel_stats."""
         cm = self._make_client_manager()
 
-        mock_redis = MagicMock()
-        mock_redis.scan.return_value = (0, [])
-
         with patch("apps.proxy.live_proxy.client_manager.send_websocket_update") as mock_ws, \
-             patch("core.utils.RedisClient.get_client", return_value=mock_redis):
+             patch(
+                 "apps.proxy.live_proxy.channel_status.build_live_channel_stats_data",
+                 return_value={"channels": [], "count": 0},
+             ), \
+             patch("core.utils.RedisClient.get_client", return_value=MagicMock()):
             cm._do_stats_update()
 
         mock_ws.assert_called_once()
@@ -237,19 +238,20 @@ class DoStatsUpdateTests(TestCase):
             except Exception as e:
                 self.fail(f"_do_stats_update raised an exception: {e}")
 
-    def test_do_stats_update_scans_channel_metadata_keys(self):
-        """Must scan for live:channel:*:metadata pattern."""
+    def test_do_stats_update_uses_build_live_channel_stats_data(self):
+        """Must build live stats via the shared builder."""
         cm = self._make_client_manager()
-
         mock_redis = MagicMock()
-        mock_redis.scan.return_value = (0, [])
 
         with patch("apps.proxy.live_proxy.client_manager.send_websocket_update"), \
+             patch(
+                 "apps.proxy.live_proxy.channel_status.build_live_channel_stats_data",
+                 return_value={"channels": [{"channel_id": "ch-1"}], "count": 1},
+             ) as mock_build, \
              patch("core.utils.RedisClient.get_client", return_value=mock_redis):
             cm._do_stats_update()
 
-        scan_call = mock_redis.scan.call_args
-        self.assertIn("live:channel:*:metadata", str(scan_call))
+        mock_build.assert_called_once_with(mock_redis)
 
 
 # ---------------------------------------------------------------------------
@@ -298,7 +300,7 @@ class ClientRemoveIntegrationTests(TestCase):
 
     def test_stream_generator_cleanup_does_not_schedule_owner_shutdown(self):
         """StreamGenerator cleanup should leave shutdown decisions to ClientManager/ProxyServer."""
-        from apps.proxy.ts_proxy.stream_generator import StreamGenerator
+        from apps.proxy.live_proxy.output.ts.generator import StreamGenerator
 
         gen = StreamGenerator.__new__(StreamGenerator)
         gen.channel_id = "00000000-0000-0000-0000-000000000006"
@@ -319,15 +321,15 @@ class ClientRemoveIntegrationTests(TestCase):
         channel_obj.name = "Cleanup Test"
 
         with patch(
-            "apps.proxy.ts_proxy.stream_generator.ProxyServer.get_instance",
+            "apps.proxy.live_proxy.output.ts.generator.ProxyServer.get_instance",
             return_value=proxy_server,
         ), patch(
-            "apps.proxy.ts_proxy.stream_generator.Channel.objects.get",
+            "apps.proxy.live_proxy.output.ts.generator.Channel.objects.get",
             return_value=channel_obj,
         ), patch(
-            "apps.proxy.ts_proxy.stream_generator.log_system_event",
+            "apps.proxy.live_proxy.output.ts.generator.log_system_event",
         ), patch(
-            "apps.proxy.ts_proxy.stream_generator.gevent.spawn",
+            "apps.proxy.live_proxy.output.ts.generator.gevent.spawn",
         ) as mock_spawn:
             gen._cleanup()
 

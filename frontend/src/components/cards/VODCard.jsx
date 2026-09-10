@@ -14,12 +14,12 @@ import React from 'react';
 import {
   formatDuration,
   getSeasonLabel,
+  vodLogoSrc,
 } from '../../utils/cards/VODCardUtils.js';
-import { getVODImageSrc } from '../../utils/vodImages.js';
 
 const VODCard = ({ vod, onClick }) => {
   const isEpisode = vod.type === 'episode';
-  const posterSrc = getVODImageSrc(vod.logo);
+  const posterSrc = vodLogoSrc(vod.logo);
 
   const getDisplayTitle = () => {
     if (isEpisode && vod.series) {

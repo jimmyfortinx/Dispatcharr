@@ -7,14 +7,14 @@ from rest_framework.test import APIRequestFactory, force_authenticate
 from apps.channels.models import Channel, Stream
 from apps.accounts.models import User
 from apps.m3u.models import M3UAccount, M3UAccountProfile
-from apps.proxy.ts_proxy.constants import ChannelMetadataField
-from apps.proxy.ts_proxy.redis_keys import RedisKeys
-from apps.proxy.ts_proxy.server import ProxyServer
-from apps.proxy.ts_proxy.services.channel_service import ChannelService
-from apps.proxy.ts_proxy.stream_buffer import StreamBuffer
-from apps.proxy.ts_proxy.stream_manager import StreamManager
-from apps.proxy.ts_proxy.url_utils import get_stream_info_for_switch
-from apps.proxy.ts_proxy.views import change_stream
+from apps.proxy.live_proxy.constants import ChannelMetadataField
+from apps.proxy.live_proxy.redis_keys import RedisKeys
+from apps.proxy.live_proxy.server import ProxyServer
+from apps.proxy.live_proxy.services.channel_service import ChannelService
+from apps.proxy.live_proxy.input.buffer import StreamBuffer
+from apps.proxy.live_proxy.input.manager import StreamManager
+from apps.proxy.live_proxy.url_utils import get_stream_info_for_switch
+from apps.proxy.live_proxy.views import change_stream
 from core.models import PROXY_PROFILE_NAME, StreamProfile, UserAgent
 
 
@@ -121,8 +121,35 @@ class _FakeRedis:
         return _FakePipeline(self)
 
 
+def _patch_connection_release(testcase):
+    """Keep proxy code from returning the TestCase's DB connection to the pool.
+
+    The live proxy calls close_old_connections() to release its geventpool
+    checkout; inside a TestCase that closes the connection the surrounding
+    atomic block still needs.
+    """
+    for target in (
+        "apps.proxy.live_proxy.services.channel_service.close_old_connections",
+        "apps.proxy.live_proxy.views.close_old_connections",
+        "apps.proxy.live_proxy.url_utils.close_old_connections",
+        "apps.proxy.live_proxy.channel_status.close_old_connections",
+        "apps.proxy.live_proxy.input.manager.close_old_connections",
+        "apps.proxy.live_proxy.output.ts.generator.close_old_connections",
+        "apps.proxy.live_proxy.output.fmp4.generator.close_old_connections",
+        "apps.proxy.live_proxy.server.close_old_connections",
+        "apps.channels.tasks.close_old_connections",
+        # Worker teardown paths close the thread connection directly.
+        "django.db.connection.close",
+        "django.db.connections.close_all",
+    ):
+        patcher = patch(target)
+        patcher.start()
+        testcase.addCleanup(patcher.stop)
+
+
 class TsProxyStalkerReconnectTests(TestCase):
     def setUp(self):
+        _patch_connection_release(self)
         self.factory = APIRequestFactory()
         self.admin = User.objects.create_superuser(
             username="admin",
@@ -195,13 +222,13 @@ class TsProxyStalkerReconnectTests(TestCase):
         ), patch.object(
             Stream,
             "get_stream",
-            return_value=(self.stream.id, self.account_profile.id, None),
+            return_value=(self.stream.id, self.account_profile.id, None, True),
         ), patch.object(
             Stream,
             "get_stream_profile",
             return_value=self.proxy_profile,
         ), patch(
-            "apps.proxy.ts_proxy.url_utils._resolve_live_stream_context",
+            "apps.proxy.live_proxy.url_utils._resolve_live_stream_context",
             return_value={
                 "url": "http://resolved.example.com/live/world-news",
                 "user_agent": "DispatcharrTest/1.0",
@@ -233,7 +260,7 @@ class TsProxyStalkerReconnectTests(TestCase):
         manager.buffer.redis_client = MagicMock()
 
         with patch(
-            "apps.proxy.ts_proxy.stream_manager.get_stream_info_for_switch",
+            "apps.proxy.live_proxy.input.manager.get_stream_info_for_switch",
             return_value={
                 "url": "http://resolved.example.com/live/world-news-hd",
                 "user_agent": "DispatcharrTest/2.0",
@@ -276,13 +303,13 @@ class TsProxyStalkerReconnectTests(TestCase):
         proxy_server.stream_managers = {}
 
         with patch(
-            "apps.proxy.ts_proxy.views.ProxyServer.get_instance",
+            "apps.proxy.live_proxy.views.ProxyServer.get_instance",
             return_value=proxy_server,
         ), patch(
-            "apps.proxy.ts_proxy.views.get_stream_info_for_switch",
+            "apps.proxy.live_proxy.views.get_stream_info_for_switch",
             return_value=self.switch_context,
         ), patch(
-            "apps.proxy.ts_proxy.views.ChannelService.change_stream_url",
+            "apps.proxy.live_proxy.views.ChannelService.change_stream_url",
             return_value={"status": "success", "direct_update": False},
         ) as mock_change_stream:
             response = change_stream(request, self.stream.stream_hash)
@@ -295,6 +322,7 @@ class TsProxyStalkerReconnectTests(TestCase):
             self.stream.id,
             self.account_profile.id,
             self.switch_context["input_headers"],
+            stream_name=None,
         )
 
     def test_change_stream_url_backfills_missing_runtime_context_for_target_stream(self):
@@ -309,10 +337,10 @@ class TsProxyStalkerReconnectTests(TestCase):
         proxy_server.am_i_owner.return_value = True
 
         with patch(
-            "apps.proxy.ts_proxy.services.channel_service.ProxyServer.get_instance",
+            "apps.proxy.live_proxy.services.channel_service.ProxyServer.get_instance",
             return_value=proxy_server,
         ), patch(
-            "apps.proxy.ts_proxy.services.channel_service.get_stream_info_for_switch",
+            "apps.proxy.live_proxy.services.channel_service.get_stream_info_for_switch",
             return_value=self.switch_context,
         ) as mock_get_stream_info:
             result = ChannelService.change_stream_url(
@@ -336,7 +364,7 @@ class TsProxyStalkerReconnectTests(TestCase):
         proxy_server.redis_client = MagicMock()
 
         with patch(
-            "apps.proxy.ts_proxy.services.channel_service.ProxyServer.get_instance",
+            "apps.proxy.live_proxy.services.channel_service.ProxyServer.get_instance",
             return_value=proxy_server,
         ):
             ChannelService._publish_stream_switch_event(
@@ -358,50 +386,40 @@ class TsProxyStalkerReconnectTests(TestCase):
     def test_handle_stream_switch_event_preserves_runtime_context_on_owner(self):
         server = ProxyServer.__new__(ProxyServer)
         server.redis_client = MagicMock()
-        server.stream_managers = {
-            "channel-1": MagicMock(update_url=MagicMock(return_value=True))
-        }
+        manager = MagicMock(update_url=MagicMock(return_value=True))
+        manager.url = "http://old.example.com/live/world-news-hd"
+        server.stream_managers = {"channel-1": manager}
         server._publish_stream_switch_result = MagicMock(return_value=True)
 
-        success = server._handle_stream_switch_event(
-            "channel-1",
-            {
-                "url": self.switch_context["url"],
-                "user_agent": self.switch_context["user_agent"],
-                "stream_id": self.stream.id,
-                "m3u_profile_id": self.account_profile.id,
-                "input_headers": self.switch_context["input_headers"],
-            },
-        )
+        with patch.object(
+            ChannelService, "_update_channel_metadata"
+        ) as mock_update_metadata:
+            success = server._handle_stream_switch_event(
+                "channel-1",
+                {
+                    "url": self.switch_context["url"],
+                    "user_agent": self.switch_context["user_agent"],
+                    "stream_id": self.stream.id,
+                    "m3u_profile_id": self.account_profile.id,
+                    "input_headers": self.switch_context["input_headers"],
+                },
+            )
 
         self.assertTrue(success)
-        server.stream_managers["channel-1"].update_url.assert_called_once_with(
+        manager.update_url.assert_called_once_with(
             self.switch_context["url"],
             self.stream.id,
             self.account_profile.id,
             self.switch_context["input_headers"],
         )
-
-        metadata_mapping = server.redis_client.hset.call_args.kwargs["mapping"]
-        self.assertEqual(
-            metadata_mapping[ChannelMetadataField.URL],
+        mock_update_metadata.assert_called_once_with(
+            "channel-1",
             self.switch_context["url"],
-        )
-        self.assertEqual(
-            metadata_mapping[ChannelMetadataField.USER_AGENT],
             self.switch_context["user_agent"],
-        )
-        self.assertEqual(
-            json.loads(metadata_mapping[ChannelMetadataField.INPUT_HEADERS]),
             self.switch_context["input_headers"],
-        )
-        self.assertEqual(
-            metadata_mapping[ChannelMetadataField.STREAM_ID],
-            str(self.stream.id),
-        )
-        self.assertEqual(
-            metadata_mapping[ChannelMetadataField.M3U_PROFILE],
-            str(self.account_profile.id),
+            self.stream.id,
+            self.account_profile.id,
+            None,
         )
 
     def test_buffering_timeout_reconnects_current_stream_before_failover(self):
@@ -423,7 +441,7 @@ class TsProxyStalkerReconnectTests(TestCase):
         manager._close_socket = MagicMock()
         manager._try_next_stream = MagicMock(return_value=True)
 
-        with patch("apps.proxy.ts_proxy.stream_manager.time.time", return_value=116.0):
+        with patch("apps.proxy.live_proxy.input.manager.time.time", return_value=116.0):
             manager._parse_ffmpeg_stats("frame= 120 fps=30 speed=0.99x")
 
         manager._refresh_runtime_stream_url.assert_called_once_with(
@@ -455,7 +473,7 @@ class TsProxyStalkerReconnectTests(TestCase):
         manager._close_socket = MagicMock()
         manager._try_next_stream = MagicMock(return_value=False)
 
-        with patch("apps.proxy.ts_proxy.stream_manager.time.time", return_value=116.0):
+        with patch("apps.proxy.live_proxy.input.manager.time.time", return_value=116.0):
             manager._parse_ffmpeg_stats("frame= 120 fps=30 speed=0.99x")
 
         manager._refresh_runtime_stream_url.assert_not_called()
@@ -568,46 +586,22 @@ class TsProxyStalkerReconnectTests(TestCase):
         )
 
 
-import os
-import tempfile
 from datetime import timedelta
-from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from django.test import RequestFactory, TestCase
 from django.utils import timezone
-from requests.exceptions import ChunkedEncodingError
 
 from apps.channels.models import Channel, Recording, Stream
-from apps.channels.tasks import build_dvr_request_headers, build_dvr_stream_url, run_recording
+from apps.channels.tasks import _dvr_build_ffmpeg_cmd
 from apps.m3u.models import M3UAccount, M3UAccountProfile
-from apps.proxy.ts_proxy.views import stream_ts, stream_ts_redirect
+from apps.proxy.live_proxy.views import stream_ts, stream_ts_redirect
 from core.models import PROXY_PROFILE_NAME, StreamProfile, UserAgent
-
-
-class _FakeStreamingResponse:
-    def __init__(self, chunks, terminal_error=None):
-        self._chunks = list(chunks)
-        self._terminal_error = terminal_error
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, exc_type, exc, tb):
-        return False
-
-    def raise_for_status(self):
-        return None
-
-    def iter_content(self, chunk_size=8192):
-        for chunk in self._chunks:
-            yield chunk
-        if self._terminal_error is not None:
-            raise self._terminal_error
 
 
 class StalkerPhase9DvrTests(TestCase):
     def setUp(self):
+        _patch_connection_release(self)
         self.factory = RequestFactory()
         self.user_agent = UserAgent.objects.create(
             name="Portal UA",
@@ -688,26 +682,27 @@ class StalkerPhase9DvrTests(TestCase):
         proxy_server.redis_client = redis_client
 
         with patch(
-            "apps.proxy.ts_proxy.views.network_access_allowed",
+            "apps.proxy.live_proxy.views.network_access_allowed",
             return_value=True,
         ), patch(
-            "apps.proxy.ts_proxy.views.ProxyServer.get_instance",
+            "apps.proxy.live_proxy.views.ProxyServer.get_instance",
             return_value=proxy_server,
         ), patch(
-            "apps.proxy.ts_proxy.views.generate_stream_url",
+            "apps.proxy.live_proxy.views.generate_stream_url",
             return_value=(
                 "http://resolved.example.com/live/world-news",
                 "DispatcharrTest/2.0",
                 runtime_headers,
                 False,
                 self.proxy_profile.id,
+                True,
                 None,
             ),
         ) as mock_generate_stream_url, patch(
-            "apps.proxy.ts_proxy.views.ChannelService.initialize_channel",
+            "apps.proxy.live_proxy.views.ChannelService.initialize_channel",
             return_value=True,
         ) as mock_initialize_channel, patch(
-            "apps.proxy.ts_proxy.views.create_stream_generator",
+            "apps.proxy.live_proxy.views.create_stream_generator",
             return_value=lambda: iter([b"ts"]),
         ):
             response = stream_ts(request, channel_id)
@@ -723,6 +718,7 @@ class StalkerPhase9DvrTests(TestCase):
             self.proxy_profile.id,
             self.stream.id,
             self.account_profile.id,
+            channel_name=self.channel.name,
         )
         proxy_server.client_managers[channel_id].add_client.assert_called_once()
 
@@ -745,26 +741,27 @@ class StalkerPhase9DvrTests(TestCase):
         proxy_server.redis_client = redis_client
 
         with patch(
-            "apps.proxy.ts_proxy.views.network_access_allowed",
+            "apps.proxy.live_proxy.views.network_access_allowed",
             return_value=True,
         ), patch(
-            "apps.proxy.ts_proxy.views.ProxyServer.get_instance",
+            "apps.proxy.live_proxy.views.ProxyServer.get_instance",
             return_value=proxy_server,
         ), patch(
-            "apps.proxy.ts_proxy.views.generate_stream_url",
+            "apps.proxy.live_proxy.views.generate_stream_url",
             return_value=(
                 "http://resolved.example.com/live/world-news",
                 "DispatcharrTest/2.0",
                 {"Authorization": "Bearer REFRESHED-TOKEN"},
                 False,
                 self.proxy_profile.id,
+                True,
                 None,
             ),
         ) as mock_generate_stream_url, patch(
-            "apps.proxy.ts_proxy.url_utils.validate_stream_url",
+            "apps.proxy.live_proxy.url_utils.validate_stream_url",
             return_value=(True, "http://resolved.example.com/live/world-news", 200, "ok"),
         ) as mock_validate_stream_url, patch(
-            "apps.proxy.ts_proxy.views.ChannelService.initialize_channel",
+            "apps.proxy.live_proxy.views.ChannelService.initialize_channel",
         ) as mock_initialize_channel:
             response = stream_ts_redirect(request, channel_id)
 
@@ -778,83 +775,33 @@ class StalkerPhase9DvrTests(TestCase):
         )
         mock_initialize_channel.assert_not_called()
 
-    def test_run_recording_reconnects_to_ts_proxy_for_stalker_channels(self):
-        now = timezone.now()
+    def test_dvr_ffmpeg_command_targets_ts_proxy_with_recording_user_agent(self):
+        """DVR records through the TS proxy so provider URL refresh stays central."""
+        from core.utils import dispatcharr_dvr_user_agent
+
         recording = Recording.objects.create(
             channel=self.channel,
-            start_time=now - timedelta(minutes=1),
-            end_time=now + timedelta(minutes=1),
+            start_time=timezone.now() - timedelta(minutes=1),
+            end_time=timezone.now() + timedelta(minutes=1),
             custom_properties={},
         )
-
-        channel_layer = MagicMock()
         base_url = "http://127.0.0.1:9191"
-        expected_url = build_dvr_stream_url(base_url, self.channel.uuid)
-        expected_headers = build_dvr_request_headers(recording.id)
+        stream_url = f"{base_url}/proxy/ts/stream/{self.channel.uuid}"
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            final_path = os.path.join(tmpdir, "world-news.mkv")
-            temp_ts_path = os.path.join(tmpdir, "world-news.ts")
+        cmd = _dvr_build_ffmpeg_cmd(
+            stream_url,
+            recording.id,
+            "/tmp/index.m3u8",
+            "/tmp/seg_%05d.ts",
+            0,
+        )
 
-            def fake_ffmpeg_run(*args, **kwargs):
-                with open(final_path, "wb") as output_file:
-                    output_file.write(b"mkv-data")
-                return SimpleNamespace(returncode=0, stdout="", stderr="")
-
-            first_response = _FakeStreamingResponse(
-                [b"first-chunk"],
-                terminal_error=ChunkedEncodingError("upstream reset"),
-            )
-            second_response = _FakeStreamingResponse([b"second-chunk"])
-
-            with patch(
-                "apps.channels.tasks.async_to_sync",
-                side_effect=lambda func: func,
-            ), patch(
-                "apps.channels.tasks.get_channel_layer",
-                return_value=channel_layer,
-            ), patch(
-                "core.utils.log_system_event",
-                side_effect=lambda *args, **kwargs: None,
-            ), patch(
-                "apps.channels.tasks._resolve_poster_for_program",
-                return_value=(None, None),
-            ), patch(
-                "apps.channels.tasks._build_output_paths",
-                return_value=(final_path, temp_ts_path, "world-news.mkv"),
-            ), patch(
-                "apps.channels.tasks.build_dvr_candidates",
-                return_value=[base_url],
-            ), patch(
-                "apps.channels.tasks.requests.get",
-                side_effect=[first_response, second_response],
-            ) as mock_requests_get, patch(
-                "apps.channels.tasks.time.sleep",
-                side_effect=lambda *args, **kwargs: None,
-            ), patch(
-                "apps.channels.tasks.subprocess.run",
-                side_effect=fake_ffmpeg_run,
-            ), patch(
-                "core.utils.RedisClient.get_client",
-                return_value=None,
-            ), patch(
-                "core.models.CoreSettings.get_dvr_comskip_enabled",
-                return_value=False,
-            ):
-                run_recording(
-                    recording.id,
-                    self.channel.id,
-                    str(recording.start_time),
-                    str(recording.end_time),
-                )
-
-        self.assertEqual(mock_requests_get.call_count, 2)
-        for call in mock_requests_get.call_args_list:
-            self.assertEqual(call.args[0], expected_url)
-            self.assertEqual(call.kwargs["headers"], expected_headers)
-            self.assertTrue(call.kwargs["stream"])
-            self.assertEqual(call.kwargs["timeout"], (10, 15))
-
-        recording.refresh_from_db()
-        self.assertEqual(recording.custom_properties.get("status"), "completed")
-        self.assertEqual(recording.custom_properties.get("remux_success"), True)
+        self.assertIn(stream_url, cmd)
+        self.assertEqual(cmd[cmd.index("-i") + 1], stream_url)
+        self.assertEqual(
+            cmd[cmd.index("-user_agent") + 1],
+            dispatcharr_dvr_user_agent(recording.id),
+        )
+        # FFmpeg reconnects on upstream resets rather than dropping the recording.
+        self.assertEqual(cmd[cmd.index("-reconnect") + 1], "1")
+        self.assertEqual(cmd[cmd.index("-reconnect_streamed") + 1], "1")

@@ -24,7 +24,12 @@ import {
 } from '@mantine/core';
 import { SquareMinus, SquarePen, Info } from 'lucide-react';
 
-const M3UProfiles = ({ playlist = null, isOpen, onClose }) => {
+const M3UProfiles = ({
+  playlist = null,
+  isOpen,
+  onClose,
+  pendingExpDate,
+}) => {
   const theme = useMantineTheme();
 
   const allProfiles = usePlaylistsStore((s) => s.profiles);
@@ -41,6 +46,8 @@ const M3UProfiles = ({ playlist = null, isOpen, onClose }) => {
   const [deletingProfile, setDeletingProfile] = useState(false);
   const [accountInfoOpen, setAccountInfoOpen] = useState(false);
   const [selectedProfileForInfo, setSelectedProfileForInfo] = useState(null);
+  // Snapshot at editor open so live main-form Date changes do not reset the form.
+  const [editorPendingExpDate, setEditorPendingExpDate] = useState(undefined);
 
   const handleRefreshAccountInfo = async () => {
     // Refresh the playlist data to get updated account info
@@ -68,7 +75,7 @@ const M3UProfiles = ({ playlist = null, isOpen, onClose }) => {
     if (profile) {
       setProfile(profile);
     }
-
+    setEditorPendingExpDate(pendingExpDate);
     setProfileEditorOpen(true);
   };
   const deleteProfile = async (id) => {
@@ -129,6 +136,7 @@ const M3UProfiles = ({ playlist = null, isOpen, onClose }) => {
     // Delay clearing the profile until after the modal animation completes
     setTimeout(() => {
       setProfile(null);
+      setEditorPendingExpDate(undefined);
     }, 300); // Mantine modal animation typically takes ~200-300ms
   };
 
@@ -369,6 +377,7 @@ const M3UProfiles = ({ playlist = null, isOpen, onClose }) => {
         profile={profile}
         isOpen={profileEditorOpen}
         onClose={closeEditor}
+        pendingExpDate={editorPendingExpDate}
       />
       <ConfirmationDialog
         opened={confirmDeleteOpen}

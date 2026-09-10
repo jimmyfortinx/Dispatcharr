@@ -6,15 +6,10 @@ from rest_framework.pagination import PageNumberPagination
 from rest_framework.permissions import AllowAny
 from django_filters.rest_framework import DjangoFilterBackend
 from django.shortcuts import get_object_or_404
-from django.http import StreamingHttpResponse, HttpResponse, FileResponse
 from django.db.models import Exists, OuterRef, Q
-from django.urls import reverse
 import django_filters
 import logging
-import os
-import time
-import requests
-from urllib.parse import urlparse, urlunparse
+from types import SimpleNamespace
 from apps.accounts.permissions import (
     Authenticated,
     permission_classes_by_action,
@@ -34,50 +29,28 @@ from .serializers import (
     M3USeriesRelationSerializer,
     M3UEpisodeRelationSerializer
 )
+from .image_proxy import (
+    is_proxyable_image_url,
+    prefer_relation_artwork,
+    rewrite_backdrop_paths,
+    rewrite_single_image_url,
+    serve_vod_image,
+    vod_image_action,
+    vod_image_url_parts,
+    vodlogo_cache_url,
+)
 from .tasks import (
     get_enabled_series_relations_queryset,
     refresh_series_episodes,
     refresh_movie_advanced_data,
     stalker_episode_import_looks_stale,
 )
+from .utils import is_vod_movies_enabled, is_vod_series_enabled
 from django.utils import timezone
 from datetime import timedelta
 from apps.m3u.models import M3UAccount
 
 logger = logging.getLogger(__name__)
-
-REMOTE_IMAGE_REQUEST_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/136.0.0.0 Safari/537.36"
-    ),
-    "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.9",
-    "Connection": "close",
-}
-
-
-def _build_vod_logo_payload(request, logo):
-    if not logo:
-        return None
-
-    cache_url = reverse("api:vod:vodlogo-cache", args=[logo.id])
-
-    return {
-        "id": logo.id,
-        "url": logo.url,
-        "name": logo.name,
-        "cache_url": cache_url,
-    }
-
-
-def _http_fallback_url(url):
-    parsed = urlparse(str(url or "").strip())
-    if parsed.scheme != "https" or not parsed.netloc:
-        return None
-
-    return urlunparse(parsed._replace(scheme="http"))
 
 
 def _dedupe_relations_by_account(relations):
@@ -237,10 +210,14 @@ def _build_series_relation_display_name_map(series_ids, category_value):
         )
 
     return display_names
-# Negative cache for remote VOD logo URLs that failed to fetch.
-# Prevents repeated blocking requests to unreachable hosts.
-_vod_logo_fetch_failures = {}
-_VOD_LOGO_FAIL_TTL = 300  # seconds
+
+
+def _authenticated_user(request):
+    """Return the request user when authenticated, else None."""
+    user = getattr(request, "user", None)
+    if user is not None and getattr(user, "is_authenticated", False):
+        return user
+    return None
 
 
 class VODPagination(PageNumberPagination):
@@ -256,10 +233,11 @@ class MovieFilter(django_filters.FilterSet):
     year = django_filters.NumberFilter()
     year_gte = django_filters.NumberFilter(field_name="year", lookup_expr="gte")
     year_lte = django_filters.NumberFilter(field_name="year", lookup_expr="lte")
+    is_adult = django_filters.BooleanFilter()
 
     class Meta:
         model = Movie
-        fields = ['name', 'm3u_account', 'category', 'year']
+        fields = ['name', 'm3u_account', 'category', 'year', 'is_adult']
 
     def filter_category(self, queryset, name, value):
         """Custom category filter that handles 'name|type' format"""
@@ -294,6 +272,8 @@ class MovieViewSet(viewsets.ReadOnlyModelViewSet):
         try:
             return [perm() for perm in permission_classes_by_action[self.action]]
         except KeyError:
+            if self.action == 'image':
+                return [AllowAny()]
             return [Authenticated()]
 
     def get_serializer_context(self):
@@ -306,10 +286,21 @@ class MovieViewSet(viewsets.ReadOnlyModelViewSet):
         return context
 
     def get_queryset(self):
+        user = _authenticated_user(self.request)
+        if not is_vod_movies_enabled(user=user):
+            return Movie.objects.none()
+
         # Only return movies that have active M3U relations
-        return Movie.objects.filter(
+        qs = Movie.objects.filter(
             **_vod_enabled_account_filters("m3u_relations__m3u_account__")
         ).distinct().select_related('logo').prefetch_related('m3u_relations__m3u_account')
+        if (
+            user is not None
+            and user.user_level < 10
+            and (user.custom_properties or {}).get('hide_adult_content', False)
+        ):
+            qs = qs.filter(is_adult=False)
+        return qs
 
     def list(self, request, *args, **kwargs):
         queryset = self.filter_queryset(self.get_queryset())
@@ -424,7 +415,31 @@ class MovieViewSet(viewsets.ReadOnlyModelViewSet):
         info = custom_props.get('detailed_info', {})
         movie_data = custom_props.get('movie_data', {})
         relation_display_name = _extract_relation_display_name(relation, movie.name)
-        logo_payload = _build_vod_logo_payload(request, movie.logo)
+
+        movie_props = movie.custom_properties or {}
+        artwork = prefer_relation_artwork(custom_props, movie_props)
+        account_id = relation.m3u_account_id
+        backdrop_path = rewrite_backdrop_paths(
+            request,
+            'movie',
+            movie.id,
+            artwork['backdrop_path'],
+            m3u_account_id=account_id,
+        )
+        # Relation/object still first; synced VODLogo only when none is available.
+        if is_proxyable_image_url(artwork['movie_image']):
+            movie_image = rewrite_single_image_url(
+                request,
+                'movie',
+                movie.id,
+                'movie_image',
+                artwork['movie_image'],
+                m3u_account_id=account_id,
+            )
+        elif movie.logo:
+            movie_image = vodlogo_cache_url(request, movie.logo)
+        else:
+            movie_image = ''
 
         # Build response with available data
         response_data = {
@@ -447,11 +462,12 @@ class MovieViewSet(viewsets.ReadOnlyModelViewSet):
             'youtube_trailer': (movie.custom_properties or {}).get('youtube_trailer') or info.get('youtube_trailer') or info.get('trailer', ''),
             'duration_secs': movie.duration_secs or info.get('duration_secs'),
             'age': info.get('age', ''),
-            'backdrop_path': (movie.custom_properties or {}).get('backdrop_path') or info.get('backdrop_path', []),
-            'logo': logo_payload,
-            'cover': info.get('cover_big', ''),
-            'cover_big': info.get('cover_big', ''),
-            'movie_image': logo_payload['cache_url'] if logo_payload else info.get('movie_image', ''),
+            'backdrop_path': backdrop_path,
+            # All three mirror the resolved cover so the UI never falls back to a
+            # raw provider URL that bypasses the proxy.
+            'cover': movie_image,
+            'cover_big': movie_image,
+            'movie_image': movie_image,
             'bitrate': info.get('bitrate', 0),
             'video': info.get('video', {}),
             'audio': info.get('audio', {}),
@@ -467,10 +483,16 @@ class MovieViewSet(viewsets.ReadOnlyModelViewSet):
         }
         return Response(response_data)
 
+    @action(detail=True, methods=['get'], url_path='image', permission_classes=[AllowAny])
+    def image(self, request, pk=None):
+        """Proxy a stored movie image (backdrop, movie_image, poster_path)."""
+        return vod_image_action(self, request, 'movie')
+
+
 class EpisodeFilter(django_filters.FilterSet):
     name = django_filters.CharFilter(lookup_expr="icontains")
     series = django_filters.NumberFilter(field_name="series__id")
-    m3u_account = django_filters.NumberFilter(field_name="m3u_account__id")
+    m3u_account = django_filters.NumberFilter(field_name="m3u_relations__m3u_account__id")
     season_number = django_filters.NumberFilter()
     episode_number = django_filters.NumberFilter()
 
@@ -524,12 +546,23 @@ class EpisodeViewSet(viewsets.ReadOnlyModelViewSet):
         try:
             return [perm() for perm in permission_classes_by_action[self.action]]
         except KeyError:
+            if self.action == 'image':
+                return [AllowAny()]
             return [Authenticated()]
 
     def get_queryset(self):
-        return Episode.objects.select_related(
-            'series', 'm3u_account'
-        ).filter(m3u_account__is_active=True)
+        user = _authenticated_user(self.request)
+        if not is_vod_series_enabled(user=user):
+            return Episode.objects.none()
+
+        return Episode.objects.select_related('series').filter(
+            m3u_relations__m3u_account__is_active=True
+        ).distinct()
+
+    @action(detail=True, methods=['get'], url_path='image', permission_classes=[AllowAny])
+    def image(self, request, pk=None):
+        """Proxy a stored episode image (movie_image, backdrop, poster_path)."""
+        return vod_image_action(self, request, 'episode')
 
 
 class SeriesViewSet(viewsets.ReadOnlyModelViewSet):
@@ -548,6 +581,8 @@ class SeriesViewSet(viewsets.ReadOnlyModelViewSet):
         try:
             return [perm() for perm in permission_classes_by_action[self.action]]
         except KeyError:
+            if self.action == 'image':
+                return [AllowAny()]
             return [Authenticated()]
 
     def get_serializer_context(self):
@@ -560,6 +595,10 @@ class SeriesViewSet(viewsets.ReadOnlyModelViewSet):
         return context
 
     def get_queryset(self):
+        user = _authenticated_user(self.request)
+        if not is_vod_series_enabled(user=user):
+            return Series.objects.none()
+
         enabled_series_relations = get_enabled_series_relations_queryset(
             M3USeriesRelation.objects.filter(
                 series_id=OuterRef("pk"),
@@ -713,10 +752,39 @@ class SeriesViewSet(viewsets.ReadOnlyModelViewSet):
                     relation.refresh_from_db()
 
             relation_display_name = _extract_relation_display_name(relation, series.name)
-            logo_payload = _build_vod_logo_payload(request, series.logo)
 
             # Return the database data (which should now be fresh)
             custom_props = relation.custom_properties or {}
+            series_props = series.custom_properties or {}
+            series_artwork = prefer_relation_artwork(custom_props, series_props)
+            account_id = relation.m3u_account_id
+            # Relation/object cover first; synced VODLogo object only as fallback
+            # (UI expects the logo-shaped cover payload when a VODLogo exists).
+            if is_proxyable_image_url(series_artwork['movie_image']):
+                proxied = rewrite_single_image_url(
+                    request,
+                    'series',
+                    series.id,
+                    'movie_image',
+                    series_artwork['movie_image'],
+                    m3u_account_id=account_id,
+                )
+                cover = {
+                    'id': None,
+                    'url': series_artwork['movie_image'],
+                    'cache_url': proxied,
+                    'name': series.name,
+                }
+            elif series.logo:
+                cover = {
+                    'id': series.logo.id,
+                    'url': series.logo.url,
+                    'cache_url': vodlogo_cache_url(request, series.logo),
+                    'name': series.logo.name,
+                }
+            else:
+                cover = None
+
             response_data = {
                 'id': series.id,
                 'series_id': relation.external_series_id,
@@ -729,8 +797,14 @@ class SeriesViewSet(viewsets.ReadOnlyModelViewSet):
                 'imdb_id': series.imdb_id,
                 'category_id': relation.category.id if relation.category else None,
                 'category_name': relation.category.name if relation.category else None,
-                'cover': logo_payload,
-                'series_image': logo_payload['cache_url'] if logo_payload else '',
+                'cover': cover,
+                'backdrop_path': rewrite_backdrop_paths(
+                    request,
+                    'series',
+                    series.id,
+                    series_artwork['backdrop_path'],
+                    m3u_account_id=account_id,
+                ),
                 'last_refreshed': series.updated_at,
                 'custom_properties': series.custom_properties,
                 'm3u_account': {
@@ -746,25 +820,48 @@ class SeriesViewSet(viewsets.ReadOnlyModelViewSet):
             include_episodes = request.query_params.get('include_episodes', 'true').lower() == 'true'
             if include_episodes and custom_props.get('episodes_fetched', False):
                 logger.debug(f"Including episodes for series {series.id}")
+                # Only episodes this provider actually has streams for. Shared Series
+                # rows can include specials/seasons from another account. Rows tied
+                # to this provider's series row win over untied legacy rows.
+                relations_by_episode_id = {}
+                for rel in M3UEpisodeRelation.objects.filter(
+                    Q(series_relation=relation) | Q(series_relation__isnull=True),
+                    m3u_account_id=relation.m3u_account_id,
+                    episode__series_id=series.id,
+                ).only(
+                    'episode_id',
+                    'series_relation_id',
+                    'stream_id',
+                    'container_extension',
+                    'custom_properties',
+                ):
+                    existing = relations_by_episode_id.get(rel.episode_id)
+                    if existing is None or (
+                        existing.series_relation_id is None
+                        and rel.series_relation_id is not None
+                    ):
+                        relations_by_episode_id[rel.episode_id] = rel
+                episodes = list(
+                    Episode.objects.filter(
+                        id__in=relations_by_episode_id.keys()
+                    ).order_by('season_number', 'episode_number')
+                )
+
                 episodes_by_season = {}
-                for episode in series.episodes.all().order_by('season_number', 'episode_number'):
-                    season_key = str(episode.season_number or 0)
+                episode_image_parts = vod_image_url_parts(request, 'episode')
+                for episode in episodes:
+                    season_key = str(
+                        episode.season_number if episode.season_number is not None else 0
+                    )
                     if season_key not in episodes_by_season:
                         episodes_by_season[season_key] = []
 
-                    # Get episode relation for additional data
-                    episode_relations = M3UEpisodeRelation.objects.filter(
-                        episode=episode,
-                        m3u_account=relation.m3u_account
+                    episode_relation = relations_by_episode_id.get(episode.id)
+                    episode_artwork = prefer_relation_artwork(
+                        episode_relation.custom_properties if episode_relation else None,
+                        episode.custom_properties,
                     )
-                    episode_relation = episode_relations.filter(
-                        series_relation=relation
-                    ).first()
-                    if episode_relation is None:
-                        episode_relation = episode_relations.filter(
-                            series_relation__isnull=True
-                        ).first()
-
+                    raw_episode_image = episode_artwork['movie_image']
                     episode_data = {
                         'id': episode.id,
                         'stream_id': episode_relation.stream_id if episode_relation else '',
@@ -780,8 +877,19 @@ class SeriesViewSet(viewsets.ReadOnlyModelViewSet):
                         'rating': episode.rating,
                         'tmdb_id': episode.tmdb_id,
                         'imdb_id': episode.imdb_id,
-                        'movie_image': episode.custom_properties.get('movie_image', '') if episode.custom_properties else '',
-                        'container_extension': episode_relation.container_extension if episode_relation else 'mp4',
+                        'movie_image': rewrite_single_image_url(
+                            request,
+                            'episode',
+                            episode.id,
+                            'movie_image',
+                            raw_episode_image,
+                            url_parts=episode_image_parts,
+                            m3u_account_id=account_id,
+                        ),
+                        'container_extension': (
+                            episode_relation.container_extension
+                            if episode_relation else 'mp4'
+                        ),
                         'type': 'episode',
                         'series': {
                             'id': series.id,
@@ -805,6 +913,11 @@ class SeriesViewSet(viewsets.ReadOnlyModelViewSet):
                 {'error': f'Failed to fetch series information: {str(e)}'},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
+
+    @action(detail=True, methods=['get'], url_path='image', permission_classes=[AllowAny])
+    def image(self, request, pk=None):
+        """Proxy a stored series image (backdrop, movie_image, poster_path)."""
+        return vod_image_action(self, request, 'series')
 
 
 class VODCategoryFilter(django_filters.FilterSet):
@@ -833,68 +946,62 @@ class VODCategoryViewSet(viewsets.ReadOnlyModelViewSet):
             return [Authenticated()]
 
     def get_queryset(self):
-        if _query_param_is_truthy(self.request.query_params.get("include_empty")):
-            visible_category_relations = M3UVODCategoryRelation.objects.filter(
-                category_id=OuterRef("pk"),
-                **_vod_enabled_account_filters(),
-            )
+        user = _authenticated_user(self.request)
+        movies_allowed = is_vod_movies_enabled(user=user)
+        series_allowed = is_vod_series_enabled(user=user)
+        if not movies_allowed and not series_allowed:
+            return VODCategory.objects.none()
 
-            return (
-                VODCategory.objects.annotate(
-                    has_visible_relations=Exists(visible_category_relations)
-                )
-                .filter(has_visible_relations=True)
-                .order_by("name")
-            )
-
-        enabled_movie_relations = M3UMovieRelation.objects.filter(
-            category_id=OuterRef("pk"),
-            category__category_type="movie",
-            **_vod_enabled_account_filters(),
-        ).annotate(
-            category_enabled=Exists(
-                M3UVODCategoryRelation.objects.filter(
-                    m3u_account_id=OuterRef("m3u_account_id"),
-                    category_id=OuterRef("category_id"),
-                    enabled=True,
-                )
-            )
-        ).filter(category_enabled=True)
-
-        enabled_series_relations = M3USeriesRelation.objects.filter(
-            category_id=OuterRef("pk"),
-            category__category_type="series",
-            **_vod_enabled_account_filters(),
-        ).annotate(
-            category_enabled=Exists(
-                M3UVODCategoryRelation.objects.filter(
-                    m3u_account_id=OuterRef("m3u_account_id"),
-                    category_id=OuterRef("category_id"),
-                    enabled=True,
-                )
-            )
-        ).filter(category_enabled=True)
-
-        visible_category_relations = M3UVODCategoryRelation.objects.filter(
+        # Any category a VOD-enabled account knows about, enabled or not: used
+        # only by include_empty so the category picker can list unselected ones.
+        known_category_relations = M3UVODCategoryRelation.objects.filter(
             category_id=OuterRef("pk"),
             **_vod_enabled_account_filters(),
         )
 
-        return (
-            VODCategory.objects.annotate(
-                has_visible_relations=Exists(visible_category_relations),
-                has_visible_movie_content=Exists(enabled_movie_relations),
-                has_visible_series_content=Exists(enabled_series_relations),
+        def _enabled_content_relations(model, category_type):
+            """Relations in this category that the owning account has not disabled."""
+            disabled_category_relations = M3UVODCategoryRelation.objects.filter(
+                m3u_account_id=OuterRef("m3u_account_id"),
+                category_id=OuterRef("category_id"),
+                enabled=False,
             )
-            .filter(
-                has_visible_relations=True,
-            )
-            .filter(
+            return model.objects.filter(
+                category_id=OuterRef("pk"),
+                category__category_type=category_type,
+                **_vod_enabled_account_filters(),
+            ).annotate(
+                category_disabled=Exists(disabled_category_relations)
+            ).filter(category_disabled=False)
+
+        enabled_movie_relations = _enabled_content_relations(M3UMovieRelation, "movie")
+        enabled_series_relations = _enabled_content_relations(M3USeriesRelation, "series")
+
+        qs = VODCategory.objects.annotate(
+            has_known_relations=Exists(known_category_relations),
+            has_visible_movie_content=Exists(enabled_movie_relations),
+            has_visible_series_content=Exists(enabled_series_relations),
+        )
+
+        if _query_param_is_truthy(self.request.query_params.get("include_empty")):
+            # Also surface categories an account knows about but has not filled
+            # or has deselected, so the category picker can show them.
+            qs = qs.filter(
+                Q(has_known_relations=True)
+                | Q(category_type="movie", has_visible_movie_content=True)
+                | Q(category_type="series", has_visible_series_content=True)
+            ).order_by("name")
+        else:
+            qs = qs.filter(
                 Q(category_type="movie", has_visible_movie_content=True)
                 | Q(category_type="series", has_visible_series_content=True)
-            )
-            .order_by("name")
-        )
+            ).order_by("name")
+
+        if not movies_allowed:
+            return qs.filter(category_type="series")
+        if not series_allowed:
+            return qs.filter(category_type="movie")
+        return qs
 
     def list(self, request, *args, **kwargs):
         """Ensure default VOD relations exist for VOD-enabled XC and Stalker accounts."""
@@ -950,6 +1057,14 @@ class UnifiedContentViewSet(viewsets.ReadOnlyModelViewSet):
         logger.error("=== UnifiedContentViewSet.list() called ===")
 
         try:
+            user = _authenticated_user(request)
+            movies_allowed = is_vod_movies_enabled(user=user)
+            series_allowed = is_vod_series_enabled(user=user)
+            if not movies_allowed and not series_allowed:
+                return Response(
+                    {"count": 0, "next": False, "previous": False, "results": []}
+                )
+
             # Get pagination parameters
             page_size = int(request.query_params.get('page_size', 24))
             page_number = int(request.query_params.get('page', 1))
@@ -987,17 +1102,57 @@ class UnifiedContentViewSet(viewsets.ReadOnlyModelViewSet):
             movie_params = []
             series_params = []
 
+            if not movies_allowed:
+                where_conditions[0] = "1=0"
+            if not series_allowed:
+                where_conditions[1] = "1=0"
+
             if search:
-                where_conditions[0] += " AND LOWER(movies.name) LIKE %s"
-                where_conditions[1] += " AND LOWER(series.name) LIKE %s"
                 search_param = f"%{search.lower()}%"
-                movie_params.append(search_param)
-                series_params.append(search_param)
+                if movies_allowed:
+                    where_conditions[0] += " AND LOWER(movies.name) LIKE %s"
+                    movie_params.append(search_param)
+                if series_allowed:
+                    where_conditions[1] += " AND LOWER(series.name) LIKE %s"
+                    series_params.append(search_param)
 
             if category:
                 if '|' in category:
                     cat_name, cat_type = category.rsplit('|', 1)
                     if cat_type == 'movie':
+                        if movies_allowed:
+                            where_conditions[0] += (
+                                " AND movies.id IN ("
+                                "SELECT movie_id FROM vod_m3umovierelation mmr "
+                                "JOIN vod_vodcategory c ON mmr.category_id = c.id "
+                                "JOIN m3u_m3uaccount ma ON mmr.m3u_account_id = ma.id "
+                                f"WHERE c.name = %s AND {self._sql_vod_enabled_account_clause('ma')}"
+                                ")"
+                            )
+                            movie_params.append(cat_name)
+                        else:
+                            where_conditions[0] = "1=0"
+                            movie_params = []
+                        where_conditions[1] = "1=0"  # Exclude series
+                        series_params = []  # no params needed for "1=0"
+                    elif cat_type == 'series':
+                        if series_allowed:
+                            where_conditions[1] += (
+                                " AND series.id IN ("
+                                "SELECT series_id FROM vod_m3useriesrelation msr "
+                                "JOIN vod_vodcategory c ON msr.category_id = c.id "
+                                "JOIN m3u_m3uaccount ma ON msr.m3u_account_id = ma.id "
+                                f"WHERE c.name = %s AND {self._sql_vod_enabled_account_clause('ma')}"
+                                ")"
+                            )
+                            series_params.append(cat_name)
+                        else:
+                            where_conditions[1] = "1=0"
+                            series_params = []
+                        where_conditions[0] = "1=0"  # Exclude movies
+                        movie_params = []  # no params needed for "1=0"
+                else:
+                    if movies_allowed:
                         where_conditions[0] += (
                             " AND movies.id IN ("
                             "SELECT movie_id FROM vod_m3umovierelation mmr "
@@ -1006,10 +1161,8 @@ class UnifiedContentViewSet(viewsets.ReadOnlyModelViewSet):
                             f"WHERE c.name = %s AND {self._sql_vod_enabled_account_clause('ma')}"
                             ")"
                         )
-                        where_conditions[1] = "1=0"  # Exclude series
-                        movie_params.append(cat_name)
-                        series_params = []  # no params needed for "1=0"
-                    elif cat_type == 'series':
+                        movie_params.append(category)
+                    if series_allowed:
                         where_conditions[1] += (
                             " AND series.id IN ("
                             "SELECT series_id FROM vod_m3useriesrelation msr "
@@ -1018,28 +1171,7 @@ class UnifiedContentViewSet(viewsets.ReadOnlyModelViewSet):
                             f"WHERE c.name = %s AND {self._sql_vod_enabled_account_clause('ma')}"
                             ")"
                         )
-                        where_conditions[0] = "1=0"  # Exclude movies
-                        series_params.append(cat_name)
-                        movie_params = []  # no params needed for "1=0"
-                else:
-                    where_conditions[0] += (
-                        " AND movies.id IN ("
-                        "SELECT movie_id FROM vod_m3umovierelation mmr "
-                        "JOIN vod_vodcategory c ON mmr.category_id = c.id "
-                        "JOIN m3u_m3uaccount ma ON mmr.m3u_account_id = ma.id "
-                        f"WHERE c.name = %s AND {self._sql_vod_enabled_account_clause('ma')}"
-                        ")"
-                    )
-                    where_conditions[1] += (
-                        " AND series.id IN ("
-                        "SELECT series_id FROM vod_m3useriesrelation msr "
-                        "JOIN vod_vodcategory c ON msr.category_id = c.id "
-                        "JOIN m3u_m3uaccount ma ON msr.m3u_account_id = ma.id "
-                        f"WHERE c.name = %s AND {self._sql_vod_enabled_account_clause('ma')}"
-                        ")"
-                    )
-                    movie_params.append(category)
-                    series_params.append(category)
+                        series_params.append(category)
 
             params = movie_params + series_params
 
@@ -1113,7 +1245,13 @@ class UnifiedContentViewSet(viewsets.ReadOnlyModelViewSet):
                             'id': item_dict['logo_id'],
                             'name': item_dict['logo_name'],
                             'url': item_dict['logo_url'],
-                            'cache_url': f"/api/vod/vodlogos/{item_dict['logo_id']}/cache/",
+                            'cache_url': vodlogo_cache_url(
+                                request,
+                                SimpleNamespace(
+                                    id=item_dict['logo_id'],
+                                    url=item_dict['logo_url'],
+                                ),
+                            ),
                             'movie_count': 0,  # We don't calculate this in raw SQL
                             'series_count': 0,  # We don't calculate this in raw SQL
                             'is_used': True
@@ -1261,101 +1399,7 @@ class VODLogoViewSet(viewsets.ModelViewSet):
     def cache(self, request, pk=None):
         """Streams the VOD logo file, whether it's local or remote."""
         logo = self.get_object()
-
-        if not logo.url:
-            return HttpResponse(status=404)
-
-        # Check if this is a local file path
-        if logo.url.startswith('/data/'):
-            # It's a local file
-            file_path = logo.url
-            if not os.path.exists(file_path):
-                logger.error(f"VOD logo file not found: {file_path}")
-                return HttpResponse(status=404)
-
-            try:
-                return FileResponse(open(file_path, 'rb'), content_type='image/png')
-            except Exception as e:
-                logger.error(f"Error serving VOD logo file {file_path}: {str(e)}")
-                return HttpResponse(status=500)
-        else:
-            # It's a remote URL - proxy it
-            # Skip URLs that recently failed to avoid blocking workers
-            fail_expiry = _vod_logo_fetch_failures.get(logo.url)
-            if fail_expiry and time.monotonic() < fail_expiry:
-                return HttpResponse(status=404)
-
-            try:
-                _LOGO_TOTAL_TIMEOUT = 10  # seconds
-                _LOGO_MAX_BYTES = 5 * 1024 * 1024  # 5 MB
-
-                remote_url = logo.url
-                try:
-                    remote_response = requests.get(
-                        remote_url,
-                        headers=REMOTE_IMAGE_REQUEST_HEADERS,
-                        stream=True,
-                        timeout=(3, 5),  # (connect_timeout, read_timeout per chunk)
-                    )
-                except requests.exceptions.SSLError as e:
-                    fallback_url = _http_fallback_url(remote_url)
-                    if not fallback_url:
-                        raise
-
-                    logger.warning(
-                        "Retrying remote VOD logo over HTTP after SSL error for %s: %s",
-                        remote_url,
-                        e,
-                    )
-                    remote_url = fallback_url
-                    remote_response = requests.get(
-                        remote_url,
-                        headers=REMOTE_IMAGE_REQUEST_HEADERS,
-                        stream=True,
-                        timeout=(3, 5),
-                    )
-
-                if remote_response.status_code != 200:
-                    now = time.monotonic()
-                    _vod_logo_fetch_failures[logo.url] = now + _VOD_LOGO_FAIL_TTL
-                    return HttpResponse(status=404)
-
-                # Eagerly read the full image with a total time + size cap
-                # so the greenlet is released quickly.
-                chunks = []
-                total = 0
-                deadline = time.monotonic() + _LOGO_TOTAL_TIMEOUT
-                for chunk in remote_response.iter_content(chunk_size=8192):
-                    total += len(chunk)
-                    if total > _LOGO_MAX_BYTES:
-                        remote_response.close()
-                        return HttpResponse(status=404)
-                    if time.monotonic() > deadline:
-                        remote_response.close()
-                        now = time.monotonic()
-                        _vod_logo_fetch_failures[logo.url] = now + _VOD_LOGO_FAIL_TTL
-                        return HttpResponse(status=404)
-                    chunks.append(chunk)
-                body = b"".join(chunks)
-
-                _vod_logo_fetch_failures.pop(logo.url, None)
-
-                content_type = remote_response.headers.get('Content-Type', 'image/png')
-                response = HttpResponse(body, content_type=content_type)
-                response["Content-Length"] = str(len(body))
-                if remote_response.headers.get("Cache-Control"):
-                    response["Cache-Control"] = remote_response.headers.get("Cache-Control")
-                if remote_response.headers.get("Last-Modified"):
-                    response["Last-Modified"] = remote_response.headers.get("Last-Modified")
-                response["Content-Disposition"] = 'inline; filename="{}"'.format(
-                    os.path.basename(remote_url)
-                )
-                return response
-            except requests.exceptions.RequestException as e:
-                now = time.monotonic()
-                _vod_logo_fetch_failures[logo.url] = now + _VOD_LOGO_FAIL_TTL
-                logger.error(f"Error fetching remote VOD logo {logo.url}: {str(e)}")
-                return HttpResponse(status=404)
+        return serve_vod_image(logo.url)
 
     @action(detail=False, methods=["delete"], url_path="bulk-delete")
     def bulk_delete(self, request):

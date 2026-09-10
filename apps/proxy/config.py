@@ -7,17 +7,28 @@ class BaseConfig:
     CHUNK_SIZE = 8192
     CLIENT_POLL_INTERVAL = 0.1
     MAX_RETRIES = 3
+    RETRY_WINDOW_SECONDS = 1800  # Reset retry counter after this long without a failure
+    STABLE_CONNECTION_THRESHOLD = 30  # Seconds of uptime before switch rotation state resets
     RETRY_WAIT_INTERVAL = 0.5  # seconds to wait between retries
     CONNECTION_TIMEOUT = 10  # seconds to wait for initial connection
     MAX_STREAM_SWITCHES = 10  # Maximum number of stream switch attempts before giving up
+    FAILOVER_ROTATION_COOLDOWN = 60 # Wait this long after exhausting all streams before wrapping back to the top.
     BUFFER_CHUNK_SIZE = 188 * 1361  # ~256KB
     BUFFERING_TIMEOUT = 15  # Seconds to wait for buffering before switching streams
     BUFFER_SPEED = 0.95 # Speeds just under realtime are often stable enough; avoid thrashing at ~0.99x.
 
-    # Cache for proxy settings (class-level, shared across all instances)
+    # Cache for proxy settings (class-level, shared across all instances).
+    # Backed by CoreSettings Redis group cache; this local copy avoids Redis
+    # chatter inside the proxy hot path. Cleared when proxy_settings is saved.
     _proxy_settings_cache = None
     _proxy_settings_cache_time = 0
     _proxy_settings_cache_ttl = 10  # Cache for 10 seconds
+
+    @classmethod
+    def clear_proxy_settings_cache(cls):
+        """Drop process-local proxy settings (called on CoreSettings invalidate)."""
+        cls._proxy_settings_cache = None
+        cls._proxy_settings_cache_time = 0
 
     @classmethod
     def get_proxy_settings(cls):

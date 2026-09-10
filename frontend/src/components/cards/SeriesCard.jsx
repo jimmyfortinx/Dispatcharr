@@ -10,11 +10,10 @@ import {
 } from '@mantine/core';
 import { Calendar, Play, Star } from 'lucide-react';
 import React from 'react';
-import { getVODImageSrc } from '../../utils/vodImages.js';
+import { vodLogoSrc } from '../../utils/cards/VODCardUtils.js';
 
 const SeriesCard = ({ series, onClick }) => {
-  const posterSrc = getVODImageSrc(series.logo);
-
+  const posterSrc = vodLogoSrc(series.logo);
   return (
     <Card
       shadow="sm"

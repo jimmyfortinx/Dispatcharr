@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   Box,
   Button,
@@ -43,21 +43,21 @@ import {
   sortEpisodesList,
   tmdbUrl,
 } from '../utils/components/SeriesModalUtils.js';
-import { getVODImageSrc } from '../utils/vodImages.js';
 import { YouTubeTrailerModal } from './modals/YouTubeTrailerModal.jsx';
 
 const Series = ({ displaySeries, onClickYouTubeTrailer }) => {
-  const posterSrc = getVODImageSrc(
-    displaySeries.series_image,
-    displaySeries.logo
-  );
-
   return (
     <Flex gap="md">
-      {posterSrc ? (
+      {displaySeries.series_image ||
+      displaySeries.logo?.cache_url ||
+      displaySeries.logo?.url ? (
         <Box style={{ flexShrink: 0 }}>
           <Image
-            src={posterSrc}
+            src={
+              displaySeries.series_image ||
+              displaySeries.logo?.cache_url ||
+              displaySeries.logo?.url
+            }
             width={200}
             height={300}
             alt={displaySeries.name}
@@ -193,17 +193,15 @@ const Series = ({ displaySeries, onClickYouTubeTrailer }) => {
 };
 
 const Episode = ({ episode, displaySeries }) => {
-  const episodeImageSrc = getVODImageSrc(episode.movie_image, episode.logo);
-
   return (
     <Stack spacing="sm">
       {/* Episode Image and Description Row */}
       <Flex gap="md">
         {/* Episode Image */}
-        {episodeImageSrc && (
+        {episode.movie_image && (
           <Box style={{ flexShrink: 0 }}>
             <Image
-              src={episodeImageSrc}
+              src={episode.movie_image}
               width={120}
               height={160}
               alt={episode.name}
@@ -357,34 +355,39 @@ const SeriesModal = ({ series, opened, onClose }) => {
   const [providers, setProviders] = useState([]);
   const [selectedProvider, setSelectedProvider] = useState(null);
   const [loadingProviders, setLoadingProviders] = useState(false);
+  const detailsRequestIdRef = useRef(0);
 
   useEffect(() => {
     if (opened && series) {
+      const requestId = ++detailsRequestIdRef.current;
       // Fetch detailed series info which now includes episodes
       setLoadingDetails(true);
       fetchSeriesInfo(series.id)
         .then((details) => {
+          if (detailsRequestIdRef.current !== requestId) return;
           setDetailedSeries(details);
         })
         .catch((error) => {
+          if (detailsRequestIdRef.current !== requestId) return;
           console.warn(
             'Failed to fetch series details, using basic info:',
             error
           );
-          setDetailedSeries(series);
+          setDetailedSeries(series); // Fallback to basic data
         })
         .finally(() => {
-          setLoadingDetails(false);
+          if (detailsRequestIdRef.current === requestId) {
+            setLoadingDetails(false);
+          }
         });
 
-      // Fetch available providers
+      // Fetch available providers (does not re-trigger series info fetch)
       setLoadingProviders(true);
       fetchSeriesProviders(series.id)
         .then((providersData) => {
           setProviders(providersData);
-          // Set the first provider as default if none selected
           if (providersData.length > 0) {
-            setSelectedProvider((current) => current || providersData[0]);
+            setSelectedProvider(providersData[0]);
           }
         })
         .catch((error) => {
@@ -399,6 +402,7 @@ const SeriesModal = ({ series, opened, onClose }) => {
 
   useEffect(() => {
     if (!opened) {
+      detailsRequestIdRef.current += 1;
       setDetailedSeries(null);
       setLoadingDetails(false);
       setProviders([]);
@@ -475,11 +479,23 @@ const SeriesModal = ({ series, opened, onClose }) => {
     const provider = providers.find((p) => p.id.toString() === value);
     setSelectedProvider(provider);
     if (provider) {
+      const requestId = ++detailsRequestIdRef.current;
       setLoadingDetails(true);
+      // Clear episodes immediately so the previous provider's list cannot flash
+      setDetailedSeries((prev) =>
+        prev ? { ...prev, episodesList: [] } : prev
+      );
       fetchSeriesInfo(series.id, provider.id)
-        .then((details) => setDetailedSeries(details))
+        .then((details) => {
+          if (detailsRequestIdRef.current !== requestId) return;
+          setDetailedSeries(details);
+        })
         .catch(() => {})
-        .finally(() => setLoadingDetails(false));
+        .finally(() => {
+          if (detailsRequestIdRef.current === requestId) {
+            setLoadingDetails(false);
+          }
+        });
     }
   };
 
@@ -487,7 +503,6 @@ const SeriesModal = ({ series, opened, onClose }) => {
 
   // Use detailed data if available, otherwise use basic series data
   const displaySeries = detailedSeries || series;
-  const backdropSrc = getVODImageSrc(displaySeries.backdrop_path?.[0]);
 
   return (
     <>
@@ -500,40 +515,41 @@ const SeriesModal = ({ series, opened, onClose }) => {
       >
         <Box style={{ position: 'relative', minHeight: 400 }}>
           {/* Backdrop image as background */}
-          {backdropSrc && (
-            <>
-              <Image
-                src={backdropSrc}
-                alt={`${displaySeries.name} backdrop`}
-                fit="cover"
-                style={{
-                  position: 'absolute',
-                  top: 0,
-                  left: 0,
-                  width: '100%',
-                  height: '100%',
-                  objectFit: 'cover',
-                  zIndex: 0,
-                  borderRadius: 8,
-                  filter: 'blur(2px) brightness(0.5)',
-                }}
-              />
-              {/* Overlay for readability */}
-              <Box
-                style={{
-                  position: 'absolute',
-                  top: 0,
-                  left: 0,
-                  width: '100%',
-                  height: '100%',
-                  background:
-                    'linear-gradient(180deg, rgba(24,24,27,0.85) 60%, rgba(24,24,27,1) 100%)',
-                  zIndex: 1,
-                  borderRadius: 8,
-                }}
-              />
-            </>
-          )}
+          {displaySeries.backdrop_path &&
+            displaySeries.backdrop_path.length > 0 && (
+              <>
+                <Image
+                  src={displaySeries.backdrop_path[0]}
+                  alt={`${displaySeries.name} backdrop`}
+                  fit="cover"
+                  style={{
+                    position: 'absolute',
+                    top: 0,
+                    left: 0,
+                    width: '100%',
+                    height: '100%',
+                    objectFit: 'cover',
+                    zIndex: 0,
+                    borderRadius: 8,
+                    filter: 'blur(2px) brightness(0.5)',
+                  }}
+                />
+                {/* Overlay for readability */}
+                <Box
+                  style={{
+                    position: 'absolute',
+                    top: 0,
+                    left: 0,
+                    width: '100%',
+                    height: '100%',
+                    background:
+                      'linear-gradient(180deg, rgba(24,24,27,0.85) 60%, rgba(24,24,27,1) 100%)',
+                    zIndex: 1,
+                    borderRadius: 8,
+                  }}
+                />
+              </>
+            )}
 
           {/* Modal content above backdrop */}
           <Box style={{ position: 'relative', zIndex: 2 }}>

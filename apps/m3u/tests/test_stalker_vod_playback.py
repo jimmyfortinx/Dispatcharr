@@ -270,7 +270,11 @@ class StalkerPhase14VODProxyTests(TestCase):
             f"/proxy/vod/movie/{self.movie.uuid}/phase14-session",
             HTTP_USER_AGENT="DispatcharrTestClient/1.0",
         )
-        mock_get_content_and_relation.return_value = (self.movie, self.relation)
+        mock_get_content_and_relation.return_value = (
+            self.movie,
+            self.relation,
+            [self.relation],
+        )
         mock_get_m3u_profile.return_value = (self.profile, 0)
         mock_resolve_vod_stream_context.return_value = SimpleNamespace(
             url="http://resolved.example.com/movie/300.mkv",
@@ -577,7 +581,15 @@ class StalkerPhase15VODProxyTests(TestCase):
 
 class StalkerPhase15SessionRefreshTests(TestCase):
     def test_refresh_connection_target_reuses_new_stalker_url_for_later_range_requests(self):
-        fake_redis = _FakeRedis()
+        # Metadata writes go through the VOD Lua scripts, so use the shared fake
+        # that shims them rather than the plain hash-only stub above.
+        from apps.proxy.vod_proxy.tests.test_vod_lock_contention import (
+            LockAwareFakeRedis,
+            _clear_script_cache,
+        )
+
+        _clear_script_cache()
+        fake_redis = LockAwareFakeRedis()
         connection = RedisBackedVODConnection(
             "phase15-refresh-session",
             redis_client=fake_redis,

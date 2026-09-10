@@ -5,6 +5,7 @@ from django.utils import timezone
 from django.db import transaction, IntegrityError
 from django.db.models import Exists, OuterRef, Q
 from apps.m3u.models import M3UAccount
+from apps.m3u.utils import parse_is_adult
 from core.xtream_codes import Client as XtreamCodesClient
 from core.utils import TaskLockRenewer, acquire_task_lock, release_task_lock
 from apps.m3u.stalker import StalkerClient
@@ -28,6 +29,16 @@ def supports_parallel_stalker_catalog(client):
     return isinstance(client, StalkerClient) or callable(
         getattr(type(client), "clone_for_parallel_catalog", None)
     )
+
+
+def _empty_categories_should_abort(categories_data, account, category_type):
+    """True when an empty provider response would wipe existing group selections."""
+    if categories_data:
+        return False
+    return M3UVODCategoryRelation.objects.filter(
+        m3u_account=account,
+        category__category_type=category_type,
+    ).exclude(category__name='Uncategorized').exists()
 
 
 def lookup_by_name_year(model, name_year_pairs):
@@ -77,6 +88,25 @@ def remove_account_vod_relations(account_id):
     )
 
 
+def _abort_vod_refresh_without_categories(account):
+    """Report an aborted VOD refresh when the provider returned no categories."""
+    from apps.m3u.tasks import send_m3u_update
+
+    message = (
+        f"Provider returned no VOD categories for account {account.name}; "
+        "aborting VOD refresh to preserve existing category selections"
+    )
+    logger.warning(message)
+    send_m3u_update(
+        account.id,
+        "vod_refresh",
+        100,
+        status="error",
+        message=f"VOD refresh failed: {message}",
+    )
+    return f"VOD refresh failed: {message}"
+
+
 @shared_task
 def refresh_vod_content(account_id):
     """Refresh VOD content for an M3U account with batch processing for improved performance"""
@@ -103,7 +133,9 @@ def refresh_vod_content(account_id):
 
     try:
         with TaskLockRenewer("refresh_vod_content", account_id):
-            account = M3UAccount.objects.get(id=account_id, is_active=True)
+            account = M3UAccount.objects.select_related("user_agent").get(
+                id=account_id, is_active=True
+            )
 
             def send_vod_progress(progress, message=None, **extra):
                 send_m3u_update(
@@ -133,11 +165,15 @@ def refresh_vod_content(account_id):
                     account.server_url,
                     account.username,
                     account.password,
-                    account.get_user_agent().user_agent
+                    account.get_user_agent_string()
                 ) as client:
                     send_vod_progress(5, "Loading VOD categories...")
 
-                    movie_categories, series_categories = refresh_categories(account.id, client)
+                    category_maps = refresh_categories(account.id, client)
+                    if category_maps is None:
+                        return _abort_vod_refresh_without_categories(account)
+
+                    movie_categories, series_categories = category_maps
 
                     logger.debug("Fetching relations for filtering category filtering")
                     relations = { rel.category_id: rel for rel in M3UVODCategoryRelation.objects
@@ -168,7 +204,11 @@ def refresh_vod_content(account_id):
                     custom_properties=account.custom_properties or {},
                 )
                 send_vod_progress(5, "Loading VOD categories...")
-                movie_categories, series_categories = refresh_categories(account.id, client=client)
+                category_maps = refresh_categories(account.id, client=client)
+                if category_maps is None:
+                    return _abort_vod_refresh_without_categories(account)
+
+                movie_categories, series_categories = category_maps
 
                 logger.debug("Fetching relations for Stalker VOD category filtering")
                 relations = {
@@ -255,7 +295,7 @@ def refresh_vod_content(account_id):
             )
 
 def refresh_categories(account_id, client=None):
-    account = M3UAccount.objects.get(id=account_id, is_active=True)
+    account = M3UAccount.objects.select_related("user_agent").get(id=account_id, is_active=True)
 
     if not client:
         if account.account_type == M3UAccount.Types.XC:
@@ -263,7 +303,7 @@ def refresh_categories(account_id, client=None):
                 account.server_url,
                 account.username,
                 account.password,
-                account.get_user_agent().user_agent
+                account.get_user_agent_string()
             )
         elif account.account_type == M3UAccount.Types.STALKER:
             client = StalkerClient(
@@ -296,6 +336,13 @@ def refresh_categories(account_id, client=None):
     else:
         categories_data = client.get_vod_categories()
 
+    if _empty_categories_should_abort(categories_data, account, 'movie'):
+        logger.warning(
+            f"Provider returned no movie categories for account {account.id} "
+            f"({account.name}); aborting VOD refresh to preserve existing category selections"
+        )
+        return None
+
     category_map = batch_create_categories(categories_data, 'movie', account)
 
     # Create a mapping from provider category IDs to our category objects
@@ -313,6 +360,13 @@ def refresh_categories(account_id, client=None):
         categories_data = discovery.series_categories
     else:
         categories_data = client.get_series_categories()
+
+    if _empty_categories_should_abort(categories_data, account, 'series'):
+        logger.warning(
+            f"Provider returned no series categories for account {account.id} "
+            f"({account.name}); aborting VOD refresh to preserve existing category selections"
+        )
+        return None
     category_map = batch_create_categories(categories_data, 'series', account)
 
     # Create a mapping from provider category IDs to our category objects
@@ -1431,15 +1485,20 @@ def refresh_stalker_series_catalog_relations(
 
 
 def get_enabled_series_relations_queryset(queryset):
-    enabled_category_relations = M3UVODCategoryRelation.objects.filter(
+    """Drop relations whose category the account has explicitly disabled.
+
+    A category with no ``M3UVODCategoryRelation`` row yet (or no category at
+    all) counts as enabled, so content stays visible until a user turns it off.
+    """
+    disabled_category_relations = M3UVODCategoryRelation.objects.filter(
         m3u_account_id=OuterRef("m3u_account_id"),
         category_id=OuterRef("category_id"),
-        enabled=True,
+        enabled=False,
     )
 
     return queryset.annotate(
-        category_enabled=Exists(enabled_category_relations)
-    ).filter(Q(category_id__isnull=True) | Q(category_enabled=True))
+        category_disabled=Exists(disabled_category_relations)
+    ).filter(category_disabled=False)
 
 
 
@@ -1586,6 +1645,12 @@ def process_movie_batch(account, batch, categories, relations, scan_start_time=N
                 'duration_secs': duration_secs,
                 'custom_properties': custom_props or None,
             }
+            # Only set is_adult when the provider actually reports it. Movies are
+            # shared across providers (matched by TMDB/IMDB/name+year), and many
+            # providers omit this key entirely; defaulting it to False here would
+            # let a sparse provider row silently clear a flag another provider set.
+            if 'is_adult' in movie_data:
+                movie_props['is_adult'] = parse_is_adult(movie_data['is_adult'])
 
             existing_entry = movie_entries.get(movie_key)
             if existing_entry is None:
@@ -1708,7 +1773,8 @@ def process_movie_batch(account, batch, categories, relations, scan_start_time=N
 
             for field, value in movie_props.items():
                 if field == 'custom_properties':
-                    # Merge: preserve advanced-refresh keys; don't overwrite director/actors/release_date if already set.
+                    # Merge custom_properties: fill director/actors/release_date
+                    # only when empty; apply other non-blank list keys.
                     existing_cp = movie.custom_properties or {}
                     incoming_cp = value or {}
                     merged = dict(existing_cp)
@@ -1716,12 +1782,12 @@ def process_movie_batch(account, batch, categories, relations, scan_start_time=N
                         if k in ('director', 'actors', 'release_date'):
                             if not existing_cp.get(k):
                                 merged[k] = v
-                        else:
+                        elif not is_blank_vod_value(v):
                             merged[k] = v
                     if merged != existing_cp:
                         movie.custom_properties = merged
                         updated = True
-                elif getattr(movie, field) != value:
+                elif should_apply_provider_list_field(getattr(movie, field), value):
                     setattr(movie, field, value)
                     updated = True
 
@@ -1770,9 +1836,12 @@ def process_movie_batch(account, batch, categories, relations, scan_start_time=N
             relation.movie = movie
             relation.category = category
             relation.container_extension = movie_data.get('container_extension', 'mp4')
+            # Merge so list sync updates basic_data without dropping detail
+            # payloads or detailed_fetched / related flags.
+            existing_rel_cp = relation.custom_properties or {}
             relation.custom_properties = {
+                **existing_rel_cp,
                 'basic_data': movie_data,
-                'detailed_fetched': False
             }
             relation.last_seen = scan_start_time or timezone.now()  # Mark as seen during this scan
             relations_to_update.append(relation)
@@ -1836,7 +1905,7 @@ def process_movie_batch(account, batch, categories, relations, scan_start_time=N
                 # First, update all fields except logo to avoid unsaved related object issues
                 Movie.objects.bulk_update(movies_to_update, [
                     'description', 'rating', 'genre', 'year', 'tmdb_id', 'imdb_id',
-                    'duration_secs', 'custom_properties'
+                    'duration_secs', 'is_adult', 'custom_properties'
                 ])
 
                 # Handle logo updates separately to avoid bulk_update issues
@@ -2122,10 +2191,16 @@ def process_series_batch(account, batch, categories, relations, scan_start_time=
 
             for field, value in series_props.items():
                 if field == 'custom_properties':
-                    if value != series.custom_properties:
-                        series.custom_properties = value
+                    existing_cp = series.custom_properties or {}
+                    incoming_cp = value or {}
+                    merged = dict(existing_cp)
+                    for k, v in incoming_cp.items():
+                        if not is_blank_vod_value(v):
+                            merged[k] = v
+                    if merged != existing_cp:
+                        series.custom_properties = merged
                         updated = True
-                elif getattr(series, field) != value:
+                elif should_apply_provider_list_field(getattr(series, field), value):
                     setattr(series, field, value)
                     updated = True
 
@@ -2175,6 +2250,8 @@ def process_series_batch(account, batch, categories, relations, scan_start_time=
             relation = existing_relations[series_id]
             relation.series = series
             relation.category = category
+            # Merge so list sync updates basic_data without dropping detail
+            # payloads or detailed_fetched / episodes_fetched flags.
             relation.custom_properties = build_series_relation_custom_properties(
                 relation.custom_properties,
                 series_data,
@@ -3204,7 +3281,7 @@ def refresh_series_episodes(
                     account.server_url,
                     account.username,
                     account.password,
-                    account.get_user_agent().user_agent
+                    account.get_user_agent_string()
                 ) as client:
                     series_info = client.get_series_info(external_series_id)
                     if series_info:
@@ -3302,10 +3379,29 @@ def batch_process_episodes(
 
     is_stalker = account.account_type == M3UAccount.Types.STALKER
 
+    # XC panels encode seasons as a PHP array keyed by season number. When keys are
+    # contiguous from 0 (common with Season 0 specials), json_encode emits a JSON
+    # array instead of an object. Accept both shapes and use the key/index as the
+    # season number.
+    if isinstance(episodes_data, dict):
+        season_items = episodes_data.items()
+    elif isinstance(episodes_data, list):
+        season_items = enumerate(episodes_data)
+    else:
+        logger.warning(
+            f"Unexpected episodes_data type {type(episodes_data).__name__} "
+            f"for series {series.name}; skipping"
+        )
+        return
+
     # Flatten episodes data
     all_episodes_data = []
-    for season_num, season_episodes in episodes_data.items():
+    for season_num, season_episodes in season_items:
+        if not isinstance(season_episodes, list):
+            continue
         for episode_data in season_episodes:
+            if not isinstance(episode_data, dict):
+                continue
             normalized_episode = dict(episode_data)
             normalized_episode['_season_number'] = int(season_num)
             all_episodes_data.append(normalized_episode)
@@ -3608,7 +3704,7 @@ def batch_refresh_series_episodes(account_id, series_ids=None):
     If series_ids is None, refresh all series that haven't been refreshed recently.
     """
     try:
-        account = M3UAccount.objects.get(id=account_id, is_active=True)
+        account = M3UAccount.objects.select_related("user_agent").get(id=account_id, is_active=True)
 
         if account.account_type not in (
             M3UAccount.Types.XC,
@@ -4130,14 +4226,38 @@ def movie_relation_has_cached_advanced_data(relation):
     return detailed_fetched and isinstance(detailed_info, dict) and bool(detailed_info)
 
 
+def is_blank_vod_value(value):
+    """Return True for None, empty string, empty list, or all-null/empty list items."""
+    if value is None or value == '' or value == []:
+        return True
+    if isinstance(value, list) and all(item is None or item == '' for item in value):
+        return True
+    return False
+
+
+def should_apply_provider_list_field(existing_value, new_value):
+    """Return True when a non-blank list-API value should replace the stored field.
+
+    Blank or missing provider values are ignored so detail filled from
+    get_vod_info is not cleared by sparse get_vod_streams / get_series rows.
+    """
+    if is_blank_vod_value(new_value):
+        return False
+    return existing_value != new_value
+
+
 @shared_task
 def refresh_movie_advanced_data(m3u_movie_relation_id, force_refresh=False):
     """
     Fetch advanced movie data from provider and update Movie and M3UMovieRelation.
-    Only fetch if last_advanced_refresh > 24h ago, unless force_refresh is True.
+
+    Skips when detailed_fetched is set and last_advanced_refresh is within 24h,
+    unless force_refresh is True.
     """
     try:
-        relation = M3UMovieRelation.objects.select_related('movie', 'm3u_account').get(id=m3u_movie_relation_id)
+        relation = M3UMovieRelation.objects.select_related(
+            'movie', 'm3u_account__user_agent'
+        ).get(id=m3u_movie_relation_id)
         if not force_refresh and movie_relation_has_cached_advanced_data(relation):
             return "Advanced data already cached, skipping."
 
@@ -4156,7 +4276,7 @@ def refresh_movie_advanced_data(m3u_movie_relation_id, force_refresh=False):
                 server_url=account.server_url,
                 username=account.username,
                 password=account.password,
-                user_agent=account.get_user_agent().user_agent
+                user_agent=account.get_user_agent_string()
             ) as client:
                 vod_info = client.get_vod_info(relation.stream_id)
                 if vod_info and 'info' in vod_info:
@@ -4301,7 +4421,7 @@ def refresh_movie_advanced_data(m3u_movie_relation_id, force_refresh=False):
         relation_custom_props['detailed_fetched'] = True
 
         relation.custom_properties = relation_custom_props
-        relation.last_advanced_refresh = now
+        relation.last_advanced_refresh = timezone.now()
         relation.save(update_fields=['custom_properties', 'last_advanced_refresh'])
 
         return "Advanced data refreshed."

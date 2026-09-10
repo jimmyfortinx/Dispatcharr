@@ -1,28 +1,47 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { useForm } from 'react-hook-form';
 import { yupResolver } from '@hookform/resolvers/yup';
-import * as Yup from 'yup';
-import API from '../../api';
 import {
   Alert,
-  Flex,
-  Modal,
-  TextInput,
-  Button,
-  Title,
-  Text,
-  Paper,
   Badge,
+  Button,
+  Flex,
   Grid,
-  Textarea,
+  GridCol,
+  Modal,
   NumberInput,
+  Paper,
   SegmentedControl,
+  Text,
+  Textarea,
+  TextInput,
+  Title,
 } from '@mantine/core';
 import { TriangleAlert } from 'lucide-react';
 import { DateTimePicker } from '@mantine/dates';
 import { useWebSocket } from '../../WebSocket';
+import {
+  addM3UProfile,
+  applyRegex,
+  applyXcSimplePatterns,
+  buildProfileSchema,
+  buildSubmitValues,
+  fetchFirstStreamUrl,
+  getDetectedMode,
+  prepareExpDate,
+  resolveProfileExpDate,
+  splitByPattern,
+  updateM3UProfile,
+  validateXcSimple,
+} from '../../utils/forms/M3uProfileUtils.js';
 
-const RegexFormAndView = ({ profile = null, m3u, isOpen, onClose }) => {
+const RegexFormAndView = ({
+  profile = null,
+  m3u,
+  isOpen,
+  onClose,
+  pendingExpDate,
+}) => {
   const [websocketReady, sendMessage] = useWebSocket();
   const [streamUrl, setStreamUrl] = useState('');
   const [searchPattern, setSearchPattern] = useState('');
@@ -34,10 +53,12 @@ const RegexFormAndView = ({ profile = null, m3u, isOpen, onClose }) => {
   const [newPassword, setNewPassword] = useState('');
   const [simpleErrors, setSimpleErrors] = useState({});
   const isDefaultProfile = profile?.is_default;
-  const isXC = m3u?.account_type === 'XC';
 
+  const isXC = m3u?.account_type === 'XC';
+  // Stalker portals manage the expiration server-side too, so the picker is
+  // hidden and exp_date is never sent for either provider type.
   const hasProviderManagedExpiration =
-    m3u?.account_type === 'XC' || m3u?.account_type === 'STALKER';
+    isXC || m3u?.account_type === 'STALKER';
 
   const defaultValues = useMemo(
     () => ({
@@ -46,25 +67,14 @@ const RegexFormAndView = ({ profile = null, m3u, isOpen, onClose }) => {
       search_pattern: profile?.search_pattern || '',
       replace_pattern: profile?.replace_pattern || '',
       notes: profile?.custom_properties?.notes || '',
-      exp_date: profile?.exp_date ? new Date(profile.exp_date) : null,
+      exp_date: resolveProfileExpDate(profile, pendingExpDate),
     }),
-    [profile]
+    [profile, pendingExpDate]
   );
 
-  const schema = Yup.object({
-    name: Yup.string().required('Name is required'),
-    search_pattern: Yup.string().when([], {
-      is: () => !isDefaultProfile && !isXC,
-      then: (schema) => schema.required('Search pattern is required'),
-      otherwise: (schema) => schema.notRequired(),
-    }),
-    replace_pattern: Yup.string().when([], {
-      is: () => !isDefaultProfile && !isXC,
-      then: (schema) => schema.required('Replace pattern is required'),
-      otherwise: (schema) => schema.notRequired(),
-    }),
-    notes: Yup.string(), // Optional field
-  });
+  const getResolver = () => {
+    return yupResolver(buildProfileSchema(isDefaultProfile, isXC));
+  };
 
   const {
     register,
@@ -76,38 +86,22 @@ const RegexFormAndView = ({ profile = null, m3u, isOpen, onClose }) => {
     setError,
   } = useForm({
     defaultValues,
-    resolver: yupResolver(schema),
+    resolver: getResolver(),
   });
 
   const onSubmit = async (values) => {
-    console.log('submiting');
+    const expDate = prepareExpDate(values.exp_date, hasProviderManagedExpiration);
 
-    // Convert exp_date for submission
-    let expDateValue = values.exp_date;
-    if (hasProviderManagedExpiration) {
-      // Provider-managed accounts have exp_date auto-managed; don't send it
-      expDateValue = undefined;
-    } else if (expDateValue instanceof Date) {
-      expDateValue = expDateValue.toISOString();
-    } else if (!expDateValue) {
-      expDateValue = null;
-    }
-
-    // For XC simple mode: validate simple inputs and build patterns from credentials
     if (isXC && xcMode === 'simple' && !isDefaultProfile) {
-      const errs = {};
-      if (!newUsername.trim()) errs.newUsername = 'New username is required';
-      if (!newPassword.trim()) errs.newPassword = 'New password is required';
+      const errs = validateXcSimple(newUsername, newPassword);
       if (Object.keys(errs).length > 0) {
         setSimpleErrors(errs);
         return;
       }
       setSimpleErrors({});
-      values.search_pattern = `${m3u?.username || ''}/${m3u?.password || ''}`;
-      values.replace_pattern = `${newUsername.trim()}/${newPassword.trim()}`;
+      values = applyXcSimplePatterns(values, m3u, newUsername, newPassword);
     }
 
-    // For XC advanced mode: validate regex pattern fields
     if (isXC && xcMode === 'advanced' && !isDefaultProfile) {
       if (!searchPattern.trim()) {
         setError('search_pattern', { message: 'Search pattern is required' });
@@ -119,76 +113,36 @@ const RegexFormAndView = ({ profile = null, m3u, isOpen, onClose }) => {
       }
     }
 
-    // Build submit values
-    let submitValues;
-    if (isDefaultProfile) {
-      submitValues = {
-        name: values.name,
-        search_pattern: searchPattern || '',
-        replace_pattern: replacePattern || '',
-        custom_properties: {
-          // Preserve existing custom_properties and add/update notes
-          ...(profile?.custom_properties || {}),
-          notes: values.notes || '',
-        },
-      };
-    } else {
-      // For regular profiles, send all fields
-      submitValues = {
-        name: values.name,
-        max_streams: values.max_streams,
-        search_pattern: values.search_pattern,
-        replace_pattern: values.replace_pattern,
-        custom_properties: {
-          // Preserve existing custom_properties and add/update notes
-          ...(profile?.custom_properties || {}),
-          notes: values.notes || '',
-          ...(isXC ? { xcMode } : {}),
-        },
-      };
-    }
+    const submitValues = buildSubmitValues(
+      values,
+      profile,
+      isDefaultProfile,
+      isXC,
+      xcMode
+    );
+    if (expDate !== undefined) submitValues.exp_date = expDate;
 
-    // Add exp_date for accounts that manage expiration locally
-    if (expDateValue !== undefined) {
-      submitValues.exp_date = expDateValue;
-    }
-
-    if (profile?.id) {
-      await API.updateM3UProfile(m3u.id, {
-        id: profile.id,
-        ...submitValues,
-      });
-    } else {
-      await API.addM3UProfile(m3u.id, submitValues);
-    }
+    profile?.id
+      ? await updateM3UProfile(m3u.id, { ...submitValues, id: profile.id })
+      : await addM3UProfile(m3u.id, submitValues);
 
     reset();
-    // Reset local state to sync with form reset
     setSearchPattern('');
     setReplacePattern('');
     onClose();
   };
 
   useEffect(() => {
-    async function fetchStreamUrl() {
-      try {
-        if (!m3u?.id) return;
+    if (!m3u?.id) return;
 
-        const params = new URLSearchParams();
-        params.append('page', 1);
-        params.append('page_size', 1);
-        params.append('m3u_account', m3u.id);
-        const response = await API.queryStreams(params);
-
-        if (response?.results?.length > 0) {
-          setStreamUrl(response.results[0].url);
-          setSampleInput(response.results[0].url); // Initialize sample input with a real stream URL
+    fetchFirstStreamUrl(m3u.id)
+      .then((url) => {
+        if (url) {
+          setStreamUrl(url);
+          setSampleInput(url);
         }
-      } catch (error) {
-        console.error('Error fetching stream URL:', error);
-      }
-    }
-    fetchStreamUrl();
+      })
+      .catch((error) => console.error('Error fetching stream URL:', error));
   }, [m3u]);
 
   useEffect(() => {
@@ -241,19 +195,7 @@ const RegexFormAndView = ({ profile = null, m3u, isOpen, onClose }) => {
     setReplacePattern(profile?.replace_pattern || '');
     if (isXC && !isDefaultProfile) {
       const storedMode = profile?.custom_properties?.xcMode;
-      let detectedMode;
-      if (storedMode) {
-        detectedMode = storedMode;
-      } else if (
-        profile?.search_pattern &&
-        profile.search_pattern === `${m3u?.username}/${m3u?.password}`
-      ) {
-        detectedMode = 'simple';
-      } else if (profile?.search_pattern) {
-        detectedMode = 'advanced';
-      } else {
-        detectedMode = 'simple';
-      }
+      const detectedMode = getDetectedMode(storedMode, profile, m3u);
       setXcMode(detectedMode);
       if (detectedMode === 'simple') {
         const rp = profile?.replace_pattern || '';
@@ -296,49 +238,22 @@ const RegexFormAndView = ({ profile = null, m3u, isOpen, onClose }) => {
     setXcMode(mode);
   };
 
-  // Local regex for the live demo preview. Returns an array of strings and
-  // <mark> React nodes so user-supplied text is never interpolated into raw
-  // HTML (avoids self-XSS via dangerouslySetInnerHTML).
   const getHighlightedSearchText = () => {
-    if (!searchPattern || !sampleInput) return sampleInput;
-    try {
-      const regex = new RegExp(searchPattern, 'g');
-      const parts = [];
-      let lastIndex = 0;
-      let m;
-      while ((m = regex.exec(sampleInput)) !== null) {
-        if (m.index > lastIndex) {
-          parts.push(sampleInput.slice(lastIndex, m.index));
-        }
-        parts.push(
-          <mark
-            key={`${m.index}-${parts.length}`}
-            style={{ backgroundColor: '#ffee58' }}
-          >
-            {m[0]}
-          </mark>
-        );
-        lastIndex = m.index + m[0].length;
-        if (m[0].length === 0) regex.lastIndex++;
-      }
-      if (lastIndex < sampleInput.length) {
-        parts.push(sampleInput.slice(lastIndex));
-      }
-      return parts;
-    } catch {
-      return sampleInput;
-    }
+    const segments = splitByPattern(sampleInput, searchPattern);
+    if (!segments) return sampleInput;
+    return segments.map((seg, i) =>
+      seg.matched ? (
+        <mark key={i} style={{ backgroundColor: '#ffee58' }}>
+          {seg.text}
+        </mark>
+      ) : (
+        seg.text
+      )
+    );
   };
 
-  const getLocalReplaceResult = () => {
-    if (!searchPattern || !sampleInput) return sampleInput;
-    try {
-      const regex = new RegExp(searchPattern, 'g');
-      return sampleInput.replace(regex, replacePattern);
-    } catch {
-      return sampleInput;
-    }
-  };
+  const getLocalReplaceResult = () =>
+    applyRegex(sampleInput, searchPattern, replacePattern);
 
   return (
     <Modal
@@ -381,8 +296,8 @@ const RegexFormAndView = ({ profile = null, m3u, isOpen, onClose }) => {
             >
               <Text size="sm">
                 These patterns are applied to every stream in this playlist. If
-                the search pattern doesn&apos;t match a stream URL, the original
-                URL is used as-is.
+                the search pattern doesn't match a stream URL, the original URL
+                is used as-is.
               </Text>
             </Alert>
             <TextInput
@@ -541,7 +456,7 @@ const RegexFormAndView = ({ profile = null, m3u, isOpen, onClose }) => {
           </Paper>
 
           <Grid gutter="xs">
-            <Grid.Col span={12}>
+            <GridCol span={12}>
               <Paper shadow="sm" p="xs" radius="md" withBorder>
                 <Text size="sm" weight={500} mb={3} component="div">
                   Matched Text{' '}
@@ -556,9 +471,9 @@ const RegexFormAndView = ({ profile = null, m3u, isOpen, onClose }) => {
                   {getHighlightedSearchText()}
                 </Text>
               </Paper>
-            </Grid.Col>
+            </GridCol>
 
-            <Grid.Col span={12}>
+            <GridCol span={12}>
               <Paper shadow="sm" p="xs" radius="md" withBorder>
                 <Text size="sm" weight={500} mb={3}>
                   Result After Replace
@@ -570,7 +485,7 @@ const RegexFormAndView = ({ profile = null, m3u, isOpen, onClose }) => {
                   {getLocalReplaceResult()}
                 </Text>
               </Paper>
-            </Grid.Col>
+            </GridCol>
           </Grid>
         </>
       )}

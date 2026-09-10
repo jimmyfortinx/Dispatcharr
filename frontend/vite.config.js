@@ -8,27 +8,34 @@ export default defineConfig({
 
   // publicDir: '/data',
 
+  build: {
+    // Maps aren't referenced via sourceMappingURL, but ErrorBoundary fetches
+    // them on demand to decode a caught error's stack (src/utils/symbolicate.js).
+    sourcemap: 'hidden',
+  },
+
   server: {
     port: 9191,
-
+    // Without this, /api/* is served as the React SPA in debug mode and
+    // Swagger UI at /api/swagger/ never loads the OpenAPI schema.
     proxy: {
-      '/api': {
-        target: 'http://localhost:5656',
+      "/api": {
+        target: "http://127.0.0.1:5656",
         changeOrigin: true,
         secure: false,
       },
-      '/proxy': {
-        target: 'http://localhost:5656',
+      "/proxy": {
+        target: "http://127.0.0.1:5656",
         changeOrigin: true,
         secure: false,
       },
-      '/output': {
-        target: 'http://localhost:5656',
+      "/output": {
+        target: "http://127.0.0.1:5656",
         changeOrigin: true,
         secure: false,
       },
-      '/ws': {
-        target: 'http://localhost:8001',
+      "/ws": {
+        target: "http://127.0.0.1:8001",
         changeOrigin: true,
         secure: false,
         ws: true,

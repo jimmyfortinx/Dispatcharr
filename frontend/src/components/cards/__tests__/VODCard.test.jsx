@@ -5,6 +5,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 vi.mock('../../../utils/cards/VODCardUtils.js', () => ({
   formatDuration: vi.fn((mins) => (mins ? `${mins}m` : null)),
   getSeasonLabel: vi.fn(() => 'S01E02'),
+  vodLogoSrc: vi.fn((logo) => logo?.cache_url || logo?.url || null),
 }));
 
 // ── Mantine core ──────────────────────────────────────────────────────────────
@@ -110,10 +111,7 @@ import VODCard from '../VODCard';
 const makeMovie = (overrides = {}) => ({
   type: 'movie',
   name: 'Test Movie',
-  logo: {
-    url: 'http://example.com/poster.jpg',
-    cache_url: '/api/vod/vodlogos/1/cache/',
-  },
+  logo: { url: 'http://example.com/poster.jpg' },
   year: 2022,
   rating: 8.5,
   duration: 120,
@@ -126,10 +124,7 @@ const makeMovie = (overrides = {}) => ({
 const makeEpisode = (overrides = {}) => ({
   type: 'episode',
   name: 'Pilot',
-  logo: {
-    url: 'http://example.com/ep-poster.jpg',
-    cache_url: '/api/vod/vodlogos/2/cache/',
-  },
+  logo: { url: 'http://example.com/ep-poster.jpg' },
   year: 2021,
   rating: 7.9,
   duration: 45,
@@ -165,10 +160,10 @@ describe('VODCard', () => {
       expect(screen.getByText('Test Movie')).toBeInTheDocument();
     });
 
-    it('renders the poster image with the cache url when available', () => {
+    it('renders the poster image with the logo url', () => {
       render(<VODCard vod={makeMovie()} onClick={vi.fn()} />);
       const img = screen.getByRole('img');
-      expect(img).toHaveAttribute('src', '/api/vod/vodlogos/1/cache/');
+      expect(img).toHaveAttribute('src', 'http://example.com/poster.jpg');
     });
 
     it('renders the year when present', () => {
@@ -261,6 +256,24 @@ describe('VODCard', () => {
       expect(screen.getByRole('img')).toBeInTheDocument();
     });
 
+    it('prefers logo.cache_url over logo.url', () => {
+      render(
+        <VODCard
+          vod={makeMovie({
+            logo: {
+              url: 'http://provider/poster.jpg',
+              cache_url: '/api/vod/vodlogos/1/cache/',
+            },
+          })}
+          onClick={vi.fn()}
+        />
+      );
+      expect(screen.getByRole('img')).toHaveAttribute(
+        'src',
+        '/api/vod/vodlogos/1/cache/'
+      );
+    });
+
     it('does not render an img tag when logo is null', () => {
       render(<VODCard vod={makeMovie({ logo: null })} onClick={vi.fn()} />);
       expect(screen.queryByRole('img')).not.toBeInTheDocument();
@@ -271,19 +284,6 @@ describe('VODCard', () => {
         <VODCard vod={makeMovie({ logo: { url: '' } })} onClick={vi.fn()} />
       );
       expect(screen.queryByRole('img')).not.toBeInTheDocument();
-    });
-
-    it('falls back to logo.url when cache_url is missing', () => {
-      render(
-        <VODCard
-          vod={makeMovie({ logo: { url: 'http://example.com/fallback.jpg' } })}
-          onClick={vi.fn()}
-        />
-      );
-      expect(screen.getByRole('img')).toHaveAttribute(
-        'src',
-        'http://example.com/fallback.jpg'
-      );
     });
   });
 

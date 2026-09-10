@@ -23,11 +23,51 @@ export const refreshPlaylist = async (playlist) => {
   return await API.refreshPlaylist(playlist.id);
 };
 
+/**
+ * Convert a playlist/account exp_date (ISO string or null) to a Date for the picker.
+ * @param {string|null|undefined} expDate
+ * @returns {Date|null}
+ */
+export const expDateFromPlaylist = (expDate) => {
+  if (!expDate) return null;
+  const parsed = new Date(expDate);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+};
+
+/**
+ * Stable comparison key for expiration values (Date, ISO string, or null).
+ * @param {Date|string|null|undefined} expDate
+ * @returns {string|null}
+ */
+export const expDateKey = (expDate) => {
+  if (expDate instanceof Date) {
+    return Number.isNaN(expDate.getTime()) ? null : expDate.toISOString();
+  }
+  if (!expDate) return null;
+  const parsed = new Date(expDate);
+  return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString();
+};
+
+const STALKER_ONLY_FIELDS = [
+  'mac',
+  'model',
+  'serial_number',
+  'device_id',
+  'device_id2',
+  'signature',
+  'timezone',
+];
+
 export const prepareSubmitValues = (values, expDate) => {
   const prepared = { ...values };
+  const isXc = prepared.account_type === 'XC';
+  const isStalker = prepared.account_type === 'STALKER';
 
-  if (prepared.account_type === 'XC') {
+  if (isXc) {
+    // XC accounts have exp_date auto-managed server-side; don't send it
     delete prepared.exp_date;
+  } else if (isStalker) {
+    prepared.exp_date = null;
   } else if (expDate instanceof Date) {
     prepared.exp_date = expDate.toISOString();
   } else {
@@ -42,8 +82,19 @@ export const prepareSubmitValues = (values, expDate) => {
     prepared.cron_expression = '';
   }
 
-  if (prepared.account_type == 'XC' && prepared.password == '') {
+  // No password input on a credentialed account means "keep the stored one".
+  if ((isXc || isStalker) && prepared.password == '') {
     delete prepared.password;
+  }
+
+  if (!isXc && !isStalker) {
+    prepared.enable_vod = false;
+  }
+
+  if (!isStalker) {
+    for (const field of STALKER_ONLY_FIELDS) {
+      delete prepared[field];
+    }
   }
 
   if (prepared.user_agent == '0') {

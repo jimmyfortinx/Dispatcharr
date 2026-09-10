@@ -7,7 +7,7 @@ from django.test import TestCase
 
 
 def _make_generator():
-    from apps.proxy.ts_proxy.stream_generator import StreamGenerator
+    from apps.proxy.live_proxy.output.ts.generator import StreamGenerator
 
     gen = StreamGenerator.__new__(StreamGenerator)
     gen.channel_id = "00000000-0000-0000-0000-000000000123"
@@ -37,10 +37,10 @@ class StreamGeneratorInitializationTests(TestCase):
 
         time_values = chain([1000.0, 1000.0, 1000.1, 1000.6, 1000.6, 1000.7], repeat(1000.7))
 
-        with patch("apps.proxy.ts_proxy.stream_generator.ProxyServer.get_instance", return_value=proxy_server), patch(
-            "apps.proxy.ts_proxy.stream_generator.gevent.sleep"
+        with patch("apps.proxy.live_proxy.output.ts.generator.ProxyServer.get_instance", return_value=proxy_server), patch(
+            "apps.proxy.live_proxy.output.ts.generator.gevent.sleep"
         ), patch(
-            "apps.proxy.ts_proxy.stream_generator.time.time",
+            "apps.proxy.live_proxy.output.ts.generator.time.time",
             side_effect=time_values,
         ):
             packets = list(gen._wait_for_initialization())

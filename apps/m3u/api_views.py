@@ -24,6 +24,7 @@ logger = logging.getLogger(__name__)
 from .models import M3UAccount, M3UFilter, ServerGroup, M3UAccountProfile
 from core.models import UserAgent
 from core.utils import ensure_custom_properties_dict, is_task_lock_held, safe_upload_path
+from apps.channels.utils import coerce_channel_profile_ids
 from apps.channels.models import ChannelGroupM3UAccount
 from core.serializers import UserAgentSerializer
 from apps.vod.models import (
@@ -288,36 +289,21 @@ class M3UAccountViewSet(viewsets.ModelViewSet):
         )
 
         # Snapshot channels so proxy sessions can be stopped outside
-        # the DB transaction. The pre_delete signal would otherwise
-        # fire ChannelService.stop_channel (Redis pub / hgetall /
-        # setex) per channel inside the atomic, holding the DB
-        # connection across thousands of blocking RPCs and gumming up
-        # the connection pool.
+        # the DB transaction. Teardown must not run inside the atomic
+        # delete (geventpool connection release would poison the TX).
         channels_to_delete = list(
             Channel.objects.filter(
                 auto_created=True,
                 auto_created_by=instance,
             ).values_list("id", "uuid")
         )
-        for _, channel_uuid in channels_to_delete:
-            if not channel_uuid:
-                continue
-            try:
-                ChannelService.stop_channel(str(channel_uuid))
-            except Exception as e:
-                logger.warning(
-                    "Failed to stop proxy session for channel %s "
-                    "during account cleanup: %s",
-                    channel_uuid,
-                    e,
-                )
+        ChannelService.stop_channels(
+            channel_uuid for _, channel_uuid in channels_to_delete
+        )
 
         channel_ids = [cid for cid, _ in channels_to_delete]
         # Channel + account writes share an atomic so an account
-        # delete failure rolls back the channel deletes too. The
-        # pre_delete signal will fire again here but its proxy stop
-        # is fast on already-stopped channels (a single Redis check
-        # returns "not found" immediately).
+        # delete failure rolls back the channel deletes too.
         with transaction.atomic():
             if channel_ids:
                 _, per_model = Channel.objects.filter(
@@ -628,9 +614,9 @@ class M3UAccountViewSet(viewsets.ModelViewSet):
                 }
 
                 def merge_group_custom_properties(setting):
-                    incoming = setting.get("custom_properties")
-                    if incoming is None:
-                        incoming = {}
+                    incoming = ensure_custom_properties_dict(
+                        setting.get("custom_properties")
+                    )
 
                     existing_relation = existing_group_relations.get(
                         setting["channel_group"]
@@ -655,7 +641,9 @@ class M3UAccountViewSet(viewsets.ModelViewSet):
                         auto_channel_sync=setting.get("auto_channel_sync", False),
                         auto_sync_channel_start=setting.get("auto_sync_channel_start"),
                         auto_sync_channel_end=setting.get("auto_sync_channel_end"),
-                        custom_properties=merge_group_custom_properties(setting),
+                        custom_properties=coerce_channel_profile_ids(
+                            merge_group_custom_properties(setting)
+                        ),
                     )
                     for setting in group_settings
                     if setting.get("channel_group")

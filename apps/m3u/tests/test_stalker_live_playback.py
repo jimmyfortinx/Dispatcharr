@@ -100,7 +100,7 @@ class StalkerPhase5PreviewTests(TestCase):
             autospec=True,
             side_effect=fake_resolve_playback_url,
         ):
-            stream_url, user_agent, input_headers, transcode, stream_profile_id, error_reason = generate_stream_url(
+            stream_url, user_agent, input_headers, transcode, stream_profile_id, _slot_reserved, error_reason = generate_stream_url(
                 self.stream.stream_hash
             )
 

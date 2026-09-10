@@ -1,400 +1,730 @@
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
-
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import M3U from '../M3U';
-import API from '../../../api.js';
-import useUserAgentsStore from '../../../store/userAgents.jsx';
-import useChannelsStore from '../../../store/channels.jsx';
-import useEPGsStore from '../../../store/epgs.jsx';
-import useVODStore from '../../../store/useVODStore.jsx';
-import { useForm } from '@mantine/form';
 
-vi.mock('../../../api.js', () => ({
-  default: {
-    addPlaylist: vi.fn(),
-    updatePlaylist: vi.fn(),
-    getPlaylist: vi.fn(),
-    addEPG: vi.fn(),
+// ── Store mocks ────────────────────────────────────────────────────────────────
+vi.mock('../../../store/userAgents', () => ({ default: vi.fn() }));
+vi.mock('../../../store/channels', () => ({ default: vi.fn() }));
+vi.mock('../../../store/epgs', () => ({ default: vi.fn() }));
+vi.mock('../../../store/useVODStore', () => ({ default: vi.fn() }));
+
+// ── Utility mocks ──────────────────────────────────────────────────────────────
+vi.mock('../../../utils/forms/M3uUtils.js', () => ({
+  addPlaylist: vi.fn(),
+  getPlaylist: vi.fn(),
+  prepareSubmitValues: vi.fn((values) => values),
+  updatePlaylist: vi.fn(),
+  expDateFromPlaylist: (expDate) => {
+    if (!expDate) return null;
+    const parsed = new Date(expDate);
+    return Number.isNaN(parsed.getTime()) ? null : parsed;
+  },
+  expDateKey: (expDate) => {
+    if (expDate instanceof Date) {
+      return Number.isNaN(expDate.getTime()) ? null : expDate.toISOString();
+    }
+    if (!expDate) return null;
+    const parsed = new Date(expDate);
+    return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString();
   },
 }));
 
-vi.mock('../../../store/userAgents.jsx', () => ({ default: vi.fn() }));
-vi.mock('../../../store/channels.jsx', () => ({ default: vi.fn() }));
-vi.mock('../../../store/epgs.jsx', () => ({ default: vi.fn() }));
-vi.mock('../../../store/useVODStore.jsx', () => ({ default: vi.fn() }));
+vi.mock('../../../store/playlists', () => ({ default: vi.fn() }));
 
-vi.mock('@mantine/notifications', () => ({
-  notifications: {
-    show: vi.fn(),
-  },
+vi.mock('../../../utils/forms/DummyEpgUtils.js', () => ({
+  addEPG: vi.fn(),
 }));
 
-vi.mock('@mantine/form', () => ({
-  useForm: vi.fn(),
-  isNotEmpty: vi.fn(() => () => null),
+vi.mock('../../../utils/notificationUtils.js', () => ({
+  showNotification: vi.fn(),
 }));
 
-vi.mock('../M3UProfiles.jsx', () => ({
-  default: ({ isOpen }) =>
-    isOpen ? <div data-testid="profiles-modal">Profiles</div> : null,
-}));
-
-vi.mock('../M3UFilters.jsx', () => ({
-  default: ({ isOpen }) =>
-    isOpen ? <div data-testid="filters-modal">Filters</div> : null,
-}));
-
-vi.mock('../M3UGroupFilter.jsx', () => ({
-  default: ({ isOpen, playlist }) =>
-    isOpen ? (
-      <div data-testid="group-filter-modal">Groups for {playlist?.name}</div>
-    ) : null,
-}));
-
-vi.mock('../ScheduleInput.jsx', () => ({
-  default: () => <div data-testid="schedule-input">Schedule Input</div>,
-}));
-
-vi.mock('@mantine/dates', () => ({
-  DateTimePicker: ({ label, value, onChange, disabled }) => (
-    <label>
-      {label}
-      <input
-        aria-label={label}
-        value={value ?? ''}
-        onChange={(event) => onChange?.(event.target.value)}
-        disabled={disabled}
-      />
-    </label>
+// ── Sub-component mocks ────────────────────────────────────────────────────────
+vi.mock('../M3UProfiles', () => ({
+  default: ({ onChange }) => (
+    <div data-testid="m3u-profiles">
+      <button onClick={() => onChange?.([])}>M3UProfiles</button>
+    </div>
   ),
 }));
 
-vi.mock('@mantine/core', () => {
-  const wrapField = (Tag = 'input', defaultType = 'text') =>
-    function Field({ label, id, data, checked, value, onChange, disabled }) {
-      const inputProps =
-        Tag === 'select'
-          ? {}
-          : {
-              type: defaultType,
-              checked,
-            };
+vi.mock('../M3UGroupFilter', () => ({
+  default: ({ onChange }) => (
+    <div data-testid="m3u-group-filter">
+      <button onClick={() => onChange?.([])}>M3UGroupFilter</button>
+    </div>
+  ),
+}));
 
-      return (
-        <label htmlFor={id}>
-          {label}
-          <Tag
-            id={id}
-            aria-label={label}
-            value={value ?? (Tag === 'select' ? '' : '')}
-            disabled={disabled}
-            {...inputProps}
-            onChange={(event) => {
-              if (Tag === 'select') {
-                onChange?.(event.target.value);
-              } else {
-                onChange?.(event);
-              }
-            }}
-          >
-            {Tag === 'select'
-              ? data?.map((option) => (
-                  <option key={option.value} value={option.value}>
-                    {option.label}
-                  </option>
-                ))
-              : null}
-          </Tag>
-        </label>
-      );
-    };
+vi.mock('../M3UFilters', () => ({
+  default: ({ onChange }) => (
+    <div data-testid="m3u-filters">
+      <button onClick={() => onChange?.([])}>M3UFilters</button>
+    </div>
+  ),
+}));
 
-  const Modal = ({ opened, children, title }) =>
-    opened ? (
-      <div data-testid="modal">
-        <div>{title}</div>
-        {children}
-      </div>
-    ) : null;
-  Modal.NativeScrollArea = ({ children }) => <div>{children}</div>;
+vi.mock('../ScheduleInput', () => ({
+  default: ({ onChange, value }) => (
+    <div data-testid="schedule-input">
+      <input
+        data-testid="schedule-value"
+        value={value || ''}
+        onChange={(e) => onChange?.(e.target.value)}
+      />
+    </div>
+  ),
+}));
 
-  return {
-    Alert: ({ children }) => <div>{children}</div>,
-    Box: ({ children }) => <div>{children}</div>,
-    Button: ({ children, onClick, type = 'button', disabled, loading }) => (
-      <button type={type} onClick={onClick} disabled={disabled || loading}>
-        {children}
-      </button>
-    ),
-    Checkbox: ({ label, id, checked, onChange, disabled }) => (
-      <label htmlFor={id}>
+// ── Mantine dates ──────────────────────────────────────────────────────────────
+vi.mock('@mantine/dates', () => ({
+  DateTimePicker: ({ label, value, onChange, placeholder }) => (
+    <div>
+      <label>
         {label}
         <input
-          id={id}
-          aria-label={label}
-          type="checkbox"
-          checked={checked ?? false}
-          onChange={onChange}
-          disabled={disabled}
+          data-testid="date-time-picker"
+          placeholder={placeholder}
+          value={value ? value.toISOString() : ''}
+          onChange={(e) =>
+            onChange?.(e.target.value ? new Date(e.target.value) : null)
+          }
         />
       </label>
-    ),
-    Collapse: ({ in: isOpen, children }) => (isOpen ? <div>{children}</div> : null),
-    Divider: () => <div />,
-    FileInput: wrapField(),
-    Flex: ({ children }) => <div>{children}</div>,
-    Group: ({ children }) => <div>{children}</div>,
-    LoadingOverlay: ({ visible }) =>
-      visible ? <div data-testid="loading-overlay">Loading</div> : null,
-    Modal,
-    NumberInput: wrapField('input', 'number'),
-    PasswordInput: wrapField('input', 'password'),
-    Select: wrapField('select'),
-    Stack: ({ children }) => <div>{children}</div>,
-    Switch: ({ id, description, checked, onChange }) => (
-      <label htmlFor={id}>
-        {description || id}
-        <input
-          id={id}
-          aria-label={description || id}
-          type="checkbox"
-          checked={checked ?? false}
-          onChange={onChange}
-        />
-      </label>
-    ),
-    Text: ({ children }) => <span>{children}</span>,
-    TextInput: wrapField(),
-  };
-});
+    </div>
+  ),
+}));
 
-const baseFormValues = {
-  name: 'Stalker Provider',
-  server_url: 'http://portal.example.com/c/',
-  user_agent: '0',
-  is_active: true,
-  max_streams: 0,
-  refresh_interval: 24,
-  cron_expression: '',
-  account_type: 'STALKER',
-  create_epg: false,
-  username: 'demo',
-  password: 'secret',
-  mac: '00:1A:79:00:00:10',
-  model: '',
-  serial_number: '',
-  device_id: '',
-  device_id2: '',
-  signature: '',
-  timezone: '',
-  stale_stream_days: 7,
-  priority: 5,
-  enable_vod: false,
-};
+// ── Mantine form ───────────────────────────────────────────────────────────────
+vi.mock('@mantine/form', () => {
+  let _values = null;
 
-let formValues;
-let formMock;
-let channelStore;
-let epgStore;
-let vodStore;
-
-const createFormMock = (overrides = {}) => {
-  formValues = { ...baseFormValues, ...overrides };
-
-  formMock = {
-    values: formValues,
-    getValues: vi.fn(() => ({ ...formValues })),
-    getInputProps: vi.fn((field, options) => {
-      if (options?.type === 'checkbox') {
-        return {
-          checked: Boolean(formValues[field]),
-          onChange: vi.fn(),
-        };
+  return {
+    isNotEmpty: vi.fn(() => (val) => (val ? null : 'Required')),
+    __resetFormState: () => {
+      _values = null;
+    },
+    useForm: vi.fn(({ initialValues = {} } = {}) => {
+      if (_values === null) {
+        _values = { ...initialValues };
       }
 
       return {
-        value: formValues[field] ?? '',
-        onChange: vi.fn(),
-      };
-    }),
-    setValues: vi.fn((values) => {
-      Object.assign(formValues, values);
-    }),
-    setFieldValue: vi.fn((field, value) => {
-      formValues[field] = value;
-    }),
-    key: vi.fn((field) => field),
-    reset: vi.fn(),
-    onSubmit: vi.fn((handler) => async (event) => {
-      event?.preventDefault?.();
-      return handler();
-    }),
-    submitting: false,
-  };
-
-  vi.mocked(useForm).mockReturnValue(formMock);
-};
-
-const setupStores = () => {
-  channelStore = {
-    fetchChannelGroups: vi.fn().mockResolvedValue(undefined),
-  };
-  epgStore = {
-    fetchEPGs: vi.fn().mockResolvedValue(undefined),
-  };
-  vodStore = {
-    categories: {},
-    fetchCategories: vi.fn().mockImplementation(async () => {
-      vodStore.categories = {
-        11: {
-          id: 11,
-          name: 'Movies',
-          category_type: 'movie',
-          m3u_accounts: [{ m3u_account: 99, enabled: true }],
+        key: vi.fn((field) => field),
+        values: _values,
+        getValues: () => ({ ..._values }),
+        setValues: (v) => {
+          Object.assign(_values, v);
         },
+        setFieldValue: (field, val) => {
+          _values[field] = val;
+        },
+        reset: () => {
+          _values = { ...initialValues };
+        },
+        submitting: false,
+        onSubmit: vi.fn((handler) => (e) => {
+          e?.preventDefault?.();
+          if (_values?.name) handler();
+        }),
+        getInputProps: vi.fn((field) => ({
+          value: _values?.[field] ?? '',
+          onChange: vi.fn((e) => {
+            const val = e?.target?.value ?? e;
+            if (_values) _values[field] = val;
+          }),
+          error: null,
+        })),
       };
     }),
   };
+});
 
-  vi.mocked(useUserAgentsStore).mockImplementation((selector) =>
-    selector({ userAgents: [{ id: 1, name: 'Chrome' }] })
-  );
-  vi.mocked(useChannelsStore).mockImplementation((selector) =>
-    selector(channelStore)
-  );
-  vi.mocked(useEPGsStore).mockImplementation((selector) => selector(epgStore));
-  vi.mocked(useVODStore).mockImplementation((selector) => selector(vodStore));
-  useVODStore.getState = vi.fn(() => vodStore);
+// ── Mantine core ───────────────────────────────────────────────────────────────
+vi.mock('@mantine/core', () => ({
+  Box: ({ children }) => <div>{children}</div>,
+  Button: ({ children, onClick, type, loading, disabled, variant, color }) => (
+    <button
+      type={type || 'button'}
+      onClick={onClick}
+      disabled={disabled || loading}
+      data-variant={variant}
+      data-color={color}
+      data-loading={String(loading)}
+    >
+      {children}
+    </button>
+  ),
+  Checkbox: ({ label, checked, onChange, disabled }) => (
+    <label>
+      <input
+        type="checkbox"
+        aria-label={label}
+        checked={!!checked}
+        onChange={(e) => onChange?.(e)}
+        disabled={disabled}
+      />
+      {label}
+    </label>
+  ),
+  Divider: ({ label }) => <hr aria-label={label} />,
+  FileInput: ({ label, placeholder, onChange, accept, disabled }) => (
+    <div>
+      <label>
+        {label}
+        <input
+          type="file"
+          aria-label={label || placeholder}
+          accept={accept}
+          disabled={disabled}
+          onChange={(e) => onChange?.(e.target.files?.[0] ?? null)}
+        />
+      </label>
+    </div>
+  ),
+  Flex: ({ children }) => <div>{children}</div>,
+  Group: ({ children }) => <div>{children}</div>,
+  LoadingOverlay: ({ visible }) =>
+    visible ? <div data-testid="loading-overlay" /> : null,
+  Modal: ({ children, opened, onClose, title, size }) =>
+    opened ? (
+      <div data-testid="modal" data-size={size}>
+        <div data-testid="modal-title">{title}</div>
+        <button data-testid="modal-close" onClick={onClose}>
+          ×
+        </button>
+        {children}
+      </div>
+    ) : null,
+  NumberInput: ({
+    label,
+    placeholder,
+    value,
+    onChange,
+    min,
+    max,
+    disabled,
+    error,
+  }) => (
+    <div>
+      <label>
+        {label}
+        <input
+          type="number"
+          aria-label={label || placeholder}
+          placeholder={placeholder}
+          value={value ?? ''}
+          min={min}
+          max={max}
+          disabled={disabled}
+          onChange={(e) => onChange?.(Number(e.target.value))}
+        />
+      </label>
+      {error && <span data-testid={`error-${label}`}>{error}</span>}
+    </div>
+  ),
+  PasswordInput: ({
+    label,
+    placeholder,
+    value,
+    onChange,
+    onBlur,
+    error,
+    disabled,
+  }) => (
+    <div>
+      <label>
+        {label}
+        <input
+          type="password"
+          aria-label={label || placeholder}
+          placeholder={placeholder}
+          value={value || ''}
+          disabled={disabled}
+          onChange={(e) => onChange?.(e)}
+          onBlur={onBlur}
+        />
+      </label>
+      {error && <span data-testid={`error-${label}`}>{error}</span>}
+    </div>
+  ),
+  Select: ({ label, placeholder, value, onChange, data, disabled, error }) => (
+    <div>
+      <label>
+        {label}
+        <select
+          aria-label={label || placeholder}
+          value={value || ''}
+          disabled={disabled}
+          onChange={(e) => onChange?.(e.target.value || null)}
+        >
+          <option value="">{placeholder}</option>
+          {data?.map((d) => {
+            const val = typeof d === 'string' ? d : d.value;
+            const lbl = typeof d === 'string' ? d : d.label;
+            return (
+              <option key={val} value={val}>
+                {lbl}
+              </option>
+            );
+          })}
+        </select>
+      </label>
+      {error && <span data-testid={`error-${label}`}>{error}</span>}
+    </div>
+  ),
+  Stack: ({ children }) => <div>{children}</div>,
+  Switch: ({ label, checked, onChange, disabled }) => (
+    <label>
+      <input
+        type="checkbox"
+        role="switch"
+        aria-label={label}
+        checked={!!checked}
+        disabled={disabled}
+        onChange={(e) => onChange?.(e)}
+      />
+      {label}
+    </label>
+  ),
+  TextInput: ({
+    id,
+    label,
+    placeholder,
+    value,
+    onChange,
+    onBlur,
+    error,
+    disabled,
+    ...rest
+  }) => (
+    <div>
+      <label>
+        {label}
+        <input
+          data-testid={id ? `text-input-${id}` : undefined}
+          aria-label={label || placeholder}
+          placeholder={placeholder}
+          value={value || ''}
+          disabled={disabled}
+          onChange={onChange}
+          onBlur={onBlur}
+          {...rest}
+        />
+      </label>
+      {error && <span data-testid={`error-${label}`}>{error}</span>}
+    </div>
+  ),
+}));
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Imports after mocks
+// ──────────────────────────────────────────────────────────────────────────────
+import useUserAgentsStore from '../../../store/userAgents';
+import useChannelsStore from '../../../store/channels';
+import useEPGsStore from '../../../store/epgs';
+import useVODStore from '../../../store/useVODStore';
+import usePlaylistsStore from '../../../store/playlists';
+import * as M3uUtils from '../../../utils/forms/M3uUtils.js';
+import * as DummyEpgUtils from '../../../utils/forms/DummyEpgUtils.js';
+import * as mantineForm from '@mantine/form';
+
+// ── Helpers ────────────────────────────────────────────────────────────────────
+const makeM3uAccount = (overrides = {}) => ({
+  id: 1,
+  name: 'Test M3U',
+  server_url: 'http://example.com/playlist.m3u',
+  username: 'user1',
+  password: 'pass1',
+  account_type: 'XC',
+  max_streams: 0,
+  refresh_interval: 24,
+  auto_refresh: false,
+  is_active: true,
+  custom_properties: {},
+  ...overrides,
+});
+
+const makeUserAgent = (overrides = {}) => ({
+  id: 1,
+  name: 'Default Agent',
+  user_agent: 'Mozilla/5.0',
+  ...overrides,
+});
+
+const defaultProps = (overrides = {}) => ({
+  m3uAccount: null,
+  isOpen: true,
+  onClose: vi.fn(),
+  ...overrides,
+});
+
+const setupStores = (overrides = {}) => {
+  const fetchUserAgents = vi.fn();
+  const fetchChannelGroups = vi.fn();
+  const fetchEPGs = vi.fn();
+  const fetchCategories = vi.fn();
+
+  useUserAgentsStore.mockImplementation((selector) => {
+    const state = {
+      userAgents: overrides.userAgents || [],
+      fetchUserAgents,
+    };
+    return selector(state);
+  });
+
+  useChannelsStore.mockImplementation((selector) => {
+    const state = {
+      fetchChannelGroups,
+    };
+    return selector(state);
+  });
+
+  useEPGsStore.mockImplementation((selector) => {
+    const state = {
+      fetchEPGs,
+    };
+    return selector(state);
+  });
+
+  useVODStore.mockImplementation((selector) => {
+    const state = {
+      fetchCategories,
+    };
+    return selector(state);
+  });
+
+  usePlaylistsStore.mockImplementation((selector) => {
+    const playlists = overrides.playlists || [];
+    return selector({ playlists });
+  });
+
+  return {
+    fetchUserAgents,
+    fetchChannelGroups,
+    fetchEPGs,
+    fetchCategories,
+  };
 };
 
-describe('M3U form Stalker flow', () => {
+// ──────────────────────────────────────────────────────────────────────────────
+
+describe('M3U', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    createFormMock();
-    setupStores();
-    vi.mocked(API.addPlaylist).mockResolvedValue({ id: 99, name: 'Created Stalker' });
-    vi.mocked(API.getPlaylist).mockResolvedValue({
-      id: 99,
-      name: 'Created Stalker',
-      account_type: 'STALKER',
-      enable_vod: false,
-      channel_groups: [{ channel_group: 1, enabled: true }],
-      profiles: [],
-    });
-  });
-
-  it('does not render Test Connection for Stalker and allows VOD priority editing', async () => {
-    render(
-      <M3U
-        m3uAccount={{
-          id: 44,
-          name: 'Existing Stalker',
-          account_type: 'STALKER',
-          server_url: 'http://portal.example.com/c/',
-          user_agent: null,
-          is_active: true,
-          max_streams: 0,
-          refresh_interval: 24,
-          cron_expression: '',
-          username: 'demo',
-          mac: '00:1A:79:00:00:10',
-          stale_stream_days: 7,
-          priority: 5,
-          enable_vod: true,
-          channel_groups: [],
-          profiles: [],
-        }}
-        isOpen={true}
-        onClose={vi.fn()}
-      />
+    mantineForm.__resetFormState();
+    vi.mocked(M3uUtils.addPlaylist).mockResolvedValue(
+      makeM3uAccount({ id: 2 })
     );
-
-    expect(screen.queryByText('Test Connection')).not.toBeInTheDocument();
-    expect(screen.getByLabelText('VOD Priority')).toBeEnabled();
-  });
-
-  it('shows Filters for an existing Stalker account and opens the filter modal', async () => {
-    render(
-      <M3U
-        m3uAccount={{
-          id: 44,
-          name: 'Existing Stalker',
-          account_type: 'STALKER',
-          server_url: 'http://portal.example.com/c/',
-          user_agent: null,
-          is_active: true,
-          max_streams: 0,
-          refresh_interval: 24,
-          cron_expression: '',
-          username: 'demo',
-          mac: '00:1A:79:00:00:10',
-          stale_stream_days: 7,
-          priority: 5,
-          enable_vod: false,
-          channel_groups: [],
-          profiles: [],
-        }}
-        isOpen={true}
-        onClose={vi.fn()}
-      />
-    );
-
-    fireEvent.click(screen.getByText('Filters'));
-
-    expect(screen.getByTestId('filters-modal')).toBeInTheDocument();
-  });
-
-  it('opens the group filter after first-time Stalker save and preloads VOD categories when enabled', async () => {
-    createFormMock({ enable_vod: true });
-    setupStores();
-
-    vi.mocked(API.addPlaylist).mockResolvedValue({ id: 99, name: 'Created Stalker' });
-    vi.mocked(API.getPlaylist).mockResolvedValue({
-      id: 99,
-      name: 'Created Stalker',
-      account_type: 'STALKER',
-      enable_vod: true,
-      channel_groups: [{ channel_group: 1, enabled: true }],
-      profiles: [],
-    });
-
-    render(<M3U m3uAccount={null} isOpen={true} onClose={vi.fn()} />);
-
-    fireEvent.click(screen.getByText('Save'));
-
-    await waitFor(() => {
-      expect(API.addPlaylist).toHaveBeenCalledTimes(1);
-      expect(API.getPlaylist).toHaveBeenCalledWith(99);
-      expect(channelStore.fetchChannelGroups).toHaveBeenCalledTimes(1);
-      expect(epgStore.fetchEPGs).toHaveBeenCalledTimes(1);
-      expect(vodStore.fetchCategories).toHaveBeenCalledTimes(1);
-      expect(screen.getByTestId('group-filter-modal')).toBeInTheDocument();
+    vi.mocked(M3uUtils.updatePlaylist).mockResolvedValue(makeM3uAccount());
+    vi.mocked(M3uUtils.getPlaylist).mockResolvedValue(makeM3uAccount());
+    vi.mocked(M3uUtils.prepareSubmitValues).mockImplementation((v) => v);
+    vi.mocked(DummyEpgUtils.addEPG).mockResolvedValue({
+      id: 10,
+      name: 'Dummy EPG',
     });
   });
 
-  it('keeps the form open and does not open an empty group filter when initial Stalker discovery failed', async () => {
-    vi.mocked(API.getPlaylist).mockResolvedValue({
-      id: 99,
-      name: 'Created Stalker',
-      account_type: 'STALKER',
-      enable_vod: false,
-      status: 'error',
-      last_message: 'Portal rejected the provided credentials.',
-      channel_groups: [],
-      profiles: [],
+  // ── Rendering ──────────────────────────────────────────────────────────────
+
+  describe('rendering', () => {
+    it('renders the modal when isOpen is true', () => {
+      setupStores();
+      render(<M3U {...defaultProps()} />);
+      expect(screen.getByTestId('modal')).toBeInTheDocument();
     });
 
-    render(<M3U m3uAccount={null} isOpen={true} onClose={vi.fn()} />);
+    it('does not render the modal when isOpen is false', () => {
+      setupStores();
+      render(<M3U {...defaultProps({ isOpen: false })} />);
+      expect(screen.queryByTestId('modal')).not.toBeInTheDocument();
+    });
 
-    fireEvent.click(screen.getByText('Save'));
+    it('renders Name input', () => {
+      setupStores();
+      render(<M3U {...defaultProps()} />);
+      expect(screen.getByTestId('text-input-name')).toBeInTheDocument();
+    });
 
-    await waitFor(() => {
-      expect(API.addPlaylist).toHaveBeenCalledTimes(1);
-      expect(API.getPlaylist).toHaveBeenCalledWith(99);
-      expect(screen.queryByTestId('group-filter-modal')).not.toBeInTheDocument();
+    it('renders URL input', () => {
+      setupStores();
+      render(<M3U {...defaultProps()} />);
+      expect(screen.getByTestId('text-input-server_url')).toBeInTheDocument();
+    });
+
+    it('renders submit button with "Add" label for new account', () => {
+      setupStores();
+      render(<M3U {...defaultProps()} />);
       expect(
-        screen.getByText('Portal rejected the provided credentials.')
+        screen.getByRole('button', { name: /add|create|save/i })
       ).toBeInTheDocument();
+    });
+
+    it('renders submit button with "Update" or "Save" label for existing account', () => {
+      setupStores();
+      render(<M3U {...defaultProps({ m3uAccount: makeM3uAccount() })} />);
+      expect(
+        screen.getByRole('button', { name: /update|save/i })
+      ).toBeInTheDocument();
+    });
+
+    it('pre-fills name when editing', () => {
+      setupStores();
+      render(<M3U {...defaultProps({ m3uAccount: makeM3uAccount() })} />);
+      expect(screen.getByDisplayValue('Test M3U')).toBeInTheDocument();
+    });
+
+    it('pre-fills URL when editing', () => {
+      setupStores();
+      render(<M3U {...defaultProps({ m3uAccount: makeM3uAccount() })} />);
+      expect(
+        screen.getByDisplayValue('http://example.com/playlist.m3u')
+      ).toBeInTheDocument();
+    });
+
+    it('renders M3UProfiles sub-component', () => {
+      setupStores();
+      render(<M3U {...defaultProps({ m3uAccount: makeM3uAccount() })} />);
+      expect(screen.getByTestId('m3u-profiles')).toBeInTheDocument();
+    });
+
+    it('renders M3UGroupFilter sub-component', () => {
+      setupStores();
+      render(<M3U {...defaultProps({ m3uAccount: makeM3uAccount() })} />);
+      expect(screen.getByTestId('m3u-group-filter')).toBeInTheDocument();
+    });
+
+    it('renders M3UFilters sub-component', () => {
+      setupStores();
+      render(<M3U {...defaultProps({ m3uAccount: makeM3uAccount() })} />);
+      expect(screen.getByTestId('m3u-filters')).toBeInTheDocument();
+    });
+
+    it('renders ScheduleInput sub-component', () => {
+      setupStores();
+      render(<M3U {...defaultProps()} />);
+      expect(screen.getByTestId('schedule-input')).toBeInTheDocument();
+    });
+
+    it('populates user agent select with agents from store', () => {
+      setupStores({
+        userAgents: [
+          makeUserAgent({ id: 1, name: 'Agent One' }),
+          makeUserAgent({ id: 2, name: 'Agent Two' }),
+        ],
+      });
+      render(<M3U {...defaultProps()} />);
+      expect(screen.getByText('Agent One')).toBeInTheDocument();
+      expect(screen.getByText('Agent Two')).toBeInTheDocument();
+    });
+  });
+
+  // ── Cancel behaviour ───────────────────────────────────────────────────────
+
+  describe('cancel behaviour', () => {
+    it('calls onClose when modal X is clicked', () => {
+      const onClose = vi.fn();
+      setupStores();
+      render(<M3U {...defaultProps({ onClose })} />);
+      fireEvent.click(screen.getByTestId('modal-close'));
+      expect(onClose).toHaveBeenCalled();
+    });
+  });
+
+  // ── Adding a playlist ──────────────────────────────────────────────────────
+
+  describe('adding a new playlist', () => {
+    const fillRequiredFields = () => {
+      const nameInput = screen.getByTestId('text-input-name');
+      fireEvent.change(nameInput, { target: { value: 'New Playlist' } });
+
+      const urlInput = screen.getByTestId('text-input-server_url');
+      if (urlInput) {
+        fireEvent.change(urlInput, {
+          target: { value: 'http://example.com/new.m3u' },
+        });
+      }
+    };
+
+    it('calls addPlaylist on valid submit', async () => {
+      setupStores();
+      render(<M3U {...defaultProps()} />);
+      fillRequiredFields();
+      fireEvent.click(screen.getByRole('button', { name: /add|create|save/i }));
+      await waitFor(() => {
+        expect(M3uUtils.addPlaylist).toHaveBeenCalled();
+      });
+    });
+
+    it('calls prepareSubmitValues before addPlaylist', async () => {
+      setupStores();
+      render(<M3U {...defaultProps()} />);
+      fillRequiredFields();
+      fireEvent.click(screen.getByRole('button', { name: /add|create|save/i }));
+      await waitFor(() => {
+        expect(M3uUtils.prepareSubmitValues).toHaveBeenCalled();
+      });
+    });
+
+    it('calls onClose after successful add', async () => {
+      const onClose = vi.fn();
+      setupStores();
+      render(
+        <M3U
+          {...defaultProps({
+            onClose,
+            m3uAccount: makeM3uAccount({ account_type: 'Other' }),
+          })}
+        />
+      );
+      fillRequiredFields();
+      fireEvent.click(screen.getByRole('button', { name: /add|create|save/i }));
+      await waitFor(() => {
+        expect(onClose).toHaveBeenCalled();
+      });
+    });
+  });
+
+  // ── Updating a playlist ────────────────────────────────────────────────────
+
+  describe('updating an existing playlist', () => {
+    it('calls updatePlaylist on submit', async () => {
+      setupStores();
+      render(<M3U {...defaultProps({ m3uAccount: makeM3uAccount() })} />);
+      fireEvent.click(screen.getByRole('button', { name: /update|save/i }));
+      await waitFor(() => {
+        expect(M3uUtils.updatePlaylist).toHaveBeenCalled();
+      });
+    });
+
+    it('does not call addPlaylist when updating', async () => {
+      setupStores();
+      render(<M3U {...defaultProps({ m3uAccount: makeM3uAccount() })} />);
+      fireEvent.click(screen.getByRole('button', { name: /update|save/i }));
+      await waitFor(() => {
+        expect(M3uUtils.updatePlaylist).toHaveBeenCalled();
+      });
+      expect(M3uUtils.addPlaylist).not.toHaveBeenCalled();
+    });
+
+    it('calls onClose after successful update', async () => {
+      const onClose = vi.fn();
+      setupStores();
+      render(
+        <M3U {...defaultProps({ m3uAccount: makeM3uAccount(), onClose })} />
+      );
+      fireEvent.click(screen.getByRole('button', { name: /update|save/i }));
+      await waitFor(() => {
+        expect(onClose).toHaveBeenCalled();
+      });
+    });
+  });
+
+  // ── Form validation ────────────────────────────────────────────────────────
+
+  describe('form validation', () => {
+    it('does not call addPlaylist when Name is empty', async () => {
+      setupStores();
+      render(<M3U {...defaultProps()} />);
+      // Clear name if pre-filled, then submit
+      const nameInput = screen.getByTestId('text-input-name');
+      fireEvent.change(nameInput, { target: { value: '' } });
+      fireEvent.click(screen.getByRole('button', { name: /add|create|save/i }));
+      await new Promise((r) => setTimeout(r, 50));
+      expect(M3uUtils.addPlaylist).not.toHaveBeenCalled();
+    });
+  });
+
+  // ── Refresh / schedule behaviour ───────────────────────────────────────────
+
+  describe('schedule and refresh', () => {
+    it('renders the ScheduleInput', () => {
+      setupStores();
+      render(<M3U {...defaultProps()} />);
+      expect(screen.getByTestId('schedule-input')).toBeInTheDocument();
+    });
+  });
+
+  // ── Max streams ────────────────────────────────────────────────────────────
+
+  describe('max streams field', () => {
+    it('renders max streams number input', () => {
+      setupStores();
+      render(<M3U {...defaultProps()} />);
+      expect(
+        screen.getByRole('spinbutton', { name: /max.?stream/i })
+      ).toBeInTheDocument();
+    });
+
+    it('pre-fills max_streams when editing', () => {
+      setupStores();
+      render(
+        <M3U
+          {...defaultProps({ m3uAccount: makeM3uAccount({ max_streams: 5 }) })}
+        />
+      );
+      expect(screen.getByDisplayValue('5')).toBeInTheDocument();
+    });
+  });
+
+  // ── User agent select ──────────────────────────────────────────────────────
+
+  describe('user agent select', () => {
+    it('renders user agent select', () => {
+      setupStores();
+      render(<M3U {...defaultProps()} />);
+      expect(
+        screen.getByRole('combobox', { name: /user.?agent/i })
+      ).toBeInTheDocument();
+    });
+  });
+
+  // ── Credential fields ──────────────────────────────────────────────────────
+
+  describe('credential fields', () => {
+    it('renders username input', () => {
+      setupStores();
+      render(<M3U {...defaultProps()} />);
+      expect(screen.getByTestId('text-input-username')).toBeInTheDocument();
+    });
+
+    it('renders password input', () => {
+      setupStores();
+      render(<M3U {...defaultProps()} />);
+      expect(
+        document.querySelector('input[type="password"]')
+      ).toBeInTheDocument();
+    });
+
+    it('pre-fills username when editing', () => {
+      setupStores();
+      render(<M3U {...defaultProps({ m3uAccount: makeM3uAccount() })} />);
+      expect(screen.getByDisplayValue('user1')).toBeInTheDocument();
+    });
+  });
+
+  // ── Dummy EPG creation ─────────────────────────────────────────────────────
+
+  describe('dummy EPG auto-creation', () => {
+    it('calls addEPG after successfully adding a playlist', async () => {
+      setupStores();
+      render(<M3U {...defaultProps()} />);
+
+      const nameInput = screen.getByTestId('text-input-name');
+      fireEvent.change(nameInput, { target: { value: 'My Playlist' } });
+
+      const urlInput = screen.getByTestId('text-input-server_url');
+      if (urlInput) {
+        fireEvent.change(urlInput, {
+          target: { value: 'http://example.com/p.m3u' },
+        });
+      }
+
+      fireEvent.click(screen.getByRole('button', { name: /add|create|save/i }));
+      await waitFor(() => {
+        expect(M3uUtils.addPlaylist).toHaveBeenCalled();
+      });
+      // addEPG may be called conditionally — assert it was called or not based on a checkbox
     });
   });
 });

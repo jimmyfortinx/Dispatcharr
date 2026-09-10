@@ -3,6 +3,7 @@ import { useState, useEffect } from 'react';
 import API from '../../api';
 import useUserAgentsStore from '../../store/userAgents';
 import useServerGroupsStore from '../../store/serverGroups';
+import usePlaylistsStore from '../../store/playlists';
 import M3UProfiles from './M3UProfiles';
 import {
   LoadingOverlay,
@@ -33,6 +34,16 @@ import useVODStore from '../../store/useVODStore';
 import M3UFilters from './M3UFilters';
 import ScheduleInput from './ScheduleInput';
 import { DateTimePicker } from '@mantine/dates';
+import { showNotification } from '../../utils/notificationUtils.js';
+import { addEPG } from '../../utils/forms/DummyEpgUtils.js';
+import {
+  addPlaylist,
+  expDateFromPlaylist,
+  expDateKey,
+  getPlaylist,
+  prepareSubmitValues,
+  updatePlaylist,
+} from '../../utils/forms/M3uUtils.js';
 import ServerGroupsManagerModal from '../ServerGroupsManagerModal';
 
 const M3U = ({
@@ -60,6 +71,16 @@ const M3U = ({
   const [serverGroupsManagerOpen, setServerGroupsManagerOpen] = useState(false);
   const [serverGroupsCreateOnOpen, setServerGroupsCreateOnOpen] =
     useState(false);
+
+  // Keep expiration in sync when the default profile is edited (store refreshes).
+  // Do not rebind the whole form to the live playlist or unsaved edits are wiped.
+  const accountId = playlist?.id ?? m3uAccount?.id;
+  const storeExpDate = usePlaylistsStore((s) => {
+    if (!accountId) return undefined;
+    const stored = s.playlists.find((p) => p.id === accountId);
+    if (!stored) return undefined;
+    return stored.exp_date ?? null;
+  });
 
   const form = useForm({
     mode: 'uncontrolled',
@@ -129,7 +150,7 @@ const M3U = ({
             : 0,
         enable_vod: m3uAccount.enable_vod || false,
       });
-      setExpDate(m3uAccount.exp_date ? new Date(m3uAccount.exp_date) : null);
+      setExpDate(expDateFromPlaylist(m3uAccount.exp_date));
 
       // Determine schedule type from existing data
       setScheduleType(
@@ -160,6 +181,7 @@ const M3U = ({
       setShowCredentialFields(false);
       setShowAdvancedDeviceFields(false);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [m3uAccount]);
 
   useEffect(() => {
@@ -175,146 +197,83 @@ const M3U = ({
     }
   }, [form.values.account_type]);
 
-  const onSubmit = async () => {
-    const { create_epg, ...values } = form.getValues();
+  useEffect(() => {
+    if (storeExpDate === undefined) return;
+    const next = expDateFromPlaylist(storeExpDate);
+    setExpDate((prev) =>
+      expDateKey(prev) === expDateKey(next) ? prev : next
+    );
+  }, [storeExpDate]);
 
-    // Convert exp_date (from controlled state) to ISO string for the API
-    if (values.account_type === 'XC') {
-      // XC accounts have exp_date auto-managed server-side; don't send it
-      delete values.exp_date;
-    } else if (values.account_type === 'STALKER') {
-      values.exp_date = null;
-    } else if (expDate instanceof Date) {
-      values.exp_date = expDate.toISOString();
-    } else {
-      values.exp_date = null;
-    }
-
-    // Determine which schedule type is active based on field values
-    const hasCronExpression =
-      values.cron_expression && values.cron_expression.trim() !== '';
-
-    // Clear the field that isn't active based on actual field values
-    if (hasCronExpression) {
-      values.refresh_interval = 0;
-    } else {
-      values.cron_expression = '';
-    }
-
-    if (
-      (values.account_type == 'XC' || values.account_type == 'STALKER') &&
-      values.password == ''
-    ) {
-      // If account XC and no password input, assuming no password change
-      // from previously stored value.
-      delete values.password;
-    }
-
-    if (values.account_type !== 'XC' && values.account_type !== 'STALKER') {
-      values.enable_vod = false;
-    }
-
-    if (values.account_type !== 'STALKER') {
-      delete values.mac;
-      delete values.model;
-      delete values.serial_number;
-      delete values.device_id;
-      delete values.device_id2;
-      delete values.signature;
-      delete values.timezone;
-    }
-
-    if (values.user_agent == '0') {
-      values.user_agent = null;
-    }
-
-    if (values.server_group == '0') {
-      values.server_group = null;
-    }
-
-    let newPlaylist;
-    if (playlist?.id) {
-      newPlaylist = await API.updatePlaylist({
-        id: playlist.id,
-        ...values,
-        file,
+  const handleNewPlaylist = async (newPlaylist, values, create_epg) => {
+    if (create_epg && values.account_type === 'XC') {
+      addEPG({
+        name: values.name,
+        source_type: 'xmltv',
+        url: `${new URL(values.server_url).origin}/xmltv.php?username=${values.username}&password=${values.password}`,
+        api_key: '',
+        is_active: true,
+        refresh_interval: 24,
       });
-      if (newPlaylist) {
-        setPlaylist(newPlaylist);
-      }
-    } else {
-      newPlaylist = await API.addPlaylist({
-        ...values,
-        file,
+    }
+
+    if (values.account_type === 'STD') {
+      showNotification({
+        title: 'Fetching M3U Groups',
+        message:
+          'Configure group filters and auto sync settings once complete.',
       });
-
-      if (create_epg && values.account_type === 'XC') {
-        API.addEPG({
-          name: values.name,
-          source_type: 'xmltv',
-          url: `${new URL(values.server_url).origin}/xmltv.php?username=${values.username}&password=${values.password}`,
-          api_key: '',
-          is_active: true,
-          refresh_interval: 24,
-        });
-      }
-
-      if (values.account_type === 'STD') {
-        notifications.show({
-          title: 'Fetching M3U Groups',
-          message:
-            'Configure group filters and auto sync settings once complete.',
-        });
-
-        // Don't prompt for group filters, but keeping this here
-        // in case we want to revive it
-        newPlaylist = null;
-        close();
-        return;
-      }
-
-      // Fetch the updated playlist details (this also updates the store via API)
-      const updatedPlaylist = await API.getPlaylist(newPlaylist.id);
-
-      // Note: We don't call fetchPlaylists() here because API.addPlaylist()
-      // already added the playlist to the store. Calling fetchPlaylists() creates
-      // a race condition where the store is temporarily cleared/replaced while
-      // websocket updates for the new playlist's refresh task are arriving.
-      await Promise.all([fetchChannelGroups(), fetchEPGs()]);
-
-      // If this is an XC account with VOD enabled, also fetch VOD categories
-      if (
-        (values.account_type === 'XC' || values.account_type === 'STALKER') &&
-        values.enable_vod
-      ) {
-        await fetchCategories({ includeEmpty: true });
-      }
-
-      setPlaylist(updatedPlaylist);
-
-      const hasLiveSetupData =
-        (updatedPlaylist?.channel_groups || []).length > 0;
-      const hasVodSetupData =
-        values.enable_vod &&
-        Object.values(useVODStore.getState().categories || {}).some((category) =>
-          (category.m3u_accounts || []).some(
-            (account) => account.m3u_account == updatedPlaylist.id
-          )
-        );
-
-      if (
-        values.account_type === 'XC' ||
-        hasLiveSetupData ||
-        hasVodSetupData
-      ) {
-        setGroupFilterModalOpen(true);
-      }
+      close();
       return;
     }
 
-    form.reset();
-    setFile(null);
-    onClose(newPlaylist);
+    // Fetch the updated playlist details (this also updates the store via API).
+    // We don't call fetchPlaylists() here because addPlaylist() already added
+    // the playlist to the store; refetching races with the websocket updates
+    // arriving for the new playlist's refresh task.
+    const updatedPlaylist = await getPlaylist(newPlaylist);
+    await Promise.all([fetchChannelGroups(), fetchEPGs()]);
+
+    if (
+      (values.account_type === 'XC' || values.account_type === 'STALKER') &&
+      values.enable_vod
+    ) {
+      await fetchCategories({ includeEmpty: true });
+    }
+
+    setPlaylist(updatedPlaylist);
+
+    const hasLiveSetupData = (updatedPlaylist?.channel_groups || []).length > 0;
+    const hasVodSetupData =
+      values.enable_vod &&
+      Object.values(useVODStore.getState().categories || {}).some((category) =>
+        (category.m3u_accounts || []).some(
+          (account) => account.m3u_account == updatedPlaylist.id
+        )
+      );
+
+    if (values.account_type === 'XC' || hasLiveSetupData || hasVodSetupData) {
+      setGroupFilterModalOpen(true);
+    }
+  };
+
+  const onSubmit = async () => {
+    const { create_epg, ...rawValues } = form.getValues();
+    const values = prepareSubmitValues(rawValues, expDate);
+
+    if (playlist?.id) {
+      const updated = await updatePlaylist(playlist, values, file);
+      if (updated) {
+        setPlaylist(updated);
+      }
+      form.reset();
+      setFile(null);
+      onClose(updated);
+      return;
+    }
+
+    const newPlaylist = await addPlaylist(values, file);
+    await handleNewPlaylist(newPlaylist, values, create_epg);
   };
 
   const close = () => {
@@ -772,6 +731,7 @@ const M3U = ({
             playlist={playlist}
             isOpen={profileModalOpen}
             onClose={() => setProfileModalOpen(false)}
+            pendingExpDate={expDate}
           />
           <M3UGroupFilter
             isOpen={groupFilterModalOpen}
