@@ -4090,6 +4090,30 @@ def _refresh_single_m3u_account_impl(account_id):
         )
     }
 
+    # Stalker accounts pause after their first-ever group discovery so the
+    # user can enable/disable categories before any streams are imported.
+    # Once at least one group has been enabled, subsequent refreshes proceed
+    # straight through to stream import.
+    if is_stalker_account and not existing_groups:
+        last_message = (
+            f"Discovered {len(groups)} Stalker live groups. "
+            "Open Groups to review categories before stream import is enabled."
+        )
+        M3UAccount.objects.filter(id=account_id).update(
+            status=M3UAccount.Status.PENDING_SETUP,
+            last_message=last_message,
+            updated_at=timezone.now(),
+        )
+        send_m3u_update(
+            account_id,
+            "processing_groups",
+            100,
+            status="pending_setup",
+            groups_processed=len(groups),
+            message=last_message,
+        )
+        return "Stalker group discovery complete."
+
     try:
         # Set status to parsing
         account.status = M3UAccount.Status.PARSING

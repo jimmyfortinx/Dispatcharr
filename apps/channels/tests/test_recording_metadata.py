@@ -402,9 +402,12 @@ class LogoNegativeCacheTests(TestCase):
             self._failures[f"https://old-{i}.com/x.png"] = now - 1  # already expired
 
         logo = Logo.objects.create(name="Trigger", url="https://trigger-evict.com/logo.png")
-        import requests
+        # A non-200 response negative-caches immediately; transport errors
+        # (e.g. ConnectionError) deliberately do not, since the scheme/host
+        # may just be temporarily unreachable.
+        mock_resp = MagicMock(status_code=404)
         with patch("core.image_proxy.validate_outbound_http_url"), \
-             patch("core.image_proxy.requests.get", side_effect=requests.ConnectionError("fail")), \
+             patch("core.image_proxy.requests.get", return_value=mock_resp), \
              patch("core.image_proxy.CoreSettings.get_default_user_agent", return_value="Test/1.0"):
             self._fetch_logo(logo)
 

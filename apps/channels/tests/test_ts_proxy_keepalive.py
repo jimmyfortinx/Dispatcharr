@@ -311,6 +311,7 @@ class ClientRemoveIntegrationTests(TestCase):
         gen.bytes_sent = 1234
 
         client_manager = MagicMock()
+        client_manager.clients = {gen.client_id: MagicMock()}
         client_manager.remove_client.return_value = 0
         client_manager.get_total_client_count.return_value = 0
 

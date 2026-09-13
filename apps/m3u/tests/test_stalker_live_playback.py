@@ -90,7 +90,7 @@ class StalkerPhase5PreviewTests(TestCase):
             client.token = "NEW-TOKEN"
             return "http://resolved.example.com/live/world-news"
 
-        with patch.object(Stream, "get_stream", return_value=(self.stream.id, self.account_profile.id, None)), patch(
+        with patch.object(Stream, "get_stream", return_value=(self.stream.id, self.account_profile.id, None, True)), patch(
             "apps.proxy.live_proxy.url_utils.M3UAccountProfile.objects.get",
             return_value=self.account_profile,
         ), patch.object(
@@ -99,6 +99,8 @@ class StalkerPhase5PreviewTests(TestCase):
             "apps.proxy.live_proxy.url_utils.StalkerClient.resolve_playback_url",
             autospec=True,
             side_effect=fake_resolve_playback_url,
+        ), patch(
+            "apps.proxy.live_proxy.url_utils.close_old_connections"
         ):
             stream_url, user_agent, input_headers, transcode, stream_profile_id, _slot_reserved, error_reason = generate_stream_url(
                 self.stream.stream_hash

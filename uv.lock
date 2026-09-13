@@ -470,7 +470,7 @@ requires-dist = [
     { name = "channels" },
     { name = "channels-redis", specifier = "==4.3.0" },
     { name = "daphne" },
-    { name = "django", specifier = "==6.0.6" },
+    { name = "django", specifier = "==6.0.7" },
     { name = "django-celery-beat", specifier = ">=2.9.0" },
     { name = "django-cors-headers" },
     { name = "django-db-geventpool" },
@@ -478,8 +478,8 @@ requires-dist = [
     { name = "django-redis" },
     { name = "djangorestframework", specifier = "==3.17.1" },
     { name = "djangorestframework-simplejwt" },
-    { name = "drf-spectacular", specifier = ">=0.29.0" },
-    { name = "gevent", specifier = "==26.5.0" },
+    { name = "drf-spectacular", specifier = ">=0.30.0" },
+    { name = "gevent", specifier = "==26.7.0" },
     { name = "lxml", specifier = "==6.1.1" },
     { name = "m3u8" },
     { name = "packaging" },
@@ -491,9 +491,9 @@ requires-dist = [
     { name = "rapidfuzz", specifier = "==3.14.5" },
     { name = "regex" },
     { name = "requests", specifier = "==2.34.2" },
-    { name = "sentence-transformers", specifier = "==5.6.0" },
+    { name = "sentence-transformers", specifier = "==5.6.1" },
     { name = "streamlink" },
-    { name = "torch", specifier = "==2.12.1+cpu", index = "https://download.pytorch.org/whl/cpu" },
+    { name = "torch", specifier = "==2.13.0+cpu", index = "https://download.pytorch.org/whl/cpu" },
     { name = "tzlocal" },
     { name = "uwsgi" },
     { name = "yt-dlp" },
@@ -501,16 +501,16 @@ requires-dist = [
 
 [[package]]
 name = "django"
-version = "6.0.6"
+version = "6.0.7"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "asgiref" },
     { name = "sqlparse" },
     { name = "tzdata", marker = "sys_platform == 'win32'" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/78/29/ac41e16097af67066d97a7d5775c5d8e7efc5d0284f6b0a159e07b9adb92/django-6.0.6.tar.gz", hash = "sha256:ad03916ba59523d781ae5c3f631960c23d69a9d9c43cecda52fc23b47e953713", size = 10905525, upload-time = "2026-06-03T13:02:46.503Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/89/55/664f24ff81c9ea19cb7dfc851afeae1f3c2390c7aee01d4ded68b5c1580d/django-6.0.7.tar.gz", hash = "sha256:2998503fc083124fb58037084bfa00de323c7c743f05f1b4284e77bff0ab8890", size = 10921299, upload-time = "2026-07-07T13:51:26.485Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/eb/50/23f9dc45483419a3cc2085b498b25adfbf10642b2941c73e6d2dfaffc9ab/django-6.0.6-py3-none-any.whl", hash = "sha256:25148b1194c47c2e685e5f5e9c5d59c78b075dfd282cb9618861ba6c1708f4d2", size = 8373354, upload-time = "2026-06-03T13:02:41.72Z" },
+    { url = "https://files.pythonhosted.org/packages/ba/ec/1ce5334b6a2c52ce619c23a0be8d366a57a0e080ebb2d88266e5c849157c/django-6.0.7-py3-none-any.whl", hash = "sha256:a037427c2288443a8c02a1b02295a31c239663aa682bc50b1976afb7cf6a769e", size = 8373344, upload-time = "2026-07-07T13:51:20.007Z" },
 ]
 
 [[package]]
@@ -620,7 +620,7 @@ wheels = [
 
 [[package]]
 name = "drf-spectacular"
-version = "0.29.0"
+version = "0.30.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "django" },
@@ -630,9 +630,9 @@ dependencies = [
     { name = "pyyaml" },
     { name = "uritemplate" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/5e/0e/a4f50d83e76cbe797eda88fc0083c8ca970cfa362b5586359ef06ec6f70a/drf_spectacular-0.29.0.tar.gz", hash = "sha256:0a069339ea390ce7f14a75e8b5af4a0860a46e833fd4af027411a3e94fc1a0cc", size = 241722, upload-time = "2025-11-02T03:40:26.348Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/50/43/41d25039a6a53545420ebc98eb9f877ec9fe30c7bd03fefabcaf9b953af7/drf_spectacular-0.30.0.tar.gz", hash = "sha256:53e79e7ba00e240441b63c32273754a5368e4c2ab44a19f2595277cc1cd559c9", size = 252311, upload-time = "2026-07-06T11:29:46.264Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/32/d9/502c56fc3ca960075d00956283f1c44e8cafe433dada03f9ed2821f3073b/drf_spectacular-0.29.0-py3-none-any.whl", hash = "sha256:d1ee7c9535d89848affb4427347f7c4a22c5d22530b8842ef133d7b72e19b41a", size = 105433, upload-time = "2025-11-02T03:40:24.823Z" },
+    { url = "https://files.pythonhosted.org/packages/c3/56/74dd7b45bbde6d24494220b98d6961cb1200b63a1800332b430daa2c4551/drf_spectacular-0.30.0-py3-none-any.whl", hash = "sha256:006cf5921ebe20a9bd24f7c846261ebbf78780be5961b0d6e87afaa82afd62ff", size = 111150, upload-time = "2026-07-06T11:29:45.12Z" },
 ]
 
 [[package]]
@@ -655,7 +655,7 @@ wheels = [
 
 [[package]]
 name = "gevent"
-version = "26.5.0"
+version = "26.7.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "cffi", marker = "platform_python_implementation == 'CPython' and sys_platform == 'win32'" },
@@ -663,35 +663,33 @@ dependencies = [
     { name = "zope-event" },
     { name = "zope-interface" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/c4/cb/98aa3a299e2fc4a2372b5d124863e02965b64579ffc29fe54d0641e65b2f/gevent-26.5.0.tar.gz", hash = "sha256:1655eb04c1e20d71b2aa4a3c7528162dd58ff6cc46a037af1f01f534c80fefba", size = 6712354, upload-time = "2026-05-20T21:22:45.132Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/9f/5c/92002455a57cb3634383e2b822e3bccf409f43cde34528e46428971475cf/gevent-26.7.0.tar.gz", hash = "sha256:5b333a556e38a302b1b8c80525bef16d437e16f1e7767947789406841856a102", size = 6729213, upload-time = "2026-07-22T20:16:04.713Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/7d/47/5b992ab9c8037633cfd0fe698a97a878f59d8eb53c381e91e9a1a76fd215/gevent-26.5.0-cp313-cp313-macosx_11_0_universal2.whl", hash = "sha256:9b4d3f34c913d1a6bec6d030365a517f3b527a9773b12e58cf56c3339bbe96e6", size = 2952523, upload-time = "2026-05-20T20:13:04.698Z" },
-    { url = "https://files.pythonhosted.org/packages/74/11/c7dfc773eb43331a682efed610b49df6e976331f1b0e1c592a0c35d29872/gevent-26.5.0-cp313-cp313-manylinux_2_28_aarch64.whl", hash = "sha256:1d8da4e799431feeb4c9e441ac7431f0baabb9106976790d884289d08ac08359", size = 1787044, upload-time = "2026-05-20T21:17:32.845Z" },
-    { url = "https://files.pythonhosted.org/packages/ae/28/9812933dac93560f46910a9e834805fe76f822c408bd1c20cdf299d7c311/gevent-26.5.0-cp313-cp313-manylinux_2_28_ppc64le.whl", hash = "sha256:51becdb4c30a8f45c1c028ad7a97bf5a1ed141f74b159a31aa9cc6aa1e6263a6", size = 1882342, upload-time = "2026-05-20T21:16:02.645Z" },
-    { url = "https://files.pythonhosted.org/packages/96/4b/514f248f69b2230b69b0bb17f4158b0b05dd4b2cb469a60ab206e9fe7496/gevent-26.5.0-cp313-cp313-manylinux_2_28_s390x.whl", hash = "sha256:c42bbcd3d453b08ad8915fd3feaf3d44a3562cdf1c7b208f9837149711e16d9d", size = 1834136, upload-time = "2026-05-20T21:30:55.739Z" },
-    { url = "https://files.pythonhosted.org/packages/53/67/f5f30716efca99b6200ae89a9303a7e94dae085b7de6f6d0033c52a37f4b/gevent-26.5.0-cp313-cp313-manylinux_2_28_x86_64.whl", hash = "sha256:bd3445e4fbeeb46690ed8efe94b8d1d46b14aa04af8866ae7a8da5997828d1c6", size = 2115349, upload-time = "2026-05-20T20:35:28.132Z" },
-    { url = "https://files.pythonhosted.org/packages/09/d8/60e8809bde7986e6c4e6d106080b3603fa09b3bb0255fed1a4d8282e3ca2/gevent-26.5.0-cp313-cp313-musllinux_1_2_aarch64.whl", hash = "sha256:b573d5b2826edc705f31f07da6889ad483a6a0d64944ebd8d32205f7c5bf46fb", size = 1799443, upload-time = "2026-05-20T21:16:41.928Z" },
-    { url = "https://files.pythonhosted.org/packages/f8/41/b388b2b1f0a026ea30687e51ddf81dbb783dfb55fac0a16708d2821d99e5/gevent-26.5.0-cp313-cp313-musllinux_1_2_x86_64.whl", hash = "sha256:4d53b1b28f2082a151bded2850b53f6baed02f742d2a1584029e8bd42d457fb4", size = 2141117, upload-time = "2026-05-20T20:43:30.694Z" },
-    { url = "https://files.pythonhosted.org/packages/b1/f3/ac9a4b0de487e390c5d53a908a9347c0df0102de2bbf3e8603087769191d/gevent-26.5.0-cp313-cp313-win_amd64.whl", hash = "sha256:23569ce0c254eb821fc3dcfe250843dde8b3180b09bae9e222e41aa3fa4885b7", size = 1699862, upload-time = "2026-05-20T20:15:33.642Z" },
-    { url = "https://files.pythonhosted.org/packages/2a/cf/1ef1fc9b390563c0f97702f94a557d1649b7bbb5724f9b86c2122747e92f/gevent-26.5.0-cp313-cp313-win_arm64.whl", hash = "sha256:40cdcdb2e404b6c82b82a4576bdb33958f23fc2deb0d933e9e022b362001e647", size = 1545341, upload-time = "2026-05-20T20:16:26.229Z" },
-    { url = "https://files.pythonhosted.org/packages/17/55/7d98d3888e7bb9ad4656420dec69232ecbbea48792aff9295d0ad7cf8435/gevent-26.5.0-cp314-cp314-macosx_11_0_universal2.whl", hash = "sha256:75a0050e4b87f08ddee7e56f59e6014cd7fcdc3153046c09a847940515d12c85", size = 2968223, upload-time = "2026-05-20T20:13:17.223Z" },
-    { url = "https://files.pythonhosted.org/packages/f8/b4/e8e116fcbcb9dc0bf3acc50037f86e1204c217c8ed5defde68be11b3aab6/gevent-26.5.0-cp314-cp314-manylinux_2_28_aarch64.whl", hash = "sha256:fd1a0b83a04e19378d9466ae0ee2b5937cf1d7fbfdcb916b2aea82179a208574", size = 1793926, upload-time = "2026-05-20T21:17:34.321Z" },
-    { url = "https://files.pythonhosted.org/packages/28/07/7b267e9754b661defb93542e97731a4df21f8a40dc0f6c853faa717cf124/gevent-26.5.0-cp314-cp314-manylinux_2_28_ppc64le.whl", hash = "sha256:4c964c15076e76391d523ec24202f579a2535f7e301a40efb1656ae046d3eb69", size = 1887632, upload-time = "2026-05-20T21:16:04.158Z" },
-    { url = "https://files.pythonhosted.org/packages/5c/50/b47d29e99449bd13b557ffa451401dc13d397a9923f562ef90a4e8514502/gevent-26.5.0-cp314-cp314-manylinux_2_28_s390x.whl", hash = "sha256:45d5438d1c84da5df7e832434627624709543630977332bb4e2d05ecca362cc9", size = 1838688, upload-time = "2026-05-20T21:30:57.979Z" },
-    { url = "https://files.pythonhosted.org/packages/8b/eb/5b54ccff11bc7d7bebd40a24571ccc115d5cdae4f6c32ab457b43b436e42/gevent-26.5.0-cp314-cp314-manylinux_2_28_x86_64.whl", hash = "sha256:354f35924113abc954819216c2a6ee16751958c615681e0490946e31b437bd2f", size = 2120351, upload-time = "2026-05-20T20:35:32.699Z" },
-    { url = "https://files.pythonhosted.org/packages/9c/70/30fd325c30e04b1e5174c61945e17421d53ddb2450366cc52cef234f8c4b/gevent-26.5.0-cp314-cp314-musllinux_1_2_aarch64.whl", hash = "sha256:a47cd2d32f6404212d374ad8014a3491d7477dcf0cc09c5a2308ad6d325fd663", size = 1806684, upload-time = "2026-05-20T21:16:43.87Z" },
-    { url = "https://files.pythonhosted.org/packages/cd/e8/fbf911ac3f9524ecfaed174d100fde671904ab8db92ceaf07faaebd13386/gevent-26.5.0-cp314-cp314-musllinux_1_2_x86_64.whl", hash = "sha256:032157cebdedb84f2f52cdd980f2f5f2623eed6a8f083aadf44b44c47f628642", size = 2146606, upload-time = "2026-05-20T20:43:32.216Z" },
-    { url = "https://files.pythonhosted.org/packages/9e/4d/284fcbbfde66fd978c2980c1fbe0eabd586af6e4b728649e9cf459e8b38f/gevent-26.5.0-cp314-cp314-win_amd64.whl", hash = "sha256:9c414935ba5fc88359110968851d3616f119082c937390d00a1c0f4f59be814f", size = 1722497, upload-time = "2026-05-20T20:16:44.274Z" },
-    { url = "https://files.pythonhosted.org/packages/15/d2/9f66eb53434704402be0ba733bf3320bf589671a4b76fac52a7d6077e972/gevent-26.5.0-cp314-cp314-win_arm64.whl", hash = "sha256:2a0f5993a04b95a35b3a118b1a58ba272833f9b547b774001dea29f90620882f", size = 1574249, upload-time = "2026-05-20T20:15:50.873Z" },
-    { url = "https://files.pythonhosted.org/packages/dc/d5/b4c50adb761878e3c96642b9f79bf44cee3120f3df55cd40876f51d89866/gevent-26.5.0-cp315-cp315-macosx_11_0_universal2.whl", hash = "sha256:2e117df896a2660c9ebd4e2b5afc02dfd6e2ddf9b495e787e67c72d105432b09", size = 2971993, upload-time = "2026-05-20T20:12:50.845Z" },
-    { url = "https://files.pythonhosted.org/packages/03/83/71c2a945e80198422d1d93dbe67355f249fb456b451bf9201199d3ef6a1a/gevent-26.5.0-cp315-cp315-manylinux_2_28_aarch64.whl", hash = "sha256:af5ffe9c11ffb8a39b6bef2e8b722aa2043ae4980977915c6aa8c68b4bc26e46", size = 1796658, upload-time = "2026-05-20T21:17:35.968Z" },
-    { url = "https://files.pythonhosted.org/packages/42/96/548ca77aed5cb9a44e855a6c23ebceeb3554a0ea9ca0c01c311878899a3e/gevent-26.5.0-cp315-cp315-manylinux_2_28_ppc64le.whl", hash = "sha256:7da34aef7e87c43dd3662e5785e79ed505c01399a7cb42876d2d8925969fd75f", size = 1891473, upload-time = "2026-05-20T21:16:05.657Z" },
-    { url = "https://files.pythonhosted.org/packages/f6/4f/f48bd47d5287afb0fbcc56165f3ed47583f1803bad401653fe27e71ade2d/gevent-26.5.0-cp315-cp315-manylinux_2_28_s390x.whl", hash = "sha256:1c6293a7046bcc6f3d8972a74b19cd7a4cfd02d3881edf0fcf827aa514bd247b", size = 1841429, upload-time = "2026-05-20T21:30:59.907Z" },
-    { url = "https://files.pythonhosted.org/packages/a0/72/1925215fc720d2561fa3ec8d4af5f098f8d0cbfa76a45fafed6e5ade7718/gevent-26.5.0-cp315-cp315-manylinux_2_28_x86_64.whl", hash = "sha256:d3bde0f140a275b2fa88e4b6516bda85551930e10bc2fd95e18c1b7d11cb780c", size = 2123895, upload-time = "2026-05-20T20:35:34.964Z" },
-    { url = "https://files.pythonhosted.org/packages/83/59/0f584f6b1170c9a6abd9b70ccf5e9cc5ead34eabafabc0e21876ef0fe6f7/gevent-26.5.0-cp315-cp315-musllinux_1_2_aarch64.whl", hash = "sha256:e29fb4b17d9958ec8cb7f6339a111b29bc23f2c2efbef86189d1248bb4862d17", size = 1809047, upload-time = "2026-05-20T21:16:45.977Z" },
-    { url = "https://files.pythonhosted.org/packages/82/88/61e854bfd98ac22eac78a97fc6db10de0f9ace46514072b435c217168729/gevent-26.5.0-cp315-cp315-musllinux_1_2_x86_64.whl", hash = "sha256:b2239df2f7570efa03736678f3f053bb1bdd22a8a16cd28a2feb7d32ea5f533f", size = 2150764, upload-time = "2026-05-20T20:43:33.781Z" },
-    { url = "https://files.pythonhosted.org/packages/b9/f5/af048b97433d7f9a7df7f5510b2c46918b7d073dcfb3bf6d0ef0e5a83dcc/gevent-26.5.0-cp315-cp315-win_amd64.whl", hash = "sha256:aae214952fd38d27a42dc416bb70193962ec932384b63445d29bbb5817a1c042", size = 1722600, upload-time = "2026-05-20T20:19:56.81Z" },
-    { url = "https://files.pythonhosted.org/packages/11/95/fb74a2299c6a2d78d9de12deaaac640ab5d2ef96a8e0f97a3ff84b9ca84b/gevent-26.5.0-cp315-cp315-win_arm64.whl", hash = "sha256:f7067564f139e33bf26a31ee3b13d168d76eb99a44b85ced626652b158baa80c", size = 1574406, upload-time = "2026-05-20T20:17:12.125Z" },
+    { url = "https://files.pythonhosted.org/packages/75/63/0fcfbe3f5696e56424f331ec41e0e447cea79c384848d6019e3f7f340f4b/gevent-26.7.0-cp313-cp313-macosx_11_0_universal2.whl", hash = "sha256:b1b89eb5566f75aa8b2bbdb0308e1ac8d9113ca7cff85b45366aea9faad639a1", size = 2976844, upload-time = "2026-07-22T16:24:39.275Z" },
+    { url = "https://files.pythonhosted.org/packages/3c/6c/ea2d0afbe760c18df5bd1631dbe5a73d840d9b141cb71e6810157c2ae28a/gevent-26.7.0-cp313-cp313-manylinux_2_28_aarch64.whl", hash = "sha256:449857ce058183442e2d71d83ff0c587a3ddff631e93c6d19a6dffb4814eccad", size = 1802332, upload-time = "2026-07-22T18:11:29.155Z" },
+    { url = "https://files.pythonhosted.org/packages/59/90/36f2258f1bfe8601224f6159066103b832c31e1451ce8dc2cd2408b6ecf4/gevent-26.7.0-cp313-cp313-manylinux_2_28_ppc64le.whl", hash = "sha256:8260a3f38b05fcf3c283417b18617562dbec74f5784f748e4ba3866789d7f3a4", size = 1901253, upload-time = "2026-07-22T18:10:44.402Z" },
+    { url = "https://files.pythonhosted.org/packages/dd/38/86dd67e5c2dfab016a9c935b4338d6cf8f9bfa72dc5a0f3fb879d993127a/gevent-26.7.0-cp313-cp313-manylinux_2_28_s390x.whl", hash = "sha256:30894398d06747b433c8923a6a77ede61259ce6822a99f6c6e7fa0216ccb73c3", size = 1850489, upload-time = "2026-07-22T18:29:09.694Z" },
+    { url = "https://files.pythonhosted.org/packages/f1/33/f5651942a5967483298b6ce6f45572d33120dd0fd01c8991d3fca5b1e8ee/gevent-26.7.0-cp313-cp313-manylinux_2_28_x86_64.whl", hash = "sha256:0b753522498118c9489753de7c612d4baed0edf384d9df2bf9492233ba1c20ff", size = 2129813, upload-time = "2026-07-22T16:48:32.551Z" },
+    { url = "https://files.pythonhosted.org/packages/c0/09/abe8217a8fcd3f0e94c9eec024a5499c0f267cb269ccea6c0e2e812319b9/gevent-26.7.0-cp313-cp313-musllinux_1_2_aarch64.whl", hash = "sha256:055a643026dc28daff2be228555a2097937448cc9b58307edebcf81b9d78ff4b", size = 1815121, upload-time = "2026-07-22T18:07:13.988Z" },
+    { url = "https://files.pythonhosted.org/packages/40/d6/dbae1cd2d27b62664cefa086035530eb21203d45b12f466272441c048c9c/gevent-26.7.0-cp313-cp313-musllinux_1_2_x86_64.whl", hash = "sha256:4e1dc6a2712de67fd210e1f1a408601f6908b042f6420e188106f2f37f94ec71", size = 2155913, upload-time = "2026-07-22T17:02:16.35Z" },
+    { url = "https://files.pythonhosted.org/packages/fc/42/90b662f4eb27d7727d4619d5c6be872117f1a9f187b243ec7f6fef988ce7/gevent-26.7.0-cp313-cp313-win_amd64.whl", hash = "sha256:44e5280296129c0915addaefdb37d6e9bc124a77a433b1b1c8ddf1853c53f4e7", size = 1682483, upload-time = "2026-07-22T16:26:30.492Z" },
+    { url = "https://files.pythonhosted.org/packages/e1/84/7297c56b9fff463c4ba2f685dbb913a855df903046dc68d14e8655a29ffe/gevent-26.7.0-cp313-cp313-win_arm64.whl", hash = "sha256:9f08b1aa6729f794409ca137e25f671e0d9bbda4451200c5e28a769375365388", size = 1556053, upload-time = "2026-07-22T16:26:14.365Z" },
+    { url = "https://files.pythonhosted.org/packages/c1/bb/ab60d496cbdc0293ebbd6c2070b34da0632bd7a2ca20163c17e18d2d2dc9/gevent-26.7.0-cp314-cp314-macosx_11_0_universal2.whl", hash = "sha256:0e0e3bf7ae0f82dbc5c6be26b4781e86c97f1e28d516b7a9746ac8b04bcc6948", size = 2992503, upload-time = "2026-07-22T16:24:36.503Z" },
+    { url = "https://files.pythonhosted.org/packages/5c/35/75f27c06a82a5b22600aaccbd9567d89bb4091be43e96c02981f10aff23d/gevent-26.7.0-cp314-cp314-manylinux_2_28_aarch64.whl", hash = "sha256:740050b53048207b080a1e183a377c47809ad0b7b7b0cd7eab0dea1045f7e480", size = 1809173, upload-time = "2026-07-22T18:11:30.724Z" },
+    { url = "https://files.pythonhosted.org/packages/5b/5f/a6b32b4db3fa76bd8a070f0f46f5306123bf6336e7a0ca0cd2f9b99473df/gevent-26.7.0-cp314-cp314-manylinux_2_28_ppc64le.whl", hash = "sha256:67983607eb6c7bafa362c5c43b69a27145b936c34a3d6441ed42413d62fae0a6", size = 1906630, upload-time = "2026-07-22T18:10:45.836Z" },
+    { url = "https://files.pythonhosted.org/packages/e1/87/832495d8fcc05ff7432f038b7c4decbd5632425a2cd5da2ce73cb2d800c4/gevent-26.7.0-cp314-cp314-manylinux_2_28_s390x.whl", hash = "sha256:475848518d708e07d1987c3d94cb8ff53e2b3a69df32e39feda2779cafe400b0", size = 1855278, upload-time = "2026-07-22T18:29:11.517Z" },
+    { url = "https://files.pythonhosted.org/packages/72/8b/2f36c0fa389fa2b7ceb5a8972b0e7da7bc770f9135315cf4246c607ca5fc/gevent-26.7.0-cp314-cp314-manylinux_2_28_x86_64.whl", hash = "sha256:0f8ed457dd616bfe6682569f92730f9ab45aafb1aeca5e80eb2f6b9a2ce26d11", size = 2136155, upload-time = "2026-07-22T16:48:33.865Z" },
+    { url = "https://files.pythonhosted.org/packages/b5/98/09f2cfaa23dbce48e3271e95b0d003f93acece6b5cfd40f4cebe3850d79b/gevent-26.7.0-cp314-cp314-musllinux_1_2_aarch64.whl", hash = "sha256:15373c68cf1fa14114bec2f09b16e2c65374bd5309e897e0a28740b09ce329e0", size = 1822108, upload-time = "2026-07-22T18:07:15.397Z" },
+    { url = "https://files.pythonhosted.org/packages/b0/d8/05a294165c17569f04284ad3c889684c8780544885b4cdf77b1432947d0c/gevent-26.7.0-cp314-cp314-musllinux_1_2_x86_64.whl", hash = "sha256:73f3d53f2f390369e290c933b75bd87f1f2261f2f2f2175aa667c43ee3049bad", size = 2162814, upload-time = "2026-07-22T17:02:18.066Z" },
+    { url = "https://files.pythonhosted.org/packages/59/89/58a545c4eda33e106d6887a0387adc2249abc14c779e3eb88bbfdf3768d6/gevent-26.7.0-cp314-cp314-win_amd64.whl", hash = "sha256:f11b558d544ad2249029ba023cd6519ec3a0eee54a3d027e6515c1eaa322422a", size = 1706971, upload-time = "2026-07-22T16:27:02.263Z" },
+    { url = "https://files.pythonhosted.org/packages/bb/cd/413f293e54961e5c89c54235370e3603ec0f561e7ace8357980410efbf78/gevent-26.7.0-cp314-cp314-win_arm64.whl", hash = "sha256:3871f4ca59ec2328c3ef638a0fe01a28a825443a133368dc78eb5ceadcad7609", size = 1585078, upload-time = "2026-07-22T16:30:48.145Z" },
+    { url = "https://files.pythonhosted.org/packages/21/3a/47f29f632aaa38aa12410f57f1732fc50bfd4d4006d2e7e022ce731cabc9/gevent-26.7.0-cp315-cp315-macosx_11_0_universal2.whl", hash = "sha256:3e3d6e20a94239ad353b776e72b8ce18c35dbe4e98c279aef3932651553d8404", size = 2996208, upload-time = "2026-07-22T16:23:23.859Z" },
+    { url = "https://files.pythonhosted.org/packages/b8/b3/4620f1ce81ecec9890229806c73f07dd022e40f76a552bd430391e7316c4/gevent-26.7.0-cp315-cp315-manylinux_2_28_aarch64.whl", hash = "sha256:ddbd3cc76b9bc69df651a216c2a62fc6415ad463b3ac9c6cbbbb8b7b8224af17", size = 1811545, upload-time = "2026-07-22T18:11:32.224Z" },
+    { url = "https://files.pythonhosted.org/packages/97/fd/d285212ffd5585d511299e13e61d76262def8e826e9f20c92cb85df406f2/gevent-26.7.0-cp315-cp315-manylinux_2_28_ppc64le.whl", hash = "sha256:01ceab7e608dc1b9859d9511a0a29d7ce2e7d909ab19fddc860e70a2ed5b10ce", size = 1910418, upload-time = "2026-07-22T18:10:47.709Z" },
+    { url = "https://files.pythonhosted.org/packages/2d/e0/c5d666e6065652918cfb6e6a3cf8f721d0e152c57cec217ad81792a1323b/gevent-26.7.0-cp315-cp315-manylinux_2_28_s390x.whl", hash = "sha256:2e6c917b2b8baeb6080797a6b25e35e1fd784319a05bb92b87c53546e5578eb2", size = 1857891, upload-time = "2026-07-22T18:29:13.13Z" },
+    { url = "https://files.pythonhosted.org/packages/a1/67/e945ed458fa98b34572876bfd0d35fe4fa3f1159f43660b71d982b7cb63e/gevent-26.7.0-cp315-cp315-manylinux_2_28_x86_64.whl", hash = "sha256:df75a1748b26030f2f7f10042cc45640b22954d9d0dc6b4b6f0dbe0b6751a2d4", size = 2138121, upload-time = "2026-07-22T16:48:35.358Z" },
+    { url = "https://files.pythonhosted.org/packages/99/55/622468fa1a3c4cf51f20e14813f5cc1592fe6e44a42ccca9195a0b18c769/gevent-26.7.0-cp315-cp315-musllinux_1_2_aarch64.whl", hash = "sha256:ee1b389587e5d5c1eb19d0455b5b4d7a0fb5c5287af4e226ec66d9dfd2548107", size = 1825114, upload-time = "2026-07-22T18:07:16.667Z" },
+    { url = "https://files.pythonhosted.org/packages/0f/7a/151a2afcacf487ca25faf8b1bdd6c5b4ace2f7c1e6b4eaffe0a5e6e1df61/gevent-26.7.0-cp315-cp315-musllinux_1_2_x86_64.whl", hash = "sha256:c2918641ba756f46aa01ab9dd82d6dfceec403c77c2787298746b411dcf0288e", size = 2165990, upload-time = "2026-07-22T17:02:19.817Z" },
 ]
 
 [[package]]
@@ -1890,7 +1888,7 @@ wheels = [
 
 [[package]]
 name = "sentence-transformers"
-version = "5.6.0"
+version = "5.6.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "huggingface-hub" },
@@ -1902,9 +1900,9 @@ dependencies = [
     { name = "transformers" },
     { name = "typing-extensions" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/f9/56/d2cb00765a6b15c994a7fccf20f9032f16e8193ca49147cb5155166ad744/sentence_transformers-5.6.0.tar.gz", hash = "sha256:0e7164d051e416c1853ade7c274ff52af3f9da0f4be7f0b83d734c27699e1057", size = 453194, upload-time = "2026-06-16T14:01:56.42Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/75/80/573ab31b77bdfa8f18051188adff3405e928386287cd6f756eff5777dd82/sentence_transformers-5.6.1.tar.gz", hash = "sha256:16af5d682ef66672b076d58599a23905800e850ec2bfb1865938306bf684ad72", size = 452185, upload-time = "2026-07-23T14:40:41.589Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/76/c1/dc1582b79e9a2eb0cddf9559cd9bcdff084f541d6fe881fdd9d98630dba7/sentence_transformers-5.6.0-py3-none-any.whl", hash = "sha256:d2075b5e687a1611005e20ab04a6846994d51adfcf39610aed066af3c0c0b81f", size = 596411, upload-time = "2026-06-16T14:01:55.103Z" },
+    { url = "https://files.pythonhosted.org/packages/c1/ad/8f73f512dc7ad4031d2b64cbb67f70bdfb355756afbe0db610a5146415c1/sentence_transformers-5.6.1-py3-none-any.whl", hash = "sha256:cefbb17b6325a982a4732c8c49fb013375392687049d1de3d435c4b04060680b", size = 596677, upload-time = "2026-07-23T14:40:40.312Z" },
 ]
 
 [[package]]
@@ -2049,7 +2047,7 @@ wheels = [
 
 [[package]]
 name = "torch"
-version = "2.12.1+cpu"
+version = "2.13.0+cpu"
 source = { registry = "https://download.pytorch.org/whl/cpu" }
 dependencies = [
     { name = "filelock" },
@@ -2061,18 +2059,23 @@ dependencies = [
     { name = "typing-extensions" },
 ]
 wheels = [
-    { url = "https://download-r2.pytorch.org/whl/cpu/torch-2.12.1%2Bcpu-cp313-cp313-linux_s390x.whl", hash = "sha256:4ca206a35f2aeba7da944a69ef857103358e8d4bc6b06b49b9e554dcfa57777d", upload-time = "2026-06-18T01:57:47Z" },
-    { url = "https://download-r2.pytorch.org/whl/cpu/torch-2.12.1%2Bcpu-cp313-cp313-manylinux_2_28_aarch64.whl", hash = "sha256:8d47e0cfc59679d4e367646c3df4cf433c7d1595b31307e0e7b2391c58ca2160", upload-time = "2026-06-18T01:57:52Z" },
-    { url = "https://download-r2.pytorch.org/whl/cpu/torch-2.12.1%2Bcpu-cp313-cp313-manylinux_2_28_x86_64.whl", hash = "sha256:77d049968c7817456dbdebf0aadcac0813e302218b0e857a8723463331339d55", upload-time = "2026-06-18T01:57:59Z" },
-    { url = "https://download-r2.pytorch.org/whl/cpu/torch-2.12.1%2Bcpu-cp313-cp313-win_amd64.whl", hash = "sha256:06d13c354df07953ae0d150da22a071496cbbedd22d1b644961813c0f0fc3b23", upload-time = "2026-06-18T01:58:05Z" },
-    { url = "https://download-r2.pytorch.org/whl/cpu/torch-2.12.1%2Bcpu-cp314-cp314-linux_s390x.whl", hash = "sha256:ef228ec70f5e73762c213f145c0fdb672e5770a6de760801c58b933b0d5b6957", upload-time = "2026-06-18T01:58:09Z" },
-    { url = "https://download-r2.pytorch.org/whl/cpu/torch-2.12.1%2Bcpu-cp314-cp314-manylinux_2_28_aarch64.whl", hash = "sha256:1b9ad70d0a300d6bd883fffc153a6c0f9bc64bf4190519aeeed0373807bffbcc", upload-time = "2026-06-18T01:58:15Z" },
-    { url = "https://download-r2.pytorch.org/whl/cpu/torch-2.12.1%2Bcpu-cp314-cp314-manylinux_2_28_x86_64.whl", hash = "sha256:618120d79360688595e61162147d37e1d69fc3f2e13d60584a1eb6a74c74735a", upload-time = "2026-06-18T01:58:22Z" },
-    { url = "https://download-r2.pytorch.org/whl/cpu/torch-2.12.1%2Bcpu-cp314-cp314-win_amd64.whl", hash = "sha256:6354069774ce2d9c26d6d8612fc252586428467b7e4ced7c8bbbfb961fafb783", upload-time = "2026-06-18T01:58:29Z" },
-    { url = "https://download-r2.pytorch.org/whl/cpu/torch-2.12.1%2Bcpu-cp314-cp314t-linux_s390x.whl", hash = "sha256:0706eb7b53c4b1381b2acc418f6d89d6ed18a308677125ced7ca30519c57dc42", upload-time = "2026-06-18T01:58:33Z" },
-    { url = "https://download-r2.pytorch.org/whl/cpu/torch-2.12.1%2Bcpu-cp314-cp314t-manylinux_2_28_aarch64.whl", hash = "sha256:21ed774c10a0fd24ab2cfaabfa98a9260fc28d518946c98c0151b6e447730250", upload-time = "2026-06-18T01:58:39Z" },
-    { url = "https://download-r2.pytorch.org/whl/cpu/torch-2.12.1%2Bcpu-cp314-cp314t-manylinux_2_28_x86_64.whl", hash = "sha256:e3c3b5c275dd57cff1aa34a0ab8f84beab8976c63c8dc1d84f29430eac0590ea", upload-time = "2026-06-18T01:58:46Z" },
-    { url = "https://download-r2.pytorch.org/whl/cpu/torch-2.12.1%2Bcpu-cp314-cp314t-win_amd64.whl", hash = "sha256:03094411b20e85a221125a332211d59c099dc556afb1423e04193fcf1b4c1cbd", upload-time = "2026-06-18T01:58:52Z" },
+    { url = "https://download-r2.pytorch.org/whl/cpu/torch-2.13.0%2Bcpu-cp313-cp313-linux_s390x.whl", hash = "sha256:966d020354f465672dc7dd10d3a5c6cd17d7eb48620aa1d265b48a1f78f06898", upload-time = "2026-07-08T19:29:30Z" },
+    { url = "https://download-r2.pytorch.org/whl/cpu/torch-2.13.0%2Bcpu-cp313-cp313-manylinux_2_28_aarch64.whl", hash = "sha256:0b8f7d0423027ae8b90c7977c627f3379f325363a08224dffad9b4b2d684a83d", upload-time = "2026-07-08T19:29:40Z" },
+    { url = "https://download-r2.pytorch.org/whl/cpu/torch-2.13.0%2Bcpu-cp313-cp313-manylinux_2_28_x86_64.whl", hash = "sha256:3fbf9c9d1f3c10c2d59d04aca426dee9ccc6ceb32d255c61e93acc3b4f75fae6", upload-time = "2026-07-08T19:29:54Z" },
+    { url = "https://download-r2.pytorch.org/whl/cpu/torch-2.13.0%2Bcpu-cp313-cp313-win_amd64.whl", hash = "sha256:a17ff48608634db245e17e8bb00a9558554a49aeb1e4f5fe6cd039af2a10515b", upload-time = "2026-07-08T19:30:05Z" },
+    { url = "https://download-r2.pytorch.org/whl/cpu/torch-2.13.0%2Bcpu-cp313-cp313-win_arm64.whl", hash = "sha256:ac7aaf322be4777765a53bed7264a214dd81b3a1d276b93150515a3c5f75e4b0", upload-time = "2026-07-08T19:30:12Z" },
+    { url = "https://download-r2.pytorch.org/whl/cpu/torch-2.13.0%2Bcpu-cp314-cp314-linux_s390x.whl", hash = "sha256:dec241fef3984c0d1edadd1f58708e218d4eae881ceef7bc10cf9964d41b68b9", upload-time = "2026-07-08T19:30:20Z" },
+    { url = "https://download-r2.pytorch.org/whl/cpu/torch-2.13.0%2Bcpu-cp314-cp314-manylinux_2_28_aarch64.whl", hash = "sha256:ca021f9eb2f8345c83fa03e3a04587308afb8df71bd472670b3ece00df58621c", upload-time = "2026-07-08T19:30:32Z" },
+    { url = "https://download-r2.pytorch.org/whl/cpu/torch-2.13.0%2Bcpu-cp314-cp314-manylinux_2_28_x86_64.whl", hash = "sha256:d20fa53ee744502fa4c69818a720b05ca0d37abd055d4f6e66cae155114bc691", upload-time = "2026-07-08T19:30:45Z" },
+    { url = "https://download-r2.pytorch.org/whl/cpu/torch-2.13.0%2Bcpu-cp314-cp314-win_amd64.whl", hash = "sha256:e2e5134decf00e218da62318f3dc5df156231d367871918e91eba95ab0ad43ab", upload-time = "2026-07-08T19:30:58Z" },
+    { url = "https://download-r2.pytorch.org/whl/cpu/torch-2.13.0%2Bcpu-cp314-cp314t-linux_s390x.whl", hash = "sha256:991cc14b39e751122c01f017be6448533989868731cb5eecd1006893d26787c2", upload-time = "2026-07-08T19:31:09Z" },
+    { url = "https://download-r2.pytorch.org/whl/cpu/torch-2.13.0%2Bcpu-cp314-cp314t-manylinux_2_28_aarch64.whl", hash = "sha256:7b8d26e29bceafbdaa8d63bfe7612f23875b5af2cc07e13f809c3ed890bbe1d8", upload-time = "2026-07-08T19:31:21Z" },
+    { url = "https://download-r2.pytorch.org/whl/cpu/torch-2.13.0%2Bcpu-cp314-cp314t-manylinux_2_28_x86_64.whl", hash = "sha256:b222c15a0fc2ce207d1c1a59700b46c8fa6748df1f447ad11e5c870dde0933d9", upload-time = "2026-07-08T19:31:35Z" },
+    { url = "https://download-r2.pytorch.org/whl/cpu/torch-2.13.0%2Bcpu-cp314-cp314t-win_amd64.whl", hash = "sha256:a43376bd094124ef626bfdd3d4c2c62eacb0b5ddc99776f4a32d4fd16f1f3420", upload-time = "2026-07-08T19:31:48Z" },
+    { url = "https://download-r2.pytorch.org/whl/cpu/torch-2.13.0%2Bcpu-cp315-cp315-manylinux_2_28_aarch64.whl", hash = "sha256:8eb5002ca81af00ae69b57540f615b58b8ae922b6d4848176b366a52bd2196e6", upload-time = "2026-07-08T19:32:00Z" },
+    { url = "https://download-r2.pytorch.org/whl/cpu/torch-2.13.0%2Bcpu-cp315-cp315-manylinux_2_28_x86_64.whl", hash = "sha256:1a3a35229fdc13446b4eab50e7fcf9399ff941e89a3b761497786297a5d8dde5", upload-time = "2026-07-08T19:32:16Z" },
+    { url = "https://download-r2.pytorch.org/whl/cpu/torch-2.13.0%2Bcpu-cp315-cp315t-manylinux_2_28_aarch64.whl", hash = "sha256:8e109528e6bab044815daebaf71770fbaace3a66ef1c816cb55c875350f78a60", upload-time = "2026-07-08T19:32:30Z" },
+    { url = "https://download-r2.pytorch.org/whl/cpu/torch-2.13.0%2Bcpu-cp315-cp315t-manylinux_2_28_x86_64.whl", hash = "sha256:222a6681467cc7f6f05cd3068dfbc603def3a1e46d1d4620c1c8cdf6178bd563", upload-time = "2026-07-08T19:32:44Z" },
 ]
 
 [[package]]

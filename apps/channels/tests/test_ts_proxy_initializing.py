@@ -14,6 +14,7 @@ from django.test import TestCase
 from apps.proxy.live_proxy.constants import ChannelMetadataField, ChannelState
 from apps.proxy.live_proxy.redis_keys import RedisKeys
 from apps.proxy.live_proxy.input.manager import StreamManager
+from apps.proxy.live_proxy.server import ProxyServer
 
 
 # ---------------------------------------------------------------------------
@@ -257,13 +258,26 @@ class ConnectionReadyThresholdTests(TestCase):
             return None
 
         redis.get.side_effect = get_side_effect
+        redis.hget.return_value = ChannelState.CONNECTING.encode("utf-8")
+        redis.scard.return_value = 0
+
+        mock_proxy_server = MagicMock()
+        mock_proxy_server.redis_client = redis
+        # Bind the real update_channel_state so its hset call is observable
+        # on our redis mock, instead of also being swallowed by the mock.
+        mock_proxy_server.update_channel_state = ProxyServer.update_channel_state.__get__(
+            mock_proxy_server, ProxyServer
+        )
 
         with patch(
             "apps.proxy.live_proxy.input.manager.ConfigHelper.connection_ready_chunks",
             return_value=1,
         ), patch(
             "apps.proxy.live_proxy.input.manager.ConfigHelper.initial_behind_chunks",
-            return_value=4,
+            return_value=1,
+        ), patch(
+            "apps.proxy.live_proxy.services.channel_service.ProxyServer.get_instance",
+            return_value=mock_proxy_server,
         ):
             result = sm._set_waiting_for_clients()
 

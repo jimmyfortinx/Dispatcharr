@@ -1,4 +1,5 @@
 from django.contrib import admin
+from django.http import Http404
 from django.urls import path, include, re_path
 from django.conf import settings
 from django.conf.urls.static import static
@@ -8,6 +9,12 @@ from apps.output.views import xc_player_api, xc_panel_api, xc_get, xc_xmltv
 from apps.proxy.live_proxy.views import stream_xc
 from apps.proxy.vod_proxy.views import stream_xc_movie, stream_xc_episode
 from apps.timeshift.views import timeshift_proxy, timeshift_proxy_query
+
+
+def api_not_found(request, *args, **kwargs):
+    """Unmatched /api/ paths should 404, not fall through to the SPA catch-all."""
+    raise Http404("API endpoint not found")
+
 
 urlpatterns = [
     # API Routes
@@ -68,6 +75,8 @@ urlpatterns = [
     path("admin/", admin.site.urls),
 
     # VOD proxy is now handled by the main proxy URLs above
+    # Any /api/ path not matched above is a genuine 404, not a frontend route.
+    re_path(r"^api/.*$", api_not_found),
     # Catch-all routes should always be last
     path("", TemplateView.as_view(template_name="index.html")),  # React entry point
     path("<path:unused_path>", TemplateView.as_view(template_name="index.html")),

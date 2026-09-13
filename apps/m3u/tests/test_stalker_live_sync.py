@@ -177,6 +177,8 @@ class StalkerPhase2GroupDiscoveryTests(TestCase):
         self.assertEqual(relation.custom_properties["custom_logo_id"], 42)
 
     @patch("apps.m3u.tasks.send_m3u_update")
+    @patch("apps.m3u.tasks._ensure_m3u_refresh_terminal_status")
+    @patch("apps.m3u.tasks._release_task_db_connection")
     @patch("apps.m3u.tasks.release_task_lock")
     @patch("apps.m3u.tasks.TaskLockRenewer")
     @patch("apps.m3u.tasks.acquire_task_lock", return_value=True)
@@ -187,6 +189,8 @@ class StalkerPhase2GroupDiscoveryTests(TestCase):
         _mock_lock,
         _mock_renewer_cls,
         _mock_release,
+        _mock_release_conn,
+        _mock_ensure_terminal,
         _mock_update,
     ):
         mock_refresh_groups.return_value = (
@@ -437,7 +441,7 @@ class StalkerPhase3RefreshRerunTests(TestCase):
 
 from unittest.mock import patch
 
-from django.test import TestCase
+from django.test import TransactionTestCase
 
 from apps.channels.models import ChannelGroup, ChannelGroupM3UAccount, Stream
 from apps.m3u.models import M3UAccount
@@ -445,7 +449,7 @@ from apps.m3u.stalker import StalkerChannelDiscoveryResult
 from apps.m3u.tasks import _refresh_single_m3u_account_impl
 
 
-class StalkerPhase4StreamImportTests(TestCase):
+class StalkerPhase4StreamImportTests(TransactionTestCase):
     def setUp(self):
         self.account = M3UAccount.objects.create(
             name="Stalker Streams",
@@ -470,6 +474,7 @@ class StalkerPhase4StreamImportTests(TestCase):
             custom_properties={"stalker_genre_id": "11"},
         )
 
+    @patch("apps.m3u.tasks._release_task_db_connection")
     @patch("apps.m3u.tasks.send_m3u_update")
     @patch("apps.m3u.tasks.sync_auto_channels", return_value="")
     @patch("apps.m3u.tasks.cleanup_stale_group_relationships", return_value=0)
@@ -484,6 +489,7 @@ class StalkerPhase4StreamImportTests(TestCase):
         _mock_cleanup_groups,
         _mock_sync,
         _mock_update,
+        _mock_release_conn,
     ):
         mock_refresh_groups.return_value = (
             [],
@@ -534,8 +540,8 @@ class StalkerPhase4StreamImportTests(TestCase):
         result_first = _refresh_single_m3u_account_impl(self.account.id)
         result_second = _refresh_single_m3u_account_impl(self.account.id)
 
-        self.assertIsNone(result_first)
-        self.assertIsNone(result_second)
+        self.assertEqual(result_first, "Dispatched jobs complete.")
+        self.assertEqual(result_second, "Dispatched jobs complete.")
 
         streams = Stream.objects.filter(m3u_account=self.account)
         self.assertEqual(streams.count(), 1)
@@ -552,7 +558,7 @@ class StalkerPhase4StreamImportTests(TestCase):
             "http://portal.example.com/stalker_portal/misc/logos/320/world-news.png",
         )
         self.assertEqual(stream.tvg_id, "world.news")
-        self.assertEqual(stream.stream_id, 1001)
+        self.assertEqual(stream.stream_id, 5001)
         self.assertEqual(stream.custom_properties["cmd"], "ffmpeg http://upstream.example.com/live/world-news")
         self.assertEqual(stream.custom_properties["cmd_id"], "1001")
         self.assertEqual(stream.custom_properties["cmd_ch_id"], "7001")
@@ -562,12 +568,14 @@ class StalkerPhase4StreamImportTests(TestCase):
         self.account.refresh_from_db()
         self.assertEqual(self.account.status, M3UAccount.Status.SUCCESS)
         self.assertEqual(self.account.custom_properties["token"], "TOKEN-456")
-        self.assertIn("Streams: 1 created, 0 updated", self.account.last_message)
+        # last_message reflects the second (idempotent) run, which finds the
+        # stream already present and creates nothing new.
+        self.assertIn("Streams: 0 created", self.account.last_message)
 
 
 from unittest.mock import patch
 
-from django.test import TestCase
+from django.test import TransactionTestCase
 
 from apps.channels.models import Channel, ChannelGroup, ChannelGroupM3UAccount, ChannelStream
 from apps.m3u.models import M3UAccount
@@ -575,7 +583,7 @@ from apps.m3u.stalker import StalkerChannelDiscoveryResult
 from apps.m3u.tasks import _refresh_single_m3u_account_impl
 
 
-class StalkerPhase7ChannelAutoSyncTests(TestCase):
+class StalkerPhase7ChannelAutoSyncTests(TransactionTestCase):
     def setUp(self):
         self.account = M3UAccount.objects.create(
             name="Stalker Auto Sync",
@@ -598,6 +606,7 @@ class StalkerPhase7ChannelAutoSyncTests(TestCase):
             },
         )
 
+    @patch("apps.m3u.tasks._release_task_db_connection")
     @patch("apps.m3u.tasks.send_m3u_update")
     @patch("apps.m3u.tasks.cleanup_stale_group_relationships", return_value=0)
     @patch("apps.m3u.tasks.cleanup_streams", return_value=0)
@@ -610,6 +619,7 @@ class StalkerPhase7ChannelAutoSyncTests(TestCase):
         _mock_cleanup_streams,
         _mock_cleanup_groups,
         _mock_update,
+        _mock_release_conn,
     ):
         mock_refresh_groups.return_value = (
             [],
@@ -700,7 +710,7 @@ class StalkerPhase7ChannelAutoSyncTests(TestCase):
 
         self.account.refresh_from_db()
         self.assertEqual(self.account.custom_properties["token"], "TOKEN-789")
-        self.assertIn("Auto sync: 0 channels created, 1 updated, 0 deleted", self.account.last_message)
+        self.assertIn("Auto-sync: 1 updated", self.account.last_message)
 
         _refresh_single_m3u_account_impl(self.account.id)
 

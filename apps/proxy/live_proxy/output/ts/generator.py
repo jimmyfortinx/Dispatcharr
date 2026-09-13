@@ -190,6 +190,8 @@ class StreamGenerator:
     def _wait_for_initialization(self):
         initialization_start = time.time()
         max_init_wait = ConfigHelper.client_wait_timeout()
+        keepalive_interval = 0.5
+        last_keepalive = 0
         proxy_server = ProxyServer.get_instance()
 
         while time.time() - initialization_start < max_init_wait:
@@ -229,6 +231,25 @@ class StreamGenerator:
                         logger.error(f"[{self.client_id}] Channel {self.channel_id} in error state: {state}, message: {error_message}")
                         yield create_ts_packet('error', f"Error: {error_message}")
                         return False
+                    else:
+                        init_time = "unknown"
+                        if 'init_time' in metadata:
+                            try:
+                                init_time_float = float(metadata['init_time'])
+                                init_duration = time.time() - init_time_float
+                                init_time = f"{init_duration:.1f}s ago"
+                            except Exception:
+                                pass
+
+                        # Still initializing - send keepalive if needed so the
+                        # client's TS reader doesn't time out on an idle socket.
+                        if time.time() - last_keepalive >= keepalive_interval:
+                            status_msg = f"Initializing: {state} (started {init_time})"
+                            keepalive_packet = create_ts_packet('keepalive', status_msg)
+                            logger.debug(f"[{self.client_id}] Sending keepalive packet during initialization, state={state}")
+                            yield keepalive_packet
+                            self.bytes_sent += len(keepalive_packet)
+                            last_keepalive = time.time()
 
                 stop_key = RedisKeys.channel_stopping(self.channel_id)
                 if proxy_server.redis_client.exists(stop_key):

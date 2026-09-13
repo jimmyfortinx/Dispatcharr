@@ -34,6 +34,8 @@ class StreamGeneratorInitializationTests(TestCase):
 
         proxy_server = MagicMock()
         proxy_server.redis_client = redis_client
+        proxy_server.client_managers = {}
+        proxy_server._stopping_channels = set()
 
         time_values = chain([1000.0, 1000.0, 1000.1, 1000.6, 1000.6, 1000.7], repeat(1000.7))
 
