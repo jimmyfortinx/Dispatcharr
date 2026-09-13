@@ -19,5 +19,6 @@ export const getProxySettingDefaults = () => {
     connection_ready_chunks: 16,
     max_reconnect_attempts: 5,
     min_stable_time_before_reconnect: 10,
+    validate_redirect_urls: true,
   };
 };

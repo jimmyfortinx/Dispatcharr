@@ -1526,7 +1526,16 @@ def process_movie_batch(account, batch, categories, relations, scan_start_time=N
                 name = extract_display_name(movie_data)
             else:
                 stream_id = str(movie_data.get('stream_id'))
-                name = movie_data.get('name', 'Unknown')
+                # Skip blank names: Movie.name is NOT NULL, and one null in this
+                # atomic batch would roll back every other row.
+                name = str(movie_data.get('name') or '').strip()
+                if not name:
+                    logger.warning(
+                        "Skipping movie with blank name (stream_id=%s, account=%s)",
+                        stream_id,
+                        account.id,
+                    )
+                    continue
 
             if not stream_id:
                 logger.debug("Skipping movie without a stable relation key: %s", movie_data)
@@ -1591,66 +1600,27 @@ def process_movie_batch(account, batch, categories, relations, scan_start_time=N
             else:
                 movie_key = f"name_{name}_{year or 'None'}"
 
-            # For XC accounts we still keep a single provider row per deduped
-            # movie key. Stalker needs to keep distinct provider relations so
-            # the same title can remain visible in multiple categories.
-            if not is_stalker and (movie_key in movie_entries or movie_key in seen_movie_keys):
+            # Within a single batch, distinct stream_ids for the same movie key
+            # still get their own relation, and their list-sync props are
+            # merged together (same stream_id coalesces). Across batches/chunks
+            # of the same scan, a non-Stalker movie key that was already fully
+            # recorded in an earlier batch is skipped entirely. Stalker needs
+            # to keep distinct provider relations across the whole scan so the
+            # same title can remain visible in multiple categories.
+            if (
+                not is_stalker
+                and movie_key in seen_movie_keys
+                and movie_key not in movie_entries
+            ):
                 continue
 
-            # Prepare movie properties
-            description = movie_data.get('description') or movie_data.get('plot') or ''
-            rating = normalize_rating(movie_data.get('rating') or movie_data.get('vote_average'))
-            genre = movie_data.get('genre') or movie_data.get('category_name') or ''
-            duration_secs = extract_duration_from_data(movie_data)
-            trailer_raw = movie_data.get('trailer') or movie_data.get('youtube_trailer') or ''
-            trailer = extract_string_from_array_or_string(trailer_raw) if trailer_raw else None
-            logo_url = extract_stalker_logo_url(movie_data) if is_stalker else (movie_data.get('stream_icon') or '')
-
-            custom_properties = {}
-            if trailer:
-                custom_properties['trailer'] = trailer
-            for key in ('releaseDate', 'release_date', 'added'):
-                value = movie_data.get(key)
-                if value not in (None, '', []):
-                    custom_properties[key] = value
-
-            director = extract_string_from_array_or_string(
-                movie_data.get('director') or ''
+            movie_props, logo_url = build_movie_list_props(
+                movie_data, name, year, tmdb_id, imdb_id,
             )
-            actors_raw = movie_data.get('actors') or movie_data.get('cast') or ''
-            if isinstance(actors_raw, list):
-                actors = ', '.join(s.strip() for s in actors_raw if s and str(s).strip()) or None
-            else:
-                actors = actors_raw.strip() if actors_raw else None
-            release_date = movie_data.get('release_date') or movie_data.get('releasedate') or ''
-
-            custom_props = {}
-            if trailer:
-                custom_props['youtube_trailer'] = trailer
-            if director:
-                custom_props['director'] = director
-            if actors:
-                custom_props['actors'] = actors
-            if release_date:
-                custom_props['release_date'] = release_date
-
-            movie_props = {
-                'name': name,
-                'year': year,
-                'tmdb_id': tmdb_id,
-                'imdb_id': imdb_id,
-                'description': description,
-                'rating': rating,
-                'genre': genre,
-                'duration_secs': duration_secs,
-                'custom_properties': custom_props or None,
-            }
-            # Only set is_adult when the provider actually reports it. Movies are
-            # shared across providers (matched by TMDB/IMDB/name+year), and many
-            # providers omit this key entirely; defaulting it to False here would
-            # let a sparse provider row silently clear a flag another provider set.
-            if 'is_adult' in movie_data:
-                movie_props['is_adult'] = parse_is_adult(movie_data['is_adult'])
+            if is_stalker:
+                stalker_logo_url = extract_stalker_logo_url(movie_data)
+                if stalker_logo_url:
+                    logo_url = stalker_logo_url
 
             existing_entry = movie_entries.get(movie_key)
             if existing_entry is None:
@@ -1659,17 +1629,7 @@ def process_movie_batch(account, batch, categories, relations, scan_start_time=N
                     'logo_url': logo_url,  # Keep logo URL for later processing
                 }
             else:
-                existing_props = existing_entry['props']
-                if not existing_props.get('description') and description:
-                    existing_props['description'] = description
-                if not existing_props.get('rating') and rating:
-                    existing_props['rating'] = rating
-                if not existing_props.get('genre') and genre:
-                    existing_props['genre'] = genre
-                if not existing_props.get('duration_secs') and duration_secs:
-                    existing_props['duration_secs'] = duration_secs
-                if not existing_props.get('custom_properties') and custom_properties:
-                    existing_props['custom_properties'] = custom_properties
+                merge_blank_vod_list_props(existing_entry['props'], movie_props)
                 if not existing_entry.get('logo_url') and logo_url:
                     existing_entry['logo_url'] = logo_url
 
@@ -1964,7 +1924,16 @@ def process_series_batch(account, batch, categories, relations, scan_start_time=
                 name = extract_display_name(series_data)
             else:
                 series_id = str(series_data.get('series_id'))
-                name = series_data.get('name', 'Unknown')
+                # Skip blank names: Series.name is NOT NULL, and one null in this
+                # atomic batch would roll back every other row.
+                name = str(series_data.get('name') or '').strip()
+                if not name:
+                    logger.warning(
+                        "Skipping series with blank name (series_id=%s, account=%s)",
+                        series_id,
+                        account.id,
+                    )
+                    continue
 
             if not series_id:
                 logger.debug("Skipping series without a stable relation key: %s", series_data)
@@ -2024,53 +1993,27 @@ def process_series_batch(account, batch, categories, relations, scan_start_time=
             else:
                 series_key = f"name_{name}_{year or 'None'}"
 
-            if not is_stalker and (series_key in series_entries or series_key in seen_series_keys):
+            # Within a single batch, distinct series_ids for the same series key
+            # still get their own relation, and their list-sync props are
+            # merged together (same series_id coalesces). Across batches/chunks
+            # of the same scan, a non-Stalker series key that was already fully
+            # recorded in an earlier batch is skipped entirely. Stalker needs
+            # to keep distinct provider relations across the whole scan so the
+            # same title can remain visible in multiple categories.
+            if (
+                not is_stalker
+                and series_key in seen_series_keys
+                and series_key not in series_entries
+            ):
                 continue
 
-            # Prepare series properties
-            description = series_data.get('description') or series_data.get('plot') or ''
-            rating = normalize_rating(series_data.get('rating'))
-            genre = series_data.get('genre', '')
-            logo_url = extract_stalker_logo_url(series_data) if is_stalker else (series_data.get('cover') or '')
-
-            # Extract additional metadata for custom_properties
-            additional_metadata = {}
-            for key in ['backdrop_path', 'poster_path', 'original_name', 'first_air_date', 'last_air_date',
-                       'episode_run_time', 'status', 'type', 'cast', 'director', 'country', 'language',
-                       'releaseDate', 'release_date', 'youtube_trailer', 'category_id', 'age', 'seasons', 'added']:
-                value = series_data.get(key)
-                if value:
-                    # For string-like fields that might be arrays, extract clean strings
-                    if key == 'cast':
-                        if isinstance(value, list):
-                            clean_value = ', '.join(s.strip() for s in value if s and str(s).strip()) or None
-                        else:
-                            clean_value = extract_string_from_array_or_string(value)
-                        if clean_value:
-                            additional_metadata[key] = clean_value
-                    elif key in ['poster_path', 'youtube_trailer', 'director']:
-                        clean_value = extract_string_from_array_or_string(value)
-                        if clean_value:
-                            additional_metadata[key] = clean_value
-                    elif key == 'backdrop_path':
-                        clean_value = extract_string_from_array_or_string(value)
-                        if clean_value:
-                            additional_metadata[key] = [clean_value]
-                    else:
-                        # For other fields, keep as-is if not null/empty
-                        if value is not None and value != '' and value != []:
-                            additional_metadata[key] = value
-
-            series_props = {
-                'name': name,
-                'year': year,
-                'tmdb_id': tmdb_id,
-                'imdb_id': imdb_id,
-                'description': description,
-                'rating': rating,
-                'genre': genre,
-                'custom_properties': additional_metadata if additional_metadata else None,
-            }
+            series_props, logo_url = build_series_list_props(
+                series_data, name, year, tmdb_id, imdb_id,
+            )
+            if is_stalker:
+                stalker_logo_url = extract_stalker_logo_url(series_data)
+                if stalker_logo_url:
+                    logo_url = stalker_logo_url
 
             existing_entry = series_entries.get(series_key)
             if existing_entry is None:
@@ -2079,15 +2022,7 @@ def process_series_batch(account, batch, categories, relations, scan_start_time=
                     'logo_url': logo_url,  # Keep logo URL for later processing
                 }
             else:
-                existing_props = existing_entry['props']
-                if not existing_props.get('description') and description:
-                    existing_props['description'] = description
-                if not existing_props.get('rating') and rating:
-                    existing_props['rating'] = rating
-                if not existing_props.get('genre') and genre:
-                    existing_props['genre'] = genre
-                if not existing_props.get('custom_properties') and additional_metadata:
-                    existing_props['custom_properties'] = additional_metadata
+                merge_blank_vod_list_props(existing_entry['props'], series_props)
                 if not existing_entry.get('logo_url') and logo_url:
                     existing_entry['logo_url'] = logo_url
 
@@ -4244,6 +4179,119 @@ def should_apply_provider_list_field(existing_value, new_value):
     if is_blank_vod_value(new_value):
         return False
     return existing_value != new_value
+
+
+def merge_blank_vod_list_props(existing_props, incoming_props):
+    """Fill blank keys on existing_props from incoming_props (in place)."""
+    for field, value in incoming_props.items():
+        if field == 'custom_properties':
+            existing_cp = existing_props.get('custom_properties') or {}
+            incoming_cp = value or {}
+            merged = dict(existing_cp)
+            for k, v in incoming_cp.items():
+                if not is_blank_vod_value(v) and is_blank_vod_value(merged.get(k)):
+                    merged[k] = v
+            existing_props['custom_properties'] = merged or None
+        elif field not in existing_props or (
+            is_blank_vod_value(existing_props.get(field)) and not is_blank_vod_value(value)
+        ):
+            existing_props[field] = value
+
+
+def build_movie_list_props(movie_data, name, year, tmdb_id, imdb_id):
+    """Build Movie list-sync props and logo URL from a provider row."""
+    description = movie_data.get('description') or movie_data.get('plot') or ''
+    rating = normalize_rating(movie_data.get('rating') or movie_data.get('vote_average'))
+    genre = movie_data.get('genre') or movie_data.get('category_name') or ''
+    duration_secs = extract_duration_from_data(movie_data)
+    trailer_raw = movie_data.get('trailer') or movie_data.get('youtube_trailer') or ''
+    trailer = extract_string_from_array_or_string(trailer_raw) if trailer_raw else None
+    logo_url = movie_data.get('stream_icon') or ''
+
+    director = extract_string_from_array_or_string(
+        movie_data.get('director') or ''
+    )
+    actors_raw = movie_data.get('actors') or movie_data.get('cast') or ''
+    if isinstance(actors_raw, list):
+        actors = ', '.join(s.strip() for s in actors_raw if s and str(s).strip()) or None
+    else:
+        actors = actors_raw.strip() if actors_raw else None
+    release_date = movie_data.get('release_date') or movie_data.get('releasedate') or ''
+
+    custom_props = {}
+    if trailer:
+        custom_props['youtube_trailer'] = trailer
+    if director:
+        custom_props['director'] = director
+    if actors:
+        custom_props['actors'] = actors
+    if release_date:
+        custom_props['release_date'] = release_date
+
+    movie_props = {
+        'name': name,
+        'year': year,
+        'tmdb_id': tmdb_id,
+        'imdb_id': imdb_id,
+        'description': description,
+        'rating': rating,
+        'genre': genre,
+        'duration_secs': duration_secs,
+        'custom_properties': custom_props or None,
+    }
+    # Only set is_adult when the provider actually reports it. Movies are
+    # shared across providers (matched by TMDB/IMDB/name+year), and many
+    # providers omit this key entirely; defaulting it to False here would
+    # let a sparse provider row silently clear a flag another provider set.
+    if 'is_adult' in movie_data:
+        movie_props['is_adult'] = parse_is_adult(movie_data['is_adult'])
+
+    return movie_props, logo_url
+
+
+def build_series_list_props(series_data, name, year, tmdb_id, imdb_id):
+    """Build Series list-sync props and logo URL from a provider row."""
+    description = series_data.get('description') or series_data.get('plot') or ''
+    rating = normalize_rating(series_data.get('rating'))
+    genre = series_data.get('genre', '')
+    logo_url = series_data.get('cover') or ''
+
+    additional_metadata = {}
+    for key in ['backdrop_path', 'poster_path', 'original_name', 'first_air_date', 'last_air_date',
+               'episode_run_time', 'status', 'type', 'cast', 'director', 'country', 'language',
+               'releaseDate', 'release_date', 'youtube_trailer', 'category_id', 'age', 'seasons', 'added']:
+        value = series_data.get(key)
+        if value:
+            if key == 'cast':
+                if isinstance(value, list):
+                    clean_value = ', '.join(s.strip() for s in value if s and str(s).strip()) or None
+                else:
+                    clean_value = extract_string_from_array_or_string(value)
+                if clean_value:
+                    additional_metadata[key] = clean_value
+            elif key in ['poster_path', 'youtube_trailer', 'director']:
+                clean_value = extract_string_from_array_or_string(value)
+                if clean_value:
+                    additional_metadata[key] = clean_value
+            elif key == 'backdrop_path':
+                clean_value = extract_string_from_array_or_string(value)
+                if clean_value:
+                    additional_metadata[key] = [clean_value]
+            else:
+                if value is not None and value != '' and value != []:
+                    additional_metadata[key] = value
+
+    series_props = {
+        'name': name,
+        'year': year,
+        'tmdb_id': tmdb_id,
+        'imdb_id': imdb_id,
+        'description': description,
+        'rating': rating,
+        'genre': genre,
+        'custom_properties': additional_metadata if additional_metadata else None,
+    }
+    return series_props, logo_url
 
 
 @shared_task

@@ -308,6 +308,7 @@ class UserViewSet(viewsets.ModelViewSet):
                 "vod_movies_enabled",
                 "vod_series_enabled",
                 "dvr_access",
+                "allowed_m3u_profile_ids",
             }
             cp = mutable_data.get("custom_properties")
             if isinstance(cp, dict):

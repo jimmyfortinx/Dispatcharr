@@ -4,6 +4,7 @@ import ipaddress
 import logging
 from django.conf import settings as django_settings
 from django.db import models
+from dispatcharr.log_collector import collector_running
 from rest_framework import viewsets, status
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -227,6 +228,7 @@ class ProxySettingsViewSet(viewsets.ViewSet):
             "connection_ready_chunks": 16,
             "max_reconnect_attempts": 5,
             "min_stable_time_before_reconnect": 10,
+            "validate_redirect_urls": True,
         }
 
     def _get_or_create_settings(self):
@@ -423,6 +425,9 @@ def environment(request):
             "ip_lookup_env_disabled": ip_lookup_env_disabled,
             "ip_lookup_pending": ip_lookup_pending,
             "env_mode": os.getenv("DISPATCHARR_ENV", "aio"),
+            "log_collector_running": collector_running(
+                getattr(django_settings, "LOG_FILE_DIR", None)
+            ),
             "redis_tls": {
                 "enabled": getattr(django_settings, "REDIS_SSL", False),
                 "verify": getattr(django_settings, "REDIS_SSL_VERIFY", True),
@@ -458,7 +463,7 @@ def version(request):
     description="Trigger rehashing of all streams",
 )
 @api_view(["POST"])
-@permission_classes([Authenticated])
+@permission_classes([IsAdmin])
 def rehash_streams_endpoint(request):
     """Trigger the rehash streams task"""
     try:

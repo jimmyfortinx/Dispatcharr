@@ -273,7 +273,7 @@ class StreamTsEarlyOwnershipTests(SimpleTestCase):
         mock_channel_service.is_channel_unavailable_for_new_clients.return_value = False
         mock_channel_service.initialize_channel.return_value = True
         mock_generate_url.return_value = (
-            "http://upstream/stream.ts", "UA", None, False, "profile", True, None,
+            "http://upstream/stream.ts", "UA", None, False, "profile", True, None, 42,
         )
 
         proxy_server = MagicMock()
@@ -408,7 +408,7 @@ class StreamTsEarlyOwnershipTests(SimpleTestCase):
         def _generate(*_args, **_kwargs):
             call_order.append("generate_stream_url")
             return (
-                "http://upstream/stream.ts", "UA", None, False, "profile", True, None,
+                "http://upstream/stream.ts", "UA", None, False, "profile", True, None, 42,
             )
 
         mock_generate_url.side_effect = _generate
@@ -486,7 +486,7 @@ class StreamTsEarlyOwnershipTests(SimpleTestCase):
         mock_channel_service.is_channel_unavailable_for_new_clients.return_value = False
         mock_channel_service.initialize_channel.return_value = False
         mock_generate_url.return_value = (
-            "http://upstream/stream.ts", "UA", None, False, "profile", True, None,
+            "http://upstream/stream.ts", "UA", None, False, "profile", True, None, 42,
         )
 
         proxy_server = MagicMock()

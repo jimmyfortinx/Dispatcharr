@@ -697,6 +697,7 @@ class StalkerPhase9DvrTests(TestCase):
                 self.proxy_profile.id,
                 True,
                 None,
+                None,
             ),
         ) as mock_generate_stream_url, patch(
             "apps.proxy.live_proxy.views.ChannelService.initialize_channel",
@@ -708,7 +709,7 @@ class StalkerPhase9DvrTests(TestCase):
             response = stream_ts(request, channel_id)
 
         self.assertEqual(response.status_code, 200)
-        mock_generate_stream_url.assert_called_once_with(channel_id)
+        mock_generate_stream_url.assert_called_once_with(channel_id, None, None)
         mock_initialize_channel.assert_called_once_with(
             channel_id,
             "http://resolved.example.com/live/world-news",
@@ -756,6 +757,7 @@ class StalkerPhase9DvrTests(TestCase):
                 self.proxy_profile.id,
                 True,
                 None,
+                None,
             ),
         ) as mock_generate_stream_url, patch(
             "apps.proxy.live_proxy.url_utils.validate_stream_url",
@@ -767,7 +769,7 @@ class StalkerPhase9DvrTests(TestCase):
 
         self.assertEqual(response.status_code, 302)
         self.assertEqual(response["Location"], "http://resolved.example.com/live/world-news")
-        mock_generate_stream_url.assert_called_once_with(channel_id)
+        mock_generate_stream_url.assert_called_once_with(channel_id, None, None)
         mock_validate_stream_url.assert_called_once_with(
             "http://resolved.example.com/live/world-news",
             user_agent="DispatcharrTest/2.0",

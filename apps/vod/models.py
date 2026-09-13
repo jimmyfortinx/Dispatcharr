@@ -273,8 +273,37 @@ class M3UMovieRelation(models.Model):
     def __str__(self):
         return f"{self.m3u_account.name} - {self.movie.name}"
 
-    def get_stream_url(self):
-        """Resolve the full upstream URL for this movie relation."""
+    def get_stream_url(self, profile=None):
+        """Resolve the full upstream URL for this movie relation.
+
+        For XC accounts this builds the URL using the same credential
+        resolution as playback (get_transformed_credentials); when
+        *profile* is omitted the account's first active profile is used
+        (identity patterns keep base credentials). Non-XC accounts (e.g.
+        Stalker) delegate to resolve_vod_stream_context, which knows how
+        to resolve their provider-specific playback flow.
+        """
+        if self.m3u_account.account_type == "XC":
+            from apps.m3u.credentials import (
+                build_xc_playback_url,
+                get_transformed_credentials,
+            )
+
+            server_url, username, password = get_transformed_credentials(
+                self.m3u_account, profile
+            )
+            if not (server_url and username and password and self.stream_id):
+                return None
+
+            return build_xc_playback_url(
+                server_url,
+                username,
+                password,
+                content_path="movie",
+                stream_id=str(self.stream_id),
+                extension=self.container_extension or "mp4",
+            )
+
         from .resolvers import resolve_vod_stream_context
 
         return resolve_vod_stream_context(self).url
@@ -313,8 +342,37 @@ class M3UEpisodeRelation(models.Model):
     def __str__(self):
         return f"{self.m3u_account.name} - {self.episode}"
 
-    def get_stream_url(self):
-        """Resolve the full upstream URL for this episode relation."""
+    def get_stream_url(self, profile=None):
+        """Resolve the full upstream URL for this episode relation.
+
+        For XC accounts this builds the URL using the same credential
+        resolution as playback (get_transformed_credentials); when
+        *profile* is omitted the account's first active profile is used
+        (identity patterns keep base credentials). Non-XC accounts (e.g.
+        Stalker) delegate to resolve_vod_stream_context, which knows how
+        to resolve their provider-specific playback flow.
+        """
+        if self.m3u_account.account_type == "XC":
+            from apps.m3u.credentials import (
+                build_xc_playback_url,
+                get_transformed_credentials,
+            )
+
+            server_url, username, password = get_transformed_credentials(
+                self.m3u_account, profile
+            )
+            if not (server_url and username and password and self.stream_id):
+                return None
+
+            return build_xc_playback_url(
+                server_url,
+                username,
+                password,
+                content_path="series",
+                stream_id=str(self.stream_id),
+                extension=self.container_extension or "mp4",
+            )
+
         from .resolvers import resolve_vod_stream_context
 
         return resolve_vod_stream_context(self).url

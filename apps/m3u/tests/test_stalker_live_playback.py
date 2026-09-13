@@ -102,7 +102,7 @@ class StalkerPhase5PreviewTests(TestCase):
         ), patch(
             "apps.proxy.live_proxy.url_utils.close_old_connections"
         ):
-            stream_url, user_agent, input_headers, transcode, stream_profile_id, _slot_reserved, error_reason = generate_stream_url(
+            stream_url, user_agent, input_headers, transcode, stream_profile_id, _slot_reserved, error_reason, _stream_id = generate_stream_url(
                 self.stream.stream_hash
             )
 

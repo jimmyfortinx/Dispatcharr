@@ -299,6 +299,7 @@ class StreamTsClientRegistrationTests(SimpleTestCase):
             "None",
             True,
             None,
+            42,
         )
 
         proxy_server, client_manager = self._active_proxy_server(am_i_owner=True)
