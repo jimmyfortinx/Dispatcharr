@@ -26,6 +26,11 @@ from ..utils import resolve_channel_display_name
 
 logger = get_logger()
 
+# Stalker/Ministra portals use these to signal a portal-side connection
+# rejection (e.g. concurrent-connection limit already reached for the MAC),
+# as opposed to a transient network failure. Extend as more codes are seen.
+PORTAL_REJECTION_STATUS_CODES = {456}
+
 class StreamManager:
     """Manages a connection to a TS stream without using raw sockets"""
 
@@ -162,6 +167,11 @@ class StreamManager:
         # Add HTTP reader thread property
         self.http_reader = None
 
+        # Reused across retries within this channel's connection lifetime so a
+        # Stalker portal session isn't re-authenticated from scratch on every
+        # retry (see url_utils._resolve_live_stream_context).
+        self._stalker_client_cache = {}
+
         # Reconnect diagnostics
         self.last_transport_failure = None
         self.last_transport_failure_at = None
@@ -188,6 +198,41 @@ class StreamManager:
             "details": details,
         }
         self.last_transport_failure_at = time.time()
+
+    def _note_http_reader_rejection(self):
+        """Record a portal-side rejection status (e.g. Stalker HTTP 456) from
+        the last HTTP reader attempt, so the retry loop can back off longer
+        than it would for a generic transport failure."""
+        http_reader = getattr(self, "http_reader", None)
+        status_code = getattr(http_reader, "last_status_code", None) if http_reader else None
+        if status_code in PORTAL_REJECTION_STATUS_CODES:
+            self._record_transport_failure(
+                "stalker_portal_rejected",
+                status_code=status_code,
+                url=(self.url or "")[:200],
+            )
+
+    def _reconnect_backoff_seconds(self, failures):
+        """Compute the delay before the next connection retry.
+
+        Portal-side rejections (e.g. Stalker HTTP 456, meaning the MAC/account
+        is already considered to have an active connection) back off much
+        longer than a generic transport failure: retrying within a second or
+        two just re-authenticates a new session against a portal that is
+        already refusing one, and doesn't give the old session time to expire.
+        """
+        last_transport_failure = getattr(self, "last_transport_failure", None)
+        reason = (last_transport_failure or {}).get("reason")
+        if reason == "stalker_portal_rejected":
+            timeout = min(2 * failures, 10)
+            logger.warning(
+                f"Portal rejected connection (HTTP "
+                f"{(last_transport_failure or {}).get('details', {}).get('status_code')}) "
+                f"for channel {self.channel_id} — likely a concurrent-connection "
+                f"limit on this Stalker account/MAC; backing off {timeout}s before retry"
+            )
+            return timeout
+        return min(.25 * failures, 3)  # Cap at 3 seconds
 
     def _stderr_tail(self):
         """Last few stderr lines, tolerating a partially initialised manager."""
@@ -697,6 +742,8 @@ class StreamManager:
                             # Successfully connected - read stream data until disconnect/error
                             self._process_stream_data()
                             # If we get here, the connection was closed/failed
+                            if not self.transcode:
+                                self._note_http_reader_rejection()
 
                             connection_duration = time.time() - connection_start_time
                             stable_threshold = self._stable_connection_threshold
@@ -756,7 +803,7 @@ class StreamManager:
                                 logger.error(f"Could not log connection error event: {e}")
                         else:
                             # Wait with exponential backoff before retrying
-                            timeout = min(.25 * failures, 3)  # Cap at 3 seconds
+                            timeout = self._reconnect_backoff_seconds(failures)
                             logger.info(
                                 f"Reconnecting in {timeout} seconds... "
                                 f"(attempt {failures}/{self.max_retries}) "
@@ -787,7 +834,7 @@ class StreamManager:
                                 logger.error(f"Could not log connection error event: {log_error}")
                         else:
                             # Wait with exponential backoff before retrying
-                            timeout = min(.25 * failures, 3)  # Cap at 3 seconds
+                            timeout = self._reconnect_backoff_seconds(failures)
                             logger.info(
                                 f"Reconnecting in {timeout} seconds after error... "
                                 f"(attempt {failures}/{self.max_retries}) "
@@ -1867,7 +1914,11 @@ class StreamManager:
         if not self.current_stream_id:
             return False
 
-        stream_info = get_stream_info_for_switch(self.channel_id, self.current_stream_id)
+        stream_info = get_stream_info_for_switch(
+            self.channel_id,
+            self.current_stream_id,
+            stalker_client_cache=getattr(self, "_stalker_client_cache", None),
+        )
         if not stream_info or 'error' in stream_info or not stream_info.get('url'):
             logger.warning(
                 f"Could not refresh runtime stream URL for channel {self.channel_id} during {reason}: "
@@ -2556,7 +2607,11 @@ class StreamManager:
 
                 # Get stream info including URL using the profile_id we already have
                 logger.info(f"Trying next stream ID {stream_id} with profile ID {profile_id} for channel {self.channel_id}")
-                stream_info = get_stream_info_for_switch(self.channel_id, stream_id)
+                stream_info = get_stream_info_for_switch(
+                    self.channel_id,
+                    stream_id,
+                    stalker_client_cache=getattr(self, "_stalker_client_cache", None),
+                )
 
                 if 'error' in stream_info or not stream_info.get('url'):
                     logger.error(f"Error getting info for stream {stream_id} for channel {self.channel_id}: {stream_info.get('error', 'No URL')}")

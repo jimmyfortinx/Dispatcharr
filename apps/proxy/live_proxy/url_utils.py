@@ -19,8 +19,17 @@ import requests
 logger = get_logger()
 
 
-def _resolve_live_stream_context(stream: Stream) -> dict:
-    """Resolve a stream URL and any upstream request context needed to fetch it."""
+def _resolve_live_stream_context(
+    stream: Stream, stalker_client_cache: Optional[dict] = None
+) -> dict:
+    """Resolve a stream URL and any upstream request context needed to fetch it.
+
+    ``stalker_client_cache`` is an optional dict, owned by the caller (e.g. one
+    per channel connection lifecycle), used to reuse an already-authenticated
+    StalkerClient across repeated calls for the same account/MAC instead of
+    re-handshaking with the portal every time. Callers that don't pass one
+    (previews, discovery) keep today's behavior of a fresh client per call.
+    """
     m3u_account = stream.m3u_account
     if not m3u_account:
         return {
@@ -48,13 +57,19 @@ def _resolve_live_stream_context(stream: Stream) -> dict:
     if not portal_url or not cmd:
         raise StalkerError("Stalker stream is missing portal metadata required for playback.")
 
-    client = StalkerClient(
-        server_url=m3u_account.server_url,
-        mac=account_properties.get("mac", ""),
-        username=m3u_account.username or "",
-        password=m3u_account.password or "",
-        custom_properties=account_properties,
-    )
+    mac = account_properties.get("mac", "")
+    cache_key = (m3u_account.id, mac)
+    client = stalker_client_cache.get(cache_key) if stalker_client_cache is not None else None
+    if client is None:
+        client = StalkerClient(
+            server_url=m3u_account.server_url,
+            mac=mac,
+            username=m3u_account.username or "",
+            password=m3u_account.password or "",
+            custom_properties=account_properties,
+        )
+        if stalker_client_cache is not None:
+            stalker_client_cache[cache_key] = client
     resolved_url = client.resolve_playback_url(portal_url, custom_properties)
     input_headers = client.build_media_headers(resolved_url)
 
@@ -122,10 +137,15 @@ def _resolve_live_stream_url(
     )
 
 
-def _build_runtime_stream_info(stream: Stream, profile: M3UAccountProfile, stream_profile) -> dict:
+def _build_runtime_stream_info(
+    stream: Stream,
+    profile: M3UAccountProfile,
+    stream_profile,
+    stalker_client_cache: Optional[dict] = None,
+) -> dict:
     """Build runtime playback info for a stream using provider-aware URL resolution."""
     m3u_account = stream.m3u_account
-    stream_context = _resolve_live_stream_context(stream)
+    stream_context = _resolve_live_stream_context(stream, stalker_client_cache=stalker_client_cache)
     if m3u_account and m3u_account.account_type == M3UAccount.Types.STALKER:
         stream_url = transform_url(
             stream_context['url'],
@@ -399,6 +419,7 @@ def get_stream_info_for_switch(
     channel_id: str,
     target_stream_id: Optional[int] = None,
     target_profile_id: Optional[int] = None,
+    stalker_client_cache: Optional[dict] = None,
 ) -> dict:
     """
     Get stream information for a channel switch, optionally to a specific stream ID.
@@ -406,6 +427,10 @@ def get_stream_info_for_switch(
     Args:
         channel_id: The UUID of the channel
         target_stream_id: Optional specific stream ID to switch to
+        stalker_client_cache: Optional dict, owned by the caller, used to reuse
+            an already-authenticated StalkerClient across repeated calls (e.g.
+            connection retries for the same channel) instead of re-handshaking
+            with the portal every time.
 
     Returns:
         dict: Stream information including URL, user agent and transcode flag
@@ -429,7 +454,9 @@ def get_stream_info_for_switch(
 
             profile = get_object_or_404(M3UAccountProfile, pk=m3u_profile_id)
             stream_profile = stream.get_stream_profile()
-            return _build_runtime_stream_info(stream, profile, stream_profile)
+            return _build_runtime_stream_info(
+                stream, profile, stream_profile, stalker_client_cache=stalker_client_cache
+            )
 
         channel = channel_or_stream
 
@@ -523,7 +550,9 @@ def get_stream_info_for_switch(
         )
 
         m3u_account = m3u_profile.m3u_account
-        stream_context = _resolve_live_stream_context(stream)
+        stream_context = _resolve_live_stream_context(
+            stream, stalker_client_cache=stalker_client_cache
+        )
 
         if m3u_account.account_type == M3UAccount.Types.STALKER:
             stream_url = transform_url(
@@ -545,7 +574,9 @@ def get_stream_info_for_switch(
 
         # Get transcode info from the channel's stream profile
         stream_profile = channel.get_stream_profile()
-        stream_info = _build_runtime_stream_info(stream, m3u_profile, stream_profile)
+        stream_info = _build_runtime_stream_info(
+            stream, m3u_profile, stream_profile, stalker_client_cache=stalker_client_cache
+        )
         stream_info['stream_name'] = stream.name
         return stream_info
     except Exception as e:

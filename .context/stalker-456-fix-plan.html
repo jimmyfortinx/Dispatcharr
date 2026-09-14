@@ -1,0 +1,579 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="generator" content="html-docs kit 1.0.0">
+<title>Fixing repeated HTTP 456 failures on Stalker portal streams</title>
+<script type="application/json" id="doc-source">{"_kit": "1.0.0", "_mode": "inline", "date": "2026-09-14", "framing": "A scoped fix for the retry loop hammering Stalker portals with fresh sessions instead of backing off, using the channel 185.80.197.39 outage as the reproducing case.", "kicker": "Dispatcharr · live_proxy / apps.m3u.stalker · implementation plan", "layers": ["doc"], "tags": ["Plan", "Stalker portal", "live_proxy"], "theme": "slate", "title": "Fixing repeated HTTP 456 failures on Stalker portal streams"}</script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&amp;family=Public+Sans:wght@400;500;600;700&amp;display=swap" rel="stylesheet">
+<style>
+@layer base, theme, dark;
+@layer base {
+:root {
+--paper:      #faf9f5;
+--panel:      #ffffff;
+--sunken:     #f0ede4;
+--ink:        #1c2127;
+--ink-soft:   #39414c;
+--muted:      #59616c;
+--line:       #d9d4c9;
+--line-soft:  #e8e4da;
+--accent:     #b04c12;
+--accent-ink: #8a3a0c;
+--accent-bg:  #fbf1e8;
+--ok:      #2f6b3f;   --ok-bg:      #eef4ec;
+--warn:    #8a5a0c;   --warn-bg:    #fbf3e4;
+--danger:  #9b2226;   --danger-bg:  #fbecec;
+--info:    #1f5673;   --info-bg:    #eaf1f5;
+--sans:    ui-sans-serif, -apple-system, "Segoe UI", Roboto, sans-serif;
+--mono:    ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+--display: var(--sans);
+--base:    16px;
+--lh:      1.62;
+--h1-size: 34px;
+--h2-size: 23px;
+--h3-size: 17.5px;
+--label:   11.5px;
+--measure: 72ch;
+--radius:    4px;
+--rule:      1px;
+--rule-bold: 3px;
+--content:   860px;
+--toc:       230px;
+}
+*, *::before, *::after { box-sizing: border-box; }
+html { scroll-behavior: smooth; -webkit-text-size-adjust: 100%; }
+@media (prefers-reduced-motion: reduce) {
+html { scroll-behavior: auto; }
+*, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
+}
+body {
+margin: 0;
+background: var(--paper);
+color: var(--ink);
+font-family: var(--sans);
+font-size: var(--base);
+line-height: var(--lh);
+-webkit-font-smoothing: antialiased;
+}
+h1, h2, h3, h4 { font-family: var(--display); color: var(--ink); }
+h1 { font-size: var(--h1-size); line-height: 1.15; margin: 0 0 12px; font-weight: 700; letter-spacing: -0.01em; }
+h2 {
+font-size: var(--h2-size);
+margin: 52px 0 14px;
+padding-top: 14px;
+border-top: var(--rule) solid var(--line);
+font-weight: 700;
+letter-spacing: -0.005em;
+}
+h3 { font-size: var(--h3-size); margin: 30px 0 10px; font-weight: 600; }
+h2:first-child, h3:first-child { margin-top: 0; }
+p { margin: 0 0 14px; max-width: var(--measure); }
+ul, ol { margin: 0 0 16px; padding-left: 24px; max-width: var(--measure); }
+li { margin-bottom: 7px; }
+li > ul, li > ol { margin-top: 7px; margin-bottom: 0; }
+strong, b { font-weight: 600; }
+a { color: var(--accent-ink); text-decoration-color: color-mix(in srgb, var(--accent) 45%, transparent); text-underline-offset: 2px; }
+a:hover { text-decoration-color: var(--accent); }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 2px; }
+code {
+font-family: var(--mono);
+font-size: 0.86em;
+background: var(--sunken);
+border: var(--rule) solid var(--line-soft);
+border-radius: 3px;
+padding: 1px 5px;
+}
+pre {
+font-family: var(--mono);
+background: var(--sunken);
+border: var(--rule) solid var(--line-soft);
+border-radius: var(--radius);
+padding: 14px 16px;
+overflow-x: auto;
+font-size: 13px;
+line-height: 1.55;
+margin: 16px 0 20px;
+}
+pre code { background: none; border: 0; padding: 0; font-size: inherit; white-space: pre; }
+dl { margin: 0 0 18px; max-width: var(--measure); }
+dt { font-weight: 600; margin-top: 12px; }
+dd { margin: 4px 0 0 0; padding-left: 16px; border-left: var(--rule) solid var(--line-soft); color: var(--ink-soft); }
+img, svg, video { max-width: 100%; }
+svg text:not([fill]), svg tspan:not([fill]) { fill: currentColor; }
+.layout {
+display: grid;
+grid-template-columns: var(--toc) minmax(0, var(--content));
+gap: 48px;
+max-width: calc(var(--toc) + var(--content) + 104px);
+margin: 0 auto;
+padding: 0 28px 80px;
+}
+.layout.wide { grid-template-columns: minmax(0, 1fr); max-width: 1320px; }
+.layout > main { padding-top: 40px; min-width: 0; }
+nav.toc {
+position: sticky;
+top: 0;
+align-self: start;
+max-height: 100vh;
+overflow-y: auto;
+padding: 40px 0 24px;
+font-family: var(--mono);
+font-size: 12.5px;
+}
+nav.toc .toc-title {
+text-transform: uppercase; letter-spacing: 0.12em;
+color: var(--muted); margin-bottom: 12px; font-weight: 600;
+}
+nav.toc a {
+display: block; color: var(--muted); text-decoration: none;
+padding: 4px 0 4px 12px; border-left: 2px solid var(--line-soft); line-height: 1.45;
+}
+nav.toc a.sub { padding-left: 24px; font-size: 12px; }
+nav.toc a:hover, nav.toc a:focus-visible { color: var(--accent-ink); border-left-color: var(--accent); }
+nav.toc a[aria-current="true"] { color: var(--ink); border-left-color: var(--accent); font-weight: 600; }
+header.doc-head {
+border-bottom: var(--rule-bold) solid var(--ink);
+padding-bottom: 22px;
+margin-bottom: 30px;
+}
+.kicker {
+font-family: var(--mono); font-size: 12px; text-transform: uppercase;
+letter-spacing: 0.14em; color: var(--accent-ink); font-weight: 600; margin-bottom: 10px;
+}
+.framing { font-size: 17.5px; color: var(--muted); max-width: 62ch; margin: 0 0 14px; }
+.meta {
+font-family: var(--mono); font-size: 12px; color: var(--muted);
+display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center;
+}
+footer.doc-foot {
+margin-top: 64px; padding-top: 18px;
+border-top: var(--rule) solid var(--line);
+font-family: var(--mono); font-size: 12px; color: var(--muted);
+display: flex; flex-wrap: wrap; gap: 8px 18px; justify-content: space-between;
+}
+.anchor {
+float: left; margin-left: -0.85em; width: 0.85em;
+color: var(--line); text-decoration: none; font-weight: 400;
+opacity: 0; transition: opacity 0.12s;
+}
+h2:hover .anchor, h3:hover .anchor, .anchor:focus-visible { opacity: 1; }
+.tag {
+font-family: var(--mono); font-size: 12px;
+border: var(--rule) solid var(--line); background: var(--panel);
+padding: 2px 9px; border-radius: 3px; color: var(--muted); white-space: nowrap;
+}
+.tag.accent { border-color: var(--accent); color: var(--accent-ink); background: var(--accent-bg); }
+.pill.warn { border-color: var(--warn);    color: var(--warn);    background: var(--warn-bg); }
+.pill.warn::before { content: "\26A0"; }
+.pill.accent { border-color: var(--accent); color: var(--accent-ink); background: var(--accent-bg); }
+.pill.accent::before { content: none; }
+.callout {
+border: var(--rule) solid var(--line);
+border-left: 4px solid var(--accent);
+background: var(--panel);
+border-radius: var(--radius);
+padding: 16px 20px;
+margin: 20px 0;
+max-width: var(--measure);
+}
+.callout > .label {
+display: block;
+font-family: var(--mono); font-size: var(--label); text-transform: uppercase;
+letter-spacing: 0.12em; font-weight: 600; color: var(--accent-ink); margin-bottom: 6px;
+}
+.callout > :last-child { margin-bottom: 0; }
+.callout.ok { border-left-color: var(--ok);     background: var(--ok-bg); }
+.callout.ok > .label { color: var(--ok); }
+.callout.warn { border-left-color: var(--warn);   background: var(--warn-bg); }
+.callout.warn > .label { color: var(--warn); }
+.callout.danger { border-left-color: var(--danger); background: var(--danger-bg); }
+.callout.danger > .label { color: var(--danger); }
+.callout.info { border-left-color: var(--info);   background: var(--info-bg); }
+.callout.info > .label { color: var(--info); }
+.findings, .steps { counter-reset: item; list-style: none; padding: 0; max-width: none; }
+.findings > li, .steps > li {
+counter-increment: item; position: relative;
+border: var(--rule) solid var(--line); background: var(--panel);
+border-radius: var(--radius); padding: 14px 18px 14px 56px; margin-bottom: 10px;
+}
+.findings > li::before, .steps > li::before {
+content: counter(item);
+position: absolute; left: 16px; top: 14px;
+width: 26px; height: 26px; border-radius: 50%;
+background: var(--ink); color: var(--paper);
+font-family: var(--mono); font-size: 13px; font-weight: 600;
+display: flex; align-items: center; justify-content: center;
+}
+.steps > li::before { border-radius: var(--radius); background: var(--accent); }
+.findings > li > :last-child, .steps > li > :last-child { margin-bottom: 0; }
+.findings > li p, .steps > li p { max-width: none; }
+@media (max-width: 760px) {
+:root { --h1-size: 27px; --h2-size: 20px; --h3-size: 16px; --measure: none; }
+.layout {
+grid-template-columns: minmax(0, 1fr);
+gap: 0;
+padding: 0 18px 56px;
+}
+nav.toc {
+position: static; max-height: none; overflow: visible;
+padding: 24px 0 0; order: -1;
+}
+nav.toc a { display: inline-block; border-left: 0; border-bottom: 2px solid var(--line-soft); padding: 3px 10px 3px 0; margin-right: 8px; }
+.layout > main { padding-top: 24px; }
+footer.doc-foot { flex-direction: column; gap: 6px; }
+}
+@media print {
+:root {
+--paper: #fff; --panel: #fff; --sunken: #f4f4f4;
+--ink: #000; --ink-soft: #222; --muted: #555;
+--line: #999; --line-soft: #ccc;
+}
+body { font-size: 10.5pt; }
+.layout { display: block; max-width: none; padding: 0; }
+nav.toc, .no-print, .copy-btn, .theme-toggle { display: none !important; }
+.layout > main { padding-top: 0; }
+h2, h3 { break-after: avoid; page-break-after: avoid; }
+pre, table, .card, .callout, .band, .findings > li, .steps > li, figure { break-inside: avoid; page-break-inside: avoid; }
+.callout, .card, .panel { border: 0.5pt solid #999; }
+.tag.accent { border-color: var(--accent); color: var(--accent-ink); background: var(--accent-bg); }
+a { color: #000; text-decoration: underline; }
+a[href^="http"]::after { content: " (" attr(href) ")"; font-size: 8pt; color: #555; word-break: break-all; }
+}
+}
+@layer theme {
+:root {
+--paper: #f7f8f9; --panel: #ffffff; --sunken: #eceef1;
+--ink: #14181d; --ink-soft: #333b45; --muted: #5b656f;
+--line: #ccd2d9; --line-soft: #e2e6ea;
+--accent: #1f6f9c; --accent-ink: #17567a; --accent-bg: #e8f1f7;
+--sans: "Public Sans", -apple-system, "Segoe UI", sans-serif;
+--mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+--display: var(--mono);
+--base: 15.5px; --lh: 1.58;
+--h1-size: 28px; --h2-size: 19px; --h3-size: 15.5px;
+--radius: 2px;  --rule: 1px; --rule-bold: 2px;
+color-scheme: light dark;
+}
+h1, h2, h3 { letter-spacing: -0.01em; }
+h2 { text-transform: uppercase; letter-spacing: 0.06em; font-size: 15px; }
+}
+@layer dark {
+@media (prefers-color-scheme: dark) {
+:root:not([data-theme="light"]) {
+--paper: #17181b;  --panel: #1e2024;  --sunken: #26282d;
+--ink: #e9e6df;    --ink-soft: #cdc9c0;  --muted: #9a958c;
+--line: #3a3d43;   --line-soft: #2b2e33;
+--accent-ink: color-mix(in srgb, var(--accent) 55%, #ffffff);
+--accent-bg:  color-mix(in srgb, var(--accent) 22%, #17181b);
+--ok-bg:      color-mix(in srgb, var(--ok) 20%, #17181b);
+--warn-bg:    color-mix(in srgb, var(--warn) 20%, #17181b);
+--danger-bg:  color-mix(in srgb, var(--danger) 20%, #17181b);
+--info-bg:    color-mix(in srgb, var(--info) 20%, #17181b);
+--ok:     color-mix(in srgb, var(--ok) 60%, #ffffff);
+--warn:   color-mix(in srgb, var(--warn) 62%, #ffffff);
+--danger: color-mix(in srgb, var(--danger) 60%, #ffffff);
+--info:   color-mix(in srgb, var(--info) 60%, #ffffff);
+}
+}
+:root[data-theme="dark"] {
+--paper: #17181b;  --panel: #1e2024;  --sunken: #26282d;
+--ink: #e9e6df;    --ink-soft: #cdc9c0;  --muted: #9a958c;
+--line: #3a3d43;   --line-soft: #2b2e33;
+--accent-ink: color-mix(in srgb, var(--accent) 55%, #ffffff);
+--accent-bg:  color-mix(in srgb, var(--accent) 22%, #17181b);
+--ok-bg:      color-mix(in srgb, var(--ok) 20%, #17181b);
+--warn-bg:    color-mix(in srgb, var(--warn) 20%, #17181b);
+--danger-bg:  color-mix(in srgb, var(--danger) 20%, #17181b);
+--info-bg:    color-mix(in srgb, var(--info) 20%, #17181b);
+--ok:     color-mix(in srgb, var(--ok) 60%, #ffffff);
+--warn:   color-mix(in srgb, var(--warn) 62%, #ffffff);
+--danger: color-mix(in srgb, var(--danger) 60%, #ffffff);
+--info:   color-mix(in srgb, var(--info) 60%, #ffffff);
+}
+}
+</style>
+</head>
+<body>
+<script>
+(function () {
+  'use strict';
+  function on(selector, type, handler) {
+    document.addEventListener(type, function (e) {
+      var t = e.target && e.target.closest ? e.target.closest(selector) : null;
+      if (t) handler(e, t);
+    });
+  }
+  window.htmlDocs = window.htmlDocs || {};
+  window.htmlDocs.on = on;
+})();
+(function () {
+  'use strict';
+  function wire() {
+    var nav = document.querySelector('nav.toc');
+    if (!nav || !('IntersectionObserver' in window)) return;
+    var links = {}, targets = [];
+    Array.prototype.forEach.call(nav.querySelectorAll('a[href^="#"]'), function (a) {
+      var id = decodeURIComponent(a.getAttribute('href').slice(1));
+      var el = id && document.getElementById(id);
+      if (!el) return;
+      links[id] = a;
+      targets.push(el);
+    });
+    if (!targets.length) return;
+    var current = null;
+    var io = new IntersectionObserver(function (entries) {
+      entries.forEach(function (en) {
+        if (!en.isIntersecting) return;
+        var a = links[en.target.id];
+        if (!a || a === current) return;
+        if (current) current.removeAttribute('aria-current');
+        a.setAttribute('aria-current', 'true');
+        current = a;
+      });
+    }, { rootMargin: '-10% 0px -70% 0px', threshold: 0 });
+    targets.forEach(function (t) { io.observe(t); });
+  }
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', wire);
+  } else {
+    wire();
+  }
+})();
+(function () {
+  'use strict';
+  window.htmlDocs.on('[data-theme-toggle]', 'click', function () {
+    var root = document.documentElement;
+    var explicit = root.getAttribute('data-theme');
+    var isDark = explicit
+      ? explicit === 'dark'
+      : !!(window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
+    root.setAttribute('data-theme', isDark ? 'light' : 'dark');
+  });
+})();
+</script>
+<div class="layout">
+<nav class="toc" aria-label="Table of contents">
+  <div class="toc-title">Contents</div>
+  <a href="#problem">Problem</a>
+  <a href="#root-cause-confirmed-by-reading-the-code-not-guessed">Root cause (confirmed by reading the code, not guessed)</a>
+  <a href="#constraints">Constraints</a>
+  <a href="#fix-3-parts">Fix (3 parts)</a>
+  <a href="#risks-and-tradeoffs">Risks and tradeoffs</a>
+  <a href="#test-verification-plan">Test / verification plan</a>
+  <a href="#out-of-scope">Out of scope</a>
+</nav>
+<main>
+<header class="doc-head">
+  <div class="kicker">Dispatcharr · live_proxy / apps.m3u.stalker · implementation plan</div>
+  <h1>Fixing repeated HTTP 456 failures on Stalker portal streams</h1>
+  <p class="framing">A scoped fix for the retry loop hammering Stalker portals with fresh sessions instead of backing off, using the channel 185.80.197.39 outage as the reproducing case.</p>
+  <div class="meta">
+    <span class="tag">Plan</span>
+    <span class="tag">Stalker portal</span>
+    <span class="tag">live_proxy</span>
+  </div>
+</header>
+<!--doc:body-->
+<h2 id="problem"><a class="anchor" href="#problem" aria-hidden="true" tabindex="-1">#</a>Problem</h2>
+<p>
+Live channels backed by a Stalker/Ministra portal (observed on host
+<code>185.80.197.39</code>) fail to start playback even though the portal
+accepts every request up to the final step. Container <code>dispatcharr</code>
+on <code>superdocker</code> (10.1.2.11) shows this pattern in logs, five times
+in ~10-16 seconds, before giving up and switching to the next stream:
+</p>
+<pre><code>handshake        -&gt; 200
+get_events       -&gt; 200
+create_link      -&gt; 200 (new play_token)
+GET /play/live.php -&gt; <strong>HTTP 456</strong>   &lt;-- portal rejects playback
+</code></pre>
+<p>
+HTTP 456 on Stalker/Ministra portals is a portal-side rejection, almost always
+meaning the MAC/account is already considered to have an active connection
+(concurrent-connection limit). Dispatcharr's current retry behavior makes this
+worse rather than better.
+</p>
+
+<h2 id="root-cause-confirmed-by-reading-the-code-not-guessed"><a class="anchor" href="#root-cause-confirmed-by-reading-the-code-not-guessed" aria-hidden="true" tabindex="-1">#</a>Root cause (confirmed by reading the code, not guessed)</h2>
+<ul>
+<li><strong>Every retry re-authenticates from scratch.</strong>
+<code>apps/proxy/live_proxy/url_utils.py:51</code> (<code>_resolve_live_stream_context</code>)
+constructs a brand-new <code>StalkerClient</code> on every call. Since
+<code>StalkerClient.__init__</code> sets <code>_prepared_portal_url = None</code>,
+the session-reuse guard in <code>apps/m3u/stalker.py:883-892</code>
+(<code>prepare_authenticated_session</code>) never actually fires across
+retries — each retry redoes handshake + authenticate + watchdog even though a
+session was just established seconds earlier.</li>
+<li><strong>The retry loop calls this on every attempt.</strong>
+<code>apps/proxy/live_proxy/input/manager.py:646-796</code>
+(<code>StreamManager.run</code>) calls
+<code>self._refresh_runtime_stream_url(reason="retry")</code> on every retry
+(line 654-657), which flows straight into the fresh-client path above. Backoff
+between attempts is only <code>min(.25 * failures, 3)</code> seconds (lines
+759, 790) — not nearly long enough for a portal-side connection-limit
+rejection to clear, and it's the same backoff regardless of failure type.</li>
+<li><strong>The HTTP status code never reaches the retry loop.</strong>
+<code>HTTPStreamReader.start()</code> (<code>input/http_streamer.py:30-47</code>)
+returns immediately after launching the reader thread, before the GET even
+fires. <code>_read_stream</code> (lines 49-77) checks
+<code>if self.response.status_code != 200: logger.error(...); return</code> —
+it only logs and exits; the code is never stored or surfaced. So
+<code>_establish_http_connection</code>
+(<code>manager.py:1491-1546</code>) has no way today to tell a 456 apart from
+any other transport failure.</li>
+<li><strong>No portal-side session teardown exists</strong>, anywhere in
+<code>apps/m3u/stalker.py</code> — confirmed by search. This is expected:
+standard Stalker/Ministra portals don't expose a logout action; sessions
+expire server-side via watchdog timeout. Not something to invent here.</li>
+</ul>
+
+<h2 id="constraints"><a class="anchor" href="#constraints" aria-hidden="true" tabindex="-1">#</a>Constraints</h2>
+<ul>
+<li>No invented portal endpoints — only use handshake / do_auth / get_events / create_link, which already exist.</li>
+<li>Don't touch XC or plain M3U code paths — Stalker-only.</li>
+<li>Don't change <code>max_retries</code> defaults or rearchitect the retry loop.</li>
+<li>Session caching must default to today's behavior for every other caller (channel preview, discovery flows) — only the manager's retry path opts in.</li>
+</ul>
+
+<h2 id="fix-3-parts"><a class="anchor" href="#fix-3-parts" aria-hidden="true" tabindex="-1">#</a>Fix (3 parts)</h2>
+
+<ol class="steps">
+<li>
+<strong>Surface the rejection status code up to the retry loop.</strong>
+<ul>
+<li><code>apps/proxy/live_proxy/input/http_streamer.py</code> — add
+<code>self.last_status_code = None</code> in <code>__init__</code>; set it in
+<code>_read_stream</code> right before the existing
+<code>if self.response.status_code != 200:</code> early return.</li>
+<li><code>apps/proxy/live_proxy/input/manager.py</code>
+(<code>_establish_http_connection</code>, ~1491-1546) — after the reader
+thread ends, read <code>self.http_reader.last_status_code</code>. If it's a
+known portal-rejection code (456 first; leave room to extend), call the
+existing <code>self._record_transport_failure(reason="stalker_portal_rejected",
+details={"status_code": code})</code> helper (already used elsewhere, e.g. for
+reconnect logging at line 681-692) instead of leaving the failure
+unclassified.</li>
+</ul>
+</li>
+<li>
+<strong>Back off longer, specifically for this failure class.</strong>
+<ul>
+<li>At the two backoff sites (<code>manager.py:759</code> and
+<code>:790</code>), read
+<code>reason = (self.last_transport_failure or {}).get("reason")</code>. When
+<code>reason == "stalker_portal_rejected"</code>, use a materially longer
+schedule (e.g. <code>min(2 * failures, 10)</code> seconds) instead of the
+default <code>min(.25 * failures, 3)</code>.</li>
+<li>Log a clear, specific line: <code>"Portal rejected connection (HTTP 456)
+for &lt;mac&gt; — likely concurrent-connection limit on this Stalker account;
+backing off Ns before retry"</code>, so this is diagnosable straight from logs
+next time, instead of re-deriving it from a packet trace.</li>
+</ul>
+</li>
+<li>
+<strong>Reuse the Stalker session across retries within one channel's connection lifecycle.</strong>
+<ul>
+<li><code>StreamManager</code> instances already persist per <code>channel_id</code>
+for the whole retry lifetime (registered in
+<code>apps/proxy/live_proxy/server.py:806-818</code>). Add
+<code>self._stalker_client_cache = {}</code> in <code>StreamManager.__init__</code>.</li>
+<li>Thread an optional <code>stalker_client_cache</code> parameter through
+<code>get_stream_info_for_switch</code> → <code>_build_runtime_stream_info</code> →
+<code>_resolve_live_stream_context</code> in
+<code>apps/proxy/live_proxy/url_utils.py</code>, default <code>None</code>
+everywhere it isn't already threaded (so channel preview / discovery / other
+callers behave exactly as today).</li>
+<li>In <code>_resolve_live_stream_context</code>, when a cache dict is passed:
+key by <code>(m3u_account.id, mac)</code>, reuse the existing
+<code>StalkerClient</code> if present instead of constructing a new one. This
+is the one change that actually makes
+<code>prepare_authenticated_session</code>'s existing reuse guard
+(<code>stalker.py:883-892</code>) do anything — no changes needed inside
+<code>stalker.py</code> itself.</li>
+<li><code>manager.py</code>'s call to <code>get_stream_info_for_switch</code>
+inside <code>_refresh_runtime_stream_url</code> (~1865-1910) passes
+<code>self._stalker_client_cache</code>.</li>
+</ul>
+</li>
+</ol>
+
+<h2 id="risks-and-tradeoffs"><a class="anchor" href="#risks-and-tradeoffs" aria-hidden="true" tabindex="-1">#</a>Risks and tradeoffs</h2>
+<dl>
+<dt>Thread-safety under gevent</dt>
+<dd>The cached <code>StalkerClient</code> (and its <code>requests.Session</code>)
+is only ever touched from the single greenlet running that channel's
+<code>StreamManager.run()</code> retry loop — never concurrently. No locking
+needed, but this is an assumption worth stating explicitly rather than
+discovering later.</dd>
+<dt>Stale session (portal-side expiry)</dt>
+<dd>If the cached session's watchdog lapses between retries, the next
+<code>create_link</code>/auth call fails with an auth-shaped error.
+<code>resolve_playback_url</code> already retries once with
+<code>_prepared_portal_url</code> reset on exactly this class of error
+(<code>stalker.py:1074-1087</code>) — stale sessions self-heal at the cost of
+one extra round trip. No new code needed for this case.</dd>
+<dt>Cache scope / eviction</dt>
+<dd>Scoped to one <code>StreamManager</code> instance (one per
+<code>channel_id</code>), not a global/process-wide cache. Simple, and avoids
+stale entries surviving a channel teardown or a mid-flight portal/MAC config
+edit. Tradeoff: two different channels sharing the same Stalker MAC still get
+two independent sessions/clients and can still contend for the same
+concurrent-connection slot on the portal — this fix doesn't solve that
+cross-channel case, see Open Questions.</dd>
+<dt>Backwards compatibility</dt>
+<dd>Every new parameter defaults to <code>None</code>/off. Preview, discovery,
+and any other existing caller of <code>url_utils.py</code> functions keeps
+today's exact behavior.</dd>
+</dl>
+
+<div class="callout warn">
+<strong>Open question:</strong> if two channels in Dispatcharr are configured
+to use the same Stalker MAC/account concurrently, this fix does not prevent
+them from independently opening two sessions and contending for the portal's
+connection limit — each <code>StreamManager</code> caches its own client. A
+global per-MAC cache would fix that but needs cross-greenlet locking and
+invalidation-on-config-change, which is a materially bigger change than this
+fix. Worth confirming with the portal/account setup for
+<code>185.80.197.39</code> whether this is actually happening (e.g. multiple
+channels mapped to the same M3U/Stalker account) before deciding whether it's
+in scope.
+</div>
+
+<h2 id="test-verification-plan"><a class="anchor" href="#test-verification-plan" aria-hidden="true" tabindex="-1">#</a>Test / verification plan</h2>
+<ul>
+<li>Unit test: <code>HTTPStreamReader</code> sets <code>last_status_code</code>
+on a mocked non-200 response.</li>
+<li>Unit test: the backoff branch — inject a fake <code>last_transport_failure</code>
+with reason <code>stalker_portal_rejected</code> and assert the longer
+schedule is used instead of the default.</li>
+<li>Unit test: <code>_resolve_live_stream_context</code> with a cache dict
+reuses the same <code>StalkerClient</code> instance across two calls for the
+same <code>(account, mac)</code> — assert handshake/authenticate are only
+invoked once across both calls (mocked).</li>
+<li>Manual verification: deploy to <code>superdocker</code>, re-tail
+<code>docker logs dispatcharr | grep 185.80.197.39</code>, confirm retries
+space out more, redundant handshake/get_events/create_link triples per failed
+attempt drop, and the new "portal rejected (456)" log line appears.</li>
+</ul>
+
+<h2 id="out-of-scope"><a class="anchor" href="#out-of-scope" aria-hidden="true" tabindex="-1">#</a>Out of scope</h2>
+<ul>
+<li>Rewriting the retry/backoff architecture generally.</li>
+<li>Changing default <code>max_retries</code> or per-profile <code>max_streams</code> semantics.</li>
+<li>XC/plain-M3U provider code paths.</li>
+<li>A global cross-channel per-MAC session cache (see open question above).</li>
+<li>Inventing a portal logout/disconnect call that the Stalker protocol doesn't provide.</li>
+</ul>
+<!--/doc:body-->
+<footer class="doc-foot">
+  <span>Last updated 2026-09-14</span>
+  <button class="theme-toggle no-print" data-theme-toggle aria-label="Toggle light and dark theme">light / dark</button>
+</footer>
+</main>
+</div>
+</body>
+</html>

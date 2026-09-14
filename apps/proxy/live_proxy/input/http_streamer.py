@@ -26,6 +26,7 @@ class HTTPStreamReader:
         self.pipe_read = None
         self.pipe_write = None
         self.running = False
+        self.last_status_code = None
 
     def start(self):
         """Start the HTTP stream reader thread"""
@@ -73,6 +74,7 @@ class HTTPStreamReader:
             )
 
             if self.response.status_code != 200:
+                self.last_status_code = self.response.status_code
                 logger.error(f"HTTP {self.response.status_code} from {self.url}")
                 return
 
