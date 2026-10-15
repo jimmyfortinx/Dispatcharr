@@ -356,6 +356,7 @@ class TsProxyStalkerReconnectTests(TestCase):
             self.stream.id,
             self.account_profile.id,
             self.switch_context["input_headers"],
+            reason="manual",
         )
 
     def test_publish_stream_switch_event_includes_runtime_context(self):
@@ -411,6 +412,7 @@ class TsProxyStalkerReconnectTests(TestCase):
             self.stream.id,
             self.account_profile.id,
             self.switch_context["input_headers"],
+            reason="manual",
         )
         mock_update_metadata.assert_called_once_with(
             "channel-1",
@@ -420,6 +422,7 @@ class TsProxyStalkerReconnectTests(TestCase):
             self.stream.id,
             self.account_profile.id,
             None,
+            switch_reason="manual",
         )
 
     def test_buffering_timeout_reconnects_current_stream_before_failover(self):
@@ -709,7 +712,9 @@ class StalkerPhase9DvrTests(TestCase):
             response = stream_ts(request, channel_id)
 
         self.assertEqual(response.status_code, 200)
-        mock_generate_stream_url.assert_called_once_with(channel_id, None, None)
+        mock_generate_stream_url.assert_called_once_with(
+            channel_id, None, None, override_stream_profile_id=None,
+        )
         mock_initialize_channel.assert_called_once_with(
             channel_id,
             "http://resolved.example.com/live/world-news",
@@ -769,7 +774,9 @@ class StalkerPhase9DvrTests(TestCase):
 
         self.assertEqual(response.status_code, 302)
         self.assertEqual(response["Location"], "http://resolved.example.com/live/world-news")
-        mock_generate_stream_url.assert_called_once_with(channel_id, None, None)
+        mock_generate_stream_url.assert_called_once_with(
+            channel_id, None, None, override_stream_profile_id=None,
+        )
         mock_validate_stream_url.assert_called_once_with(
             "http://resolved.example.com/live/world-news",
             user_agent="DispatcharrTest/2.0",

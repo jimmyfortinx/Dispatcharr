@@ -309,6 +309,8 @@ class ClientRemoveIntegrationTests(TestCase):
         gen.client_user_agent = "DispatcharrTest/1.0"
         gen.stream_start_time = time.time() - 1
         gen.bytes_sent = 1234
+        gen.channel_name = "Cleanup Test"
+        gen.user = None
 
         client_manager = MagicMock()
         client_manager.clients = {gen.client_id: MagicMock()}
@@ -318,15 +320,15 @@ class ClientRemoveIntegrationTests(TestCase):
         proxy_server = MagicMock()
         proxy_server.client_managers = {gen.channel_id: client_manager}
 
-        channel_obj = MagicMock()
-        channel_obj.name = "Cleanup Test"
-
         with patch(
             "apps.proxy.live_proxy.output.ts.generator.ProxyServer.get_instance",
             return_value=proxy_server,
         ), patch(
-            "apps.proxy.live_proxy.output.ts.generator.Channel.objects.get",
-            return_value=channel_obj,
+            "apps.proxy.live_proxy.url_utils.release_worker_stream",
+            return_value=True,
+        ) as mock_release_stream, patch(
+            "apps.proxy.live_proxy.output.ts.generator.ConfigHelper.channel_shutdown_delay",
+            return_value=0,
         ), patch(
             "apps.proxy.live_proxy.output.ts.generator.log_system_event",
         ), patch(
@@ -335,6 +337,7 @@ class ClientRemoveIntegrationTests(TestCase):
             gen._cleanup()
 
         client_manager.remove_client.assert_called_once_with(gen.client_id)
+        mock_release_stream.assert_called_once_with(gen.channel_id)
         mock_spawn.assert_not_called()
         proxy_server.am_i_owner.assert_not_called()
 

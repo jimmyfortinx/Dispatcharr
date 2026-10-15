@@ -17,6 +17,14 @@ class RedisConnectionStringsTests(SimpleTestCase):
     """
 
     def setUp(self):
+        self.enterContext(patch.dict(os.environ, {
+            "REDIS_URL": "",
+            "REDIS_HOST": "localhost",
+            "REDIS_PORT": "6379",
+            "REDIS_DB": "0",
+            "REDIS_USER": "",
+            "REDIS_PASSWORD": "",
+        }))
 
         RedisClient._client = None
         RedisClient._buffer = None
