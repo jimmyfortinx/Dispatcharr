@@ -51,7 +51,7 @@ def should_skip_initialization():
     skip_commands = [
         'celery', 'beat', 'migrate', 'makemigrations', 'showmigrations',
         'shell', 'dbshell', 'collectstatic', 'loaddata', 'test', 'testserver',
-        'check', 'pytest'
+        'check', 'pytest', 'vpn_guard'
     ]
     # argv[0] is a full path (/dispatcharrpy/bin/celery), so match its name too.
     args = set(sys.argv[1:])
