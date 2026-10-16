@@ -260,6 +260,38 @@ class VpnGuardCycleTests(SimpleTestCase):
         self.assertEqual(gluetun.rotations, 1)
 
 
+    def test_an_account_blocked_only_after_rotation_is_not_success(self):
+        gluetun = FakeGluetun("1.1.1.1", ["2.2.2.2", "3.3.3.3"])
+        guard, redis = self.make_guard(
+            gluetun,
+            {
+                "1.1.1.1": [("tiger", BLOCKED), ("other", ERROR)],
+                "2.2.2.2": [("tiger", OK), ("other", BLOCKED)],
+                "3.3.3.3": [("tiger", OK), ("other", OK)],
+            },
+        )
+
+        self.assertEqual(guard.run_cycle(), 1800)
+        self.assertEqual(gluetun.current_ip, "3.3.3.3")
+        self.assertIn("vpn_guard:bad_ip:2.2.2.2", redis.keys)
+
+    def test_redis_is_acquired_again_on_the_next_cycle(self):
+        gluetun = FakeGluetun("1.1.1.1", [])
+        redis = FakeRedis()
+        factory = MagicMock(side_effect=[None, redis])
+        guard = VpnGuard(
+            GuardConfig(),
+            gluetun,
+            factory,
+            probe=probe_by_ip(gluetun, {"1.1.1.1": [("tiger", OK)]}),
+        )
+
+        with self.assertRaises(RuntimeError):
+            guard.run_cycle()
+        self.assertEqual(guard.run_cycle(), GuardConfig().interval_seconds)
+        self.assertEqual(factory.call_count, 2)
+
+
 class ActiveConnectionCountTests(SimpleTestCase):
     def test_counts_live_timeshift_and_vod_clients(self):
         redis = FakeRedis(
@@ -315,6 +347,14 @@ class GluetunClientTests(SimpleTestCase):
 
         self.assertEqual(client.rotate("1.1.1.1", timeout_seconds=60), "2.2.2.2")
         self.assertEqual(self.put_statuses(client), ["stopped", "running", "running"])
+
+    def test_lost_stop_answer_still_restarts_the_vpn(self):
+        client = self.make_client(["2.2.2.2"])
+        client.session.put.side_effect = [requests.ReadTimeout(), MagicMock()]
+        client.vpn_status = MagicMock(return_value="stopped")
+
+        self.assertEqual(client.rotate("1.1.1.1", timeout_seconds=60), "2.2.2.2")
+        self.assertEqual(self.put_statuses(client), ["stopped", "running"])
 
     def test_ensure_running_starts_a_stopped_vpn(self):
         client = self.make_client([])
@@ -372,6 +412,33 @@ class ReadStreamTests(SimpleTestCase):
     def test_html_page_is_error(self, get):
         get.return_value = fake_response(200, [b"<html>expired</html>"], content_type="text/html")
         self.assertEqual(_read_stream("http://x", {}, {456})[0], ERROR)
+
+    @patch("apps.m3u.vpn_guard.requests.get")
+    def test_html_body_without_html_content_type_is_error(self, get):
+        for content_type in ("", "application/octet-stream"):
+            get.return_value = fake_response(
+                200, [b"<!DOCTYPE html><p>denied</p>"], content_type=content_type
+            )
+            self.assertEqual(_read_stream("http://x", {}, {456})[0], ERROR)
+
+    @patch("apps.m3u.vpn_guard.requests.get")
+    def test_reads_data_as_it_arrives(self, get):
+        get.return_value = fake_response(200, [b"x"])
+
+        _read_stream("http://x", {}, {456})
+
+        get.return_value.iter_content.assert_called_once_with(chunk_size=None)
+
+    @patch("apps.m3u.vpn_guard.requests.get")
+    def test_deadline_stops_between_hls_hops(self, get):
+        playlist = b"#EXTM3U\n#EXTINF:6,\nseg1.ts\n"
+        get.return_value = fake_response(200, [playlist], "application/x-mpegurl", "http://x/i.m3u8")
+        times = iter([0, 0, 1, 100])
+
+        outcome, detail = _read_stream("http://x/i.m3u8", {}, {456}, clock=lambda: next(times))
+
+        self.assertEqual((outcome, detail), (ERROR, "probe deadline reached"))
+        self.assertEqual(get.call_count, 1)
 
     @patch("apps.m3u.vpn_guard.requests.get", side_effect=requests.ConnectionError())
     def test_network_failure_is_error(self, get):
@@ -529,3 +596,26 @@ class InitializationSkipTests(SimpleTestCase):
             django_apps.get_app_config("plugins").ready()
 
         get_manager.assert_not_called()
+
+
+class StopLoop(Exception):
+    pass
+
+
+class CommandLoopTests(SimpleTestCase):
+    @patch("apps.m3u.management.commands.vpn_guard.connections")
+    @patch("apps.m3u.management.commands.vpn_guard.time.sleep")
+    @patch("apps.m3u.management.commands.vpn_guard.VpnGuard.run_cycle")
+    def test_closes_database_connections_after_every_cycle(self, run_cycle, sleep, connections):
+        from django.core.management import call_command
+
+        run_cycle.side_effect = [60, RuntimeError("boom")]
+        # Startup delay, then one sleep per cycle; stop on the third.
+        sleep.side_effect = [None, None, StopLoop()]
+
+        with self.assertRaises(StopLoop):
+            call_command("vpn_guard")
+
+        self.assertEqual(run_cycle.call_count, 2)
+        self.assertEqual(connections.close_all.call_count, 2)
+        self.assertEqual(sleep.call_args_list[1].args[0], 60)

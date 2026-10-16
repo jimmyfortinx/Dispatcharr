@@ -155,11 +155,12 @@ class GluetunClient:
         after the restart, so a different IP is awaited until the deadline. It
         can still equal ``previous_ip`` when gluetun picks the same server.
         """
-        self._set_vpn_status("stopped")
         try:
+            self._set_vpn_status("stopped")
             self._set_vpn_status("running")
         except requests.RequestException:
-            # Never leave the shared VPN stopped.
+            # A stop can apply even when its answer is lost: never leave the
+            # shared VPN stopped.
             self.ensure_running()
         deadline = self._clock() + timeout_seconds
         last_ip = ""
@@ -208,16 +209,26 @@ def _hls_next_url(body, base_url):
     return ""
 
 
+def _looks_like_html(body):
+    head = body[:256].lstrip().lower()
+    return head.startswith(b"<!doctype html") or head.startswith(b"<html")
+
+
 def _read_stream(url, headers, block_statuses, clock=time.monotonic):
     """Fetch the start of a stream and classify the answer.
 
     HLS playlists are followed to a media segment, because a provider can
-    serve the playlist and block the segments.
+    serve the playlist and block the segments. The whole probe, every hop
+    included, stops after PROBE_DEADLINE_SECONDS plus one socket timeout.
     """
     deadline = clock() + PROBE_DEADLINE_SECONDS
     for _hop in range(HLS_MAX_HOPS + 1):
+        remaining = deadline - clock()
+        if remaining <= 0:
+            return ERROR, "probe deadline reached"
+        read_timeout = max(1.0, min(15.0, remaining))
         try:
-            response = requests.get(url, headers=headers, stream=True, timeout=(5, 15))
+            response = requests.get(url, headers=headers, stream=True, timeout=(5, read_timeout))
         except requests.RequestException as exc:
             return ERROR, f"request failed: {exc.__class__.__name__}"
         try:
@@ -229,7 +240,9 @@ def _read_stream(url, headers, block_statuses, clock=time.monotonic):
             if "text/html" in content_type:
                 return ERROR, "HTTP 200 with an HTML page"
             body = b""
-            for chunk in response.iter_content(8192):
+            # chunk_size=None yields data as it arrives, so the deadline is
+            # checked at least once per socket timeout.
+            for chunk in response.iter_content(chunk_size=None):
                 body += chunk
                 if len(body) >= PROBE_READ_BYTES or clock() >= deadline:
                     break
@@ -240,6 +253,8 @@ def _read_stream(url, headers, block_statuses, clock=time.monotonic):
 
         if not body:
             return ERROR, "HTTP 200 without data"
+        if _looks_like_html(body):
+            return ERROR, "HTTP 200 with an HTML page"
         next_url = _hls_next_url(body, response.url or url)
         if next_url is None:
             return OK, f"HTTP 200, {len(body)} bytes"
@@ -414,11 +429,12 @@ class VpnGuard:
 
             results = list(self._probe())
             self._log(results, ip)
-            failing = required - {r.account_name for r in results if r.outcome == OK}
+            newly_blocked = {r.account_name for r in results if r.outcome == BLOCKED}
+            failing = (required | newly_blocked) - {r.account_name for r in results if r.outcome == OK}
             if not failing:
                 logger.info("vpn_guard: exit IP %s works for every provider", ip)
                 return self.config.interval_seconds
-            if any(r.outcome == BLOCKED for r in results):
+            if newly_blocked:
                 self._mark_bad(ip)
             logger.info("vpn_guard: still failing on %s: %s", ip, ", ".join(sorted(failing)))
 
