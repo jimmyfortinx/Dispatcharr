@@ -54,7 +54,7 @@ class PluginsConfig(AppConfig):
             # pure management commands that don't serve requests. Every other
             # process - including each uWSGI worker under lazy-apps=true - runs
             # discovery so plugin modules are imported and monkey-patches apply.
-            _no_discovery_cmds = {'celery', 'beat', 'migrate', 'dbshell', 'loaddata'}
+            _no_discovery_cmds = {'celery', 'beat', 'migrate', 'dbshell', 'loaddata', 'vpn_guard'}
             if not any(cmd in sys.argv for cmd in _no_discovery_cmds):
                 from .loader import PluginManager
                 PluginManager.get().discover_plugins(sync_db=False)
