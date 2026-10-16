@@ -1,4 +1,6 @@
 import sys
+from contextlib import nullcontext
+import time
 from fnmatch import fnmatchcase
 from unittest.mock import MagicMock, patch
 
@@ -260,6 +262,21 @@ class VpnGuardCycleTests(SimpleTestCase):
         self.assertEqual(gluetun.rotations, 1)
 
 
+    def test_an_account_blocked_once_must_play_before_success(self):
+        gluetun = FakeGluetun("1.1.1.1", ["2.2.2.2", "3.3.3.3", "4.4.4.4"])
+        guard, _ = self.make_guard(
+            gluetun,
+            {
+                "1.1.1.1": [("a", BLOCKED), ("b", ERROR)],
+                "2.2.2.2": [("a", OK), ("b", BLOCKED)],
+                "3.3.3.3": [("a", OK), ("b", ERROR)],
+                "4.4.4.4": [("a", OK), ("b", OK)],
+            },
+        )
+
+        self.assertEqual(guard.run_cycle(), 1800)
+        self.assertEqual(gluetun.current_ip, "4.4.4.4")
+
     def test_an_account_blocked_only_after_rotation_is_not_success(self):
         gluetun = FakeGluetun("1.1.1.1", ["2.2.2.2", "3.3.3.3"])
         guard, redis = self.make_guard(
@@ -382,7 +399,8 @@ def fake_response(status, chunks=(), content_type="video/mp2t", url="http://x/st
     response.status_code = status
     response.headers = {"Content-Type": content_type}
     response.url = url
-    response.iter_content.return_value = iter(chunks)
+    pending = iter(chunks)
+    response.raw.read1.side_effect = lambda amt, decode_content=True: next(pending, b"")
     return response
 
 
@@ -416,26 +434,21 @@ class ReadStreamTests(SimpleTestCase):
     @patch("apps.m3u.vpn_guard.requests.get")
     def test_html_body_without_html_content_type_is_error(self, get):
         for content_type in ("", "application/octet-stream"):
-            get.return_value = fake_response(
-                200, [b"<!DOCTYPE html><p>denied</p>"], content_type=content_type
-            )
-            self.assertEqual(_read_stream("http://x", {}, {456})[0], ERROR)
-
-    @patch("apps.m3u.vpn_guard.requests.get")
-    def test_reads_data_as_it_arrives(self, get):
-        get.return_value = fake_response(200, [b"x"])
-
-        _read_stream("http://x", {}, {456})
-
-        get.return_value.iter_content.assert_called_once_with(chunk_size=None)
+            for body in (
+                b"<!DOCTYPE html><p>denied</p>",
+                b"\xef\xbb\xbf<html><p>denied</p>",
+                b"<!-- proxy -->\n<!doctype html><html></html>",
+            ):
+                get.return_value = fake_response(200, [body], content_type=content_type)
+                self.assertEqual(_read_stream("http://x", {}, {456})[0], ERROR)
 
     @patch("apps.m3u.vpn_guard.requests.get")
     def test_deadline_stops_between_hls_hops(self, get):
         playlist = b"#EXTM3U\n#EXTINF:6,\nseg1.ts\n"
         get.return_value = fake_response(200, [playlist], "application/x-mpegurl", "http://x/i.m3u8")
-        times = iter([0, 0, 1, 100])
+        times = iter([0, 0, 1])
 
-        outcome, detail = _read_stream("http://x/i.m3u8", {}, {456}, clock=lambda: next(times))
+        outcome, detail = _read_stream("http://x/i.m3u8", {}, {456}, clock=lambda: next(times, 100))
 
         self.assertEqual((outcome, detail), (ERROR, "probe deadline reached"))
         self.assertEqual(get.call_count, 1)
@@ -619,3 +632,58 @@ class CommandLoopTests(SimpleTestCase):
         self.assertEqual(run_cycle.call_count, 2)
         self.assertEqual(connections.close_all.call_count, 2)
         self.assertEqual(sleep.call_args_list[1].args[0], 60)
+
+
+def _start_endless_server(delay, chunk):
+    import http.server
+    import threading
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Type", "video/mp2t")
+            self.send_header("Content-Length", str(10**12))
+            self.end_headers()
+            try:
+                while True:
+                    self.wfile.write(chunk)
+                    self.wfile.flush()
+                    time.sleep(delay)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server.daemon_threads = True
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server
+
+
+class ReadStreamTransportTests(SimpleTestCase):
+    def read_from(self, server, **patches):
+        url = f"http://127.0.0.1:{server.server_address[1]}/live.ts"
+        with patch.multiple("apps.m3u.vpn_guard", **patches) if patches else nullcontext():
+            start = time.monotonic()
+            outcome, detail = _read_stream(url, {}, {456})
+            return outcome, detail, time.monotonic() - start
+
+    def test_endless_fast_stream_stops_at_the_byte_cap(self):
+        server = _start_endless_server(delay=0.001, chunk=b"\x47" * 4096)
+        self.addCleanup(server.shutdown)
+
+        outcome, detail, elapsed = self.read_from(server)
+
+        self.assertEqual(outcome, OK)
+        self.assertIn("65536 bytes", detail)
+        self.assertLess(elapsed, 5)
+
+    def test_endless_slow_stream_stops_at_the_deadline(self):
+        server = _start_endless_server(delay=0.05, chunk=b"\x47" * 10)
+        self.addCleanup(server.shutdown)
+
+        outcome, _detail, elapsed = self.read_from(server, PROBE_DEADLINE_SECONDS=1)
+
+        self.assertEqual(outcome, OK)
+        self.assertLess(elapsed, 3)

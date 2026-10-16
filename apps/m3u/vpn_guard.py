@@ -210,7 +210,16 @@ def _hls_next_url(body, base_url):
 
 
 def _looks_like_html(body):
-    head = body[:256].lstrip().lower()
+    head = body[:2048]
+    if head.startswith(b"\xef\xbb\xbf"):
+        head = head[3:]
+    head = head.lstrip()
+    while head.startswith(b"<!--"):
+        end = head.find(b"-->")
+        if end < 0:
+            return True
+        head = head[end + 3:].lstrip()
+    head = head.lower()
     return head.startswith(b"<!doctype html") or head.startswith(b"<html")
 
 
@@ -240,12 +249,13 @@ def _read_stream(url, headers, block_statuses, clock=time.monotonic):
             if "text/html" in content_type:
                 return ERROR, "HTTP 200 with an HTML page"
             body = b""
-            # chunk_size=None yields data as it arrives, so the deadline is
-            # checked at least once per socket timeout.
-            for chunk in response.iter_content(chunk_size=None):
-                body += chunk
-                if len(body) >= PROBE_READ_BYTES or clock() >= deadline:
+            # read1() returns what one socket read gives, so the byte cap and
+            # the deadline are checked at least once per socket timeout.
+            while len(body) < PROBE_READ_BYTES and clock() < deadline:
+                chunk = response.raw.read1(PROBE_READ_BYTES - len(body), decode_content=True)
+                if not chunk:
                     break
+                body += chunk
         except requests.RequestException as exc:
             return ERROR, f"read failed: {exc.__class__.__name__}"
         finally:
@@ -430,7 +440,9 @@ class VpnGuard:
             results = list(self._probe())
             self._log(results, ip)
             newly_blocked = {r.account_name for r in results if r.outcome == BLOCKED}
-            failing = (required | newly_blocked) - {r.account_name for r in results if r.outcome == OK}
+            # An account seen blocked must play before an IP counts as good.
+            required |= newly_blocked
+            failing = required - {r.account_name for r in results if r.outcome == OK}
             if not failing:
                 logger.info("vpn_guard: exit IP %s works for every provider", ip)
                 return self.config.interval_seconds
