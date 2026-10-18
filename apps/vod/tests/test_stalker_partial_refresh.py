@@ -141,32 +141,68 @@ class StalkerCatalogPartialFailureTests(TestCase):
                 # One first attempt plus two retries for the failing page.
                 self.assertEqual(state.calls.count(("11", 1)), 3)
 
-    @NO_RETRY_DELAY
-    def test_late_failure_keeps_earlier_pages_and_drains_other_producers(self):
-        # Category 10 yields more pages than a producer queue holds (4) while
-        # category 11 fails after two populated pages. The fetch must finish.
-        self._set_workers(2)
-        responses = {("10", page): page_of(1000 + page) for page in range(1, 9)}
-        responses[("11", 1)] = page_of(2001)
-        responses[("11", 2)] = page_of(2002)
-        responses[("11", 3)] = always_fail
-        state = SharedPortalState(responses)
-        report = StalkerCatalogFetchReport()
+    def _collect_with_deadline(self, client, report):
         outcome = {}
 
         def run():
-            outcome["batches"] = self._collect(FakeCatalogClient(state), report)
+            outcome["batches"] = self._collect(client, report)
 
         worker = threading.Thread(target=run, daemon=True)
         worker.start()
         worker.join(timeout=10)
-
         self.assertFalse(worker.is_alive(), "catalog fetch did not finish")
-        self.assertEqual(
-            collect_ids(outcome["batches"]),
-            sorted([str(1000 + page) for page in range(1, 9)] + ["2001", "2002"]),
+        return outcome["batches"]
+
+    @NO_RETRY_DELAY
+    def test_late_failure_keeps_earlier_pages(self):
+        self._set_workers(2)
+        state = SharedPortalState(
+            {
+                ("10", 1): page_of(1001),
+                ("11", 1): page_of(2001),
+                ("11", 2): page_of(2002),
+                ("11", 3): always_fail,
+            }
         )
+        report = StalkerCatalogFetchReport()
+
+        batches = self._collect_with_deadline(FakeCatalogClient(state), report)
+
+        self.assertEqual(collect_ids(batches), ["1001", "2001", "2002"])
         self.assertEqual(report.failed_provider_category_ids, {"11"})
+
+    @NO_RETRY_DELAY
+    def test_failure_drains_a_producer_blocked_on_a_full_queue(self):
+        # Category 10 is consumed first and fails only once category 11 has
+        # fetched more pages than its queue holds (4), so producer 11 is
+        # blocked on a full queue when the failure is reported.
+        self._set_workers(2)
+        second_queue_full = threading.Event()
+
+        def fail_after_backlog(client):
+            second_queue_full.wait(timeout=5)
+            raise StalkerError("Request failed: 502 Bad Gateway")
+
+        def backlog_page(page):
+            def respond(client):
+                if page >= 6:
+                    second_queue_full.set()
+                return page_of(2000 + page)
+
+            return respond
+
+        responses = {("10", 1): fail_after_backlog}
+        responses.update({("11", page): backlog_page(page) for page in range(1, 9)})
+        state = SharedPortalState(responses)
+        report = StalkerCatalogFetchReport()
+
+        batches = self._collect_with_deadline(FakeCatalogClient(state), report)
+
+        self.assertTrue(second_queue_full.is_set())
+        self.assertEqual(
+            collect_ids(batches), sorted(str(2000 + page) for page in range(1, 9))
+        )
+        self.assertEqual(report.failed_provider_category_ids, {"10"})
 
     @NO_RETRY_DELAY
     def test_every_category_failing_is_reported(self):
@@ -306,6 +342,43 @@ class CleanupKeepsFailedCategoriesTests(TestCase):
         self.assertFalse(
             M3UMovieRelation.objects.filter(id=removed_bare_movie.id).exists()
         )
+
+    @NO_RETRY_DELAY
+    def test_failed_unfiltered_request_keeps_every_relation_of_its_type(self):
+        # Portals without categories are fetched with one unfiltered request.
+        for requested_category_id in (None, "*"):
+            with self.subTest(requested_category_id=requested_category_id):
+                account = self.account
+                kept_movie = self._movie_relation(f"fallback-{requested_category_id}")
+                state = SharedPortalState({(str(requested_category_id), 1): always_fail})
+                report = StalkerCatalogFetchReport()
+                categories = (
+                    {} if requested_category_id is None
+                    else {"*": VODCategory.objects.create(name="All", category_type="movie")}
+                )
+                list(
+                    iter_stalker_catalog_batches(
+                        FakeCatalogClient(state),
+                        account,
+                        categories,
+                        {},
+                        content_type="movie",
+                        report=report,
+                    )
+                )
+
+                cleanup_orphaned_vod_content(
+                    account_id=account.id,
+                    scan_start_time=self.scan_start,
+                    keep_movie_relations=build_stalker_failed_category_filter(
+                        report, categories,
+                    ),
+                )
+
+                self.assertEqual(report.failed_provider_category_ids, {"*"})
+                self.assertTrue(
+                    M3UMovieRelation.objects.filter(id=kept_movie.id).exists()
+                )
 
     def test_relations_keep_their_failed_provider_category_after_a_rename(self):
         # Provider category 10 was renamed: category sync created "Action HD"

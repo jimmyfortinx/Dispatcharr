@@ -30,6 +30,8 @@ DEFAULT_STALKER_CATALOG_PAGE_WORKERS = 2
 # entry per retry, so the page gets len() + 1 attempts in total.
 STALKER_CATALOG_RETRY_DELAYS = (2, 5)
 _stalker_catalog_auth_lock = threading.Lock()
+# Failure marker for an unfiltered catalog request (no category, or "*").
+STALKER_ALL_CATEGORIES = "*"
 
 
 @dataclass
@@ -670,6 +672,9 @@ def build_stalker_failed_category_filter(report, categories_by_provider):
     provider_ids = sorted(report.failed_provider_category_ids)
     if not provider_ids:
         return None
+    if STALKER_ALL_CATEGORIES in provider_ids:
+        # The unfiltered catalog failed, so no relation of this type was seen.
+        return Q()
     category_ids = [
         categories_by_provider[provider_id].id
         for provider_id in provider_ids
@@ -1418,7 +1423,11 @@ def iter_stalker_catalog_batches(
 
     def record_category_failure(requested_category_id, exc):
         report.last_error = exc
-        report.failed_provider_category_ids.add(str(requested_category_id))
+        report.failed_provider_category_ids.add(
+            STALKER_ALL_CATEGORIES
+            if requested_category_id in (None, "", STALKER_ALL_CATEGORIES)
+            else str(requested_category_id)
+        )
         logger.error(
             "Stalker %s fetch failed for category %s on account %s; keeping its existing content: %s",
             content_type,
