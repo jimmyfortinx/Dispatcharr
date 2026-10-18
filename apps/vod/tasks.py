@@ -1,4 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass, field
 from queue import Queue
 from celery import shared_task, current_app, group
 from django.utils import timezone
@@ -29,6 +30,21 @@ DEFAULT_STALKER_CATALOG_PAGE_WORKERS = 2
 # entry per retry, so the page gets len() + 1 attempts in total.
 STALKER_CATALOG_RETRY_DELAYS = (2, 5)
 _stalker_catalog_auth_lock = threading.Lock()
+
+
+@dataclass
+class StalkerCatalogFetchReport:
+    """Which Stalker category fetches of one content type failed after retries."""
+
+    requested_count: int = 0
+    failed_provider_category_ids: set = field(default_factory=set)
+    last_error: Exception = None
+
+    @property
+    def all_failed(self):
+        return bool(self.requested_count) and (
+            len(self.failed_provider_category_ids) >= self.requested_count
+        )
 
 
 def supports_parallel_stalker_catalog(client):
@@ -162,7 +178,7 @@ def refresh_vod_content(account_id):
 
             logger.info(f"Starting batch VOD refresh for account {account.name}")
             start_time = timezone.now()
-            failed_category_ids = set()
+            movie_report = series_report = StalkerCatalogFetchReport()
 
             # Send start notification
             send_vod_progress(0, "VOD content refresh starting...")
@@ -225,7 +241,7 @@ def refresh_vod_content(account_id):
                 }
 
                 send_vod_progress(20, "Importing movie catalog...")
-                failed_category_ids |= refresh_movies(
+                movie_report = refresh_movies(
                     client,
                     account,
                     movie_categories,
@@ -233,7 +249,7 @@ def refresh_vod_content(account_id):
                     scan_start_time=start_time,
                 )
                 send_vod_progress(40, "Importing TV show catalog...")
-                failed_category_ids |= refresh_series(
+                series_report = refresh_series(
                     client,
                     account,
                     series_categories,
@@ -250,6 +266,7 @@ def refresh_vod_content(account_id):
                         items_total=total,
                     ),
                 )
+                raise_if_every_stalker_category_failed(movie_report, series_report)
 
             end_time = timezone.now()
             duration = (end_time - start_time).total_seconds()
@@ -266,7 +283,12 @@ def refresh_vod_content(account_id):
                 cleanup_result = cleanup_orphaned_vod_content(
                     account_id=account_id,
                     scan_start_time=start_time,
-                    keep_category_ids=failed_category_ids,
+                    keep_movie_relations=build_stalker_failed_category_filter(
+                        movie_report, movie_categories,
+                    ),
+                    keep_series_relations=build_stalker_failed_category_filter(
+                        series_report, series_categories,
+                    ),
                 )
                 logger.info(f"VOD cleanup completed: {cleanup_result}")
 
@@ -279,12 +301,12 @@ def refresh_vod_content(account_id):
                     f"Stalker VOD refresh completed in {duration:.2f} seconds "
                     f"({movie_count} movie categories, {series_count} series categories)"
                 )
-                if failed_category_ids:
+                failed_names = sorted(
+                    get_stalker_failed_category_names(movie_report, movie_categories)
+                    + get_stalker_failed_category_names(series_report, series_categories)
+                )
+                if failed_names:
                     completion_status = "warning"
-                    failed_names = sorted(
-                        VODCategory.objects.filter(id__in=failed_category_ids)
-                        .values_list("name", flat=True)
-                    )
                     completion_message += (
                         "; kept existing content for categories that failed "
                         f"to load: {', '.join(failed_names)}"
@@ -406,8 +428,7 @@ def refresh_categories(account_id, client=None):
 def refresh_movies(client, account, categories_by_provider, relations, scan_start_time=None):
     """Refresh movie content using single API call for all movies.
 
-    Returns the ids of the VOD categories whose fetch failed (Stalker only),
-    so cleanup can keep their existing relations.
+    Returns a StalkerCatalogFetchReport; it is empty for XC accounts.
     """
     logger.info(f"Refreshing movies for account {account.name}")
     seen_movie_keys = set()
@@ -447,7 +468,7 @@ def refresh_movies(client, account, categories_by_provider, relations, scan_star
         logger.info("Fetching Stalker movies from provider...")
         total_movies = 0
         total_chunks = 0
-        failed_provider_category_ids = set()
+        report = StalkerCatalogFetchReport()
 
         for chunk in iter_stalker_catalog_batches(
             client,
@@ -455,7 +476,7 @@ def refresh_movies(client, account, categories_by_provider, relations, scan_star
             categories_by_provider,
             relations,
             content_type="movie",
-            failed_category_ids=failed_provider_category_ids,
+            report=report,
         ):
             total_chunks += 1
             total_movies += len(chunk)
@@ -478,10 +499,7 @@ def refresh_movies(client, account, categories_by_provider, relations, scan_star
             total_movies,
             total_chunks,
         )
-        return get_failed_stalker_category_ids(
-            failed_provider_category_ids,
-            categories_by_provider,
-        )
+        return report
     else:
         # Get all movies in a single API call
         logger.info("Fetching all movies from provider...")
@@ -508,7 +526,7 @@ def refresh_movies(client, account, categories_by_provider, relations, scan_star
 
     del all_movies_data
     logger.info(f"Completed processing all {total_movies} movies in {total_chunks} chunks")
-    return set()
+    return StalkerCatalogFetchReport()
 
 
 def refresh_series(
@@ -521,8 +539,7 @@ def refresh_series(
 ):
     """Refresh series content using single API call for all series.
 
-    Returns the ids of the VOD categories whose fetch failed (Stalker only),
-    so cleanup can keep their existing relations.
+    Returns a StalkerCatalogFetchReport; it is empty for XC accounts.
     """
     logger.info(f"Refreshing series for account {account.name}")
     seen_series_keys = set()
@@ -563,7 +580,7 @@ def refresh_series(
         logger.info("Fetching Stalker series from provider...")
         total_series = 0
         total_chunks = 0
-        failed_provider_category_ids = set()
+        report = StalkerCatalogFetchReport()
 
         for chunk in iter_stalker_catalog_batches(
             client,
@@ -571,7 +588,7 @@ def refresh_series(
             categories_by_provider,
             relations,
             content_type="series",
-            failed_category_ids=failed_provider_category_ids,
+            report=report,
         ):
             total_chunks += 1
             total_series += len(chunk)
@@ -604,10 +621,7 @@ def refresh_series(
             stalker_series_relation_ids,
             progress_callback=progress_callback,
         )
-        return get_failed_stalker_category_ids(
-            failed_provider_category_ids,
-            categories_by_provider,
-        )
+        return report
     else:
         # Get all series in a single API call
         logger.info("Fetching all series from provider...")
@@ -634,16 +648,43 @@ def refresh_series(
 
     del all_series_data
     logger.info(f"Completed processing all {total_series} series in {total_chunks} chunks")
-    return set()
+    return StalkerCatalogFetchReport()
 
 
-def get_failed_stalker_category_ids(failed_provider_category_ids, categories_by_provider):
-    """Map failed Stalker provider category ids to VODCategory ids."""
-    return {
-        categories_by_provider[provider_category_id].id
-        for provider_category_id in failed_provider_category_ids
-        if provider_category_id in categories_by_provider
-    }
+def raise_if_every_stalker_category_failed(*reports):
+    """Fail the refresh only when no requested category could be fetched."""
+    requested = sum(report.requested_count for report in reports)
+    failed = sum(len(report.failed_provider_category_ids) for report in reports)
+    if requested and failed >= requested:
+        errors = [report.last_error for report in reports if report.last_error]
+        raise errors[-1]
+
+
+def build_stalker_failed_category_filter(report, categories_by_provider):
+    """Match relations that belong to a category whose fetch failed.
+
+    Matches the current category row and the provider category id saved on
+    each item, so content survives even when a renamed provider category
+    moved to a new VODCategory row during this refresh.
+    """
+    provider_ids = sorted(report.failed_provider_category_ids)
+    if not provider_ids:
+        return None
+    category_ids = [
+        categories_by_provider[provider_id].id
+        for provider_id in provider_ids
+        if provider_id in categories_by_provider
+    ]
+    return Q(category_id__in=category_ids) | Q(
+        custom_properties__basic_data___requested_category_id__in=provider_ids
+    )
+
+
+def get_stalker_failed_category_names(report, categories_by_provider):
+    return [
+        getattr(categories_by_provider.get(provider_id), "name", None) or provider_id
+        for provider_id in report.failed_provider_category_ids
+    ]
 
 
 def batch_create_categories(categories_data, category_type, account):
@@ -1332,23 +1373,23 @@ def iter_stalker_catalog_batches(
     categories_by_provider,
     relations,
     content_type,
-    failed_category_ids=None,
+    report=None,
 ):
     """Yield deduplicated Stalker catalog pages across the enabled categories.
 
-    A category that still fails after page retries is skipped and its
-    provider id is added to ``failed_category_ids`` so the caller can keep
-    that category's existing content. The fetch only raises when every
-    category failed.
+    A category that still fails after page retries is skipped and recorded in
+    ``report``, so the caller can keep that category's existing content and
+    decide whether the refresh failed as a whole.
     """
-    if failed_category_ids is None:
-        failed_category_ids = set()
+    if report is None:
+        report = StalkerCatalogFetchReport()
     portal_url = get_stalker_vod_portal_url(client, account)
     provider_category_ids = get_stalker_category_requests(
         categories_by_provider,
         relations=relations,
     )
     seen_relation_ids = set()
+    report.requested_count = len(provider_category_ids)
 
     logger.info(
         "Fetching Stalker %s across %s category contexts",
@@ -1375,12 +1416,9 @@ def iter_stalker_catalog_batches(
         content_type,
     )
 
-    last_error = None
-
     def record_category_failure(requested_category_id, exc):
-        nonlocal last_error
-        last_error = exc
-        failed_category_ids.add(str(requested_category_id))
+        report.last_error = exc
+        report.failed_provider_category_ids.add(str(requested_category_id))
         logger.error(
             "Stalker %s fetch failed for category %s on account %s; keeping its existing content: %s",
             content_type,
@@ -1443,9 +1481,6 @@ def iter_stalker_catalog_batches(
                         record_category_failure(requested_category_id, payload)
                     elif event_type == "done":
                         break
-
-    if last_error is not None and len(failed_category_ids) >= len(provider_category_ids):
-        raise last_error
 
 
 def collect_stalker_paginated_items(
@@ -3869,13 +3904,14 @@ def cleanup_orphaned_vod_content(
     stale_days=0,
     scan_start_time=None,
     account_id=None,
-    keep_category_ids=None,
+    keep_movie_relations=None,
+    keep_series_relations=None,
 ):
     """Clean up VOD content that has no M3U relations or has stale relations.
 
-    Relations in ``keep_category_ids`` are never treated as stale: their
-    category could not be fetched during this scan, so ``last_seen`` is not
-    a reliable signal for them.
+    Relations matching ``keep_movie_relations`` / ``keep_series_relations``
+    (Q filters) are never treated as stale: their category could not be
+    fetched during this scan, so ``last_seen`` is not a reliable signal.
     """
     from datetime import timedelta
 
@@ -3895,9 +3931,11 @@ def cleanup_orphaned_vod_content(
 
     # Clean up stale movie relations (haven't been seen in the specified days)
     stale_movie_relations = M3UMovieRelation.objects.filter(**base_filters)
-    if keep_category_ids:
+    if keep_movie_relations is not None:
+        # Exclude by id: excluding the Q directly would also keep rows where
+        # the JSON key is missing, because NOT (... OR NULL) is not true.
         stale_movie_relations = stale_movie_relations.exclude(
-            category_id__in=keep_category_ids
+            id__in=M3UMovieRelation.objects.filter(keep_movie_relations).values("id")
         )
     stale_movie_count = stale_movie_relations.count()
     stale_movie_relations.delete()
@@ -3905,9 +3943,9 @@ def cleanup_orphaned_vod_content(
     # Clean up stale series relations.
     # Episode relations are removed via CASCADE on the series_relation FK.
     stale_series_relations = M3USeriesRelation.objects.filter(**base_filters)
-    if keep_category_ids:
+    if keep_series_relations is not None:
         stale_series_relations = stale_series_relations.exclude(
-            category_id__in=keep_category_ids
+            id__in=M3USeriesRelation.objects.filter(keep_series_relations).values("id")
         )
     stale_series_count = stale_series_relations.count()
     stale_series_relations.delete()

@@ -366,7 +366,11 @@ from rest_framework.test import APIClient
 from apps.m3u.models import M3UAccount
 from apps.m3u.stalker import StalkerVodCategoryDiscoveryResult
 from apps.vod.models import M3UVODCategoryRelation, VODCategory
-from apps.vod.tasks import refresh_categories, refresh_vod_content
+from apps.vod.tasks import (
+    StalkerCatalogFetchReport,
+    refresh_categories,
+    refresh_vod_content,
+)
 
 
 User = get_user_model()
@@ -531,8 +535,8 @@ class StalkerPhase11CategoryDiscoveryTests(TestCase):
             {"20": object()},
         )
         mock_cleanup_orphaned_vod_content.return_value = "cleanup complete"
-        mock_refresh_movies.return_value = set()
-        mock_refresh_series.return_value = set()
+        mock_refresh_movies.return_value = StalkerCatalogFetchReport()
+        mock_refresh_series.return_value = StalkerCatalogFetchReport()
 
         result = refresh_vod_content(self.account.id)
 
@@ -571,18 +575,24 @@ class StalkerPhase11CategoryDiscoveryTests(TestCase):
             {"20": object()},
         )
         mock_cleanup_orphaned_vod_content.return_value = "cleanup complete"
-        mock_refresh_movies.return_value = set()
-        mock_refresh_series.return_value = set()
+        mock_refresh_movies.return_value = StalkerCatalogFetchReport()
+        mock_refresh_series.return_value = StalkerCatalogFetchReport()
 
         def series_side_effect(*args, **kwargs):
             progress_callback = kwargs.get("progress_callback")
             self.assertIsNotNone(progress_callback)
             progress_callback(1, 2)
             progress_callback(2, 2)
+            return StalkerCatalogFetchReport()
 
         mock_refresh_series.side_effect = series_side_effect
 
         refresh_vod_content(self.account.id)
+
+        mock_cleanup_orphaned_vod_content.assert_called_once()
+        self.assertEqual(
+            mock_send_m3u_update.call_args_list[-1].kwargs["status"], "success"
+        )
 
         intermediate_updates = [
             call

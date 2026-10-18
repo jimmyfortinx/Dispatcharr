@@ -334,7 +334,9 @@ export default function M3URefreshNotification() {
       icon:
         data.progress == 100 && !completedWithWarning ? <CircleCheck /> : null,
       withCloseButton: !inProgress,
-      ...(completedWithWarning ? { color: 'yellow' } : {}),
+      // Always set color: updates merge into the existing notification, so an
+      // omitted color would keep a previous warning's yellow.
+      color: completedWithWarning ? 'yellow' : undefined,
     };
 
     if (shouldUpdateExisting) {
