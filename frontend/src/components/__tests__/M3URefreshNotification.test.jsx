@@ -369,6 +369,34 @@ describe('M3URefreshNotification', () => {
       });
     });
 
+    it('should keep the warning message when VOD refresh completes with failed categories', async () => {
+      mockPlaylistsStore.refreshProgress = {
+        1: {
+          account: 1,
+          action: 'vod_refresh',
+          progress: 100,
+          status: 'warning',
+          message:
+            'Stalker VOD refresh completed; kept existing content for categories that failed to load: Kids',
+        },
+      };
+
+      renderWithProviders(<M3URefreshNotification />);
+
+      await waitFor(() => {
+        expect(showNotification).toHaveBeenCalledWith(
+          expect.objectContaining({
+            id: 'm3u-refresh-1-vod_refresh',
+            color: 'yellow',
+            autoClose: 10000,
+            icon: null,
+            message:
+              'Stalker VOD refresh completed; kept existing content for categories that failed to load: Kids',
+          })
+        );
+      });
+    });
+
     it('should show notification for in-progress VOD detail refresh updates', async () => {
       mockPlaylistsStore.refreshProgress = {
         1: {

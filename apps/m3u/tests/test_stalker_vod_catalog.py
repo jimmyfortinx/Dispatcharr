@@ -531,6 +531,8 @@ class StalkerPhase11CategoryDiscoveryTests(TestCase):
             {"20": object()},
         )
         mock_cleanup_orphaned_vod_content.return_value = "cleanup complete"
+        mock_refresh_movies.return_value = set()
+        mock_refresh_series.return_value = set()
 
         result = refresh_vod_content(self.account.id)
 
@@ -569,6 +571,8 @@ class StalkerPhase11CategoryDiscoveryTests(TestCase):
             {"20": object()},
         )
         mock_cleanup_orphaned_vod_content.return_value = "cleanup complete"
+        mock_refresh_movies.return_value = set()
+        mock_refresh_series.return_value = set()
 
         def series_side_effect(*args, **kwargs):
             progress_callback = kwargs.get("progress_callback")

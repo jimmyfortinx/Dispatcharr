@@ -131,9 +131,7 @@ export default function M3URefreshNotification() {
     const currentStatus = notificationStatusRef.current[data.account];
 
     // Skip if status hasn't changed
-    if (
-      JSON.stringify(currentStatus) == JSON.stringify(data)
-    ) {
+    if (JSON.stringify(currentStatus) == JSON.stringify(data)) {
       return;
     }
 
@@ -265,7 +263,8 @@ export default function M3URefreshNotification() {
       message = `${baseMessage} complete!`;
     } else {
       message =
-        data.message || `${baseMessage} ${Math.max(1, Math.floor(data.progress))}%`;
+        data.message ||
+        `${baseMessage} ${Math.max(1, Math.floor(data.progress))}%`;
     }
 
     if (data.progress == 100) {
@@ -273,8 +272,15 @@ export default function M3URefreshNotification() {
     }
 
     const inProgress = data.progress < 100;
+    // A warning completion (e.g. VOD categories that failed to load) carries
+    // its explanation in data.message, which must stay visible.
+    const completedWithWarning =
+      data.progress == 100 && data.status === 'warning' && data.message;
+    if (completedWithWarning) {
+      message = data.message;
+    }
     let body = inProgress ? buildProgressBody(data, message) : message;
-    let autoClose = inProgress ? false : 2000;
+    let autoClose = inProgress ? false : completedWithWarning ? 10000 : 2000;
     // Surface stream and auto-sync counts attached to the parsing-complete
     // event so the outcome appears in the notification body.
     if (data.progress == 100 && data.action === 'parsing') {
@@ -325,8 +331,10 @@ export default function M3URefreshNotification() {
       message: body,
       loading: inProgress,
       autoClose,
-      icon: data.progress == 100 ? <CircleCheck /> : null,
+      icon:
+        data.progress == 100 && !completedWithWarning ? <CircleCheck /> : null,
       withCloseButton: !inProgress,
+      ...(completedWithWarning ? { color: 'yellow' } : {}),
     };
 
     if (shouldUpdateExisting) {
