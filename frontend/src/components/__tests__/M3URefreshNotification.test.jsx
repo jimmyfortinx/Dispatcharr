@@ -369,6 +369,34 @@ describe('M3URefreshNotification', () => {
       });
     });
 
+    it('should keep the warning message when VOD refresh completes with failed categories', async () => {
+      mockPlaylistsStore.refreshProgress = {
+        1: {
+          account: 1,
+          action: 'vod_refresh',
+          progress: 100,
+          status: 'warning',
+          message:
+            'Stalker VOD refresh completed; kept existing content for categories that failed to load: Kids',
+        },
+      };
+
+      renderWithProviders(<M3URefreshNotification />);
+
+      await waitFor(() => {
+        expect(showNotification).toHaveBeenCalledWith(
+          expect.objectContaining({
+            id: 'm3u-refresh-1-vod_refresh',
+            color: 'yellow',
+            autoClose: 10000,
+            icon: null,
+            message:
+              'Stalker VOD refresh completed; kept existing content for categories that failed to load: Kids',
+          })
+        );
+      });
+    });
+
     it('should show notification for in-progress VOD detail refresh updates', async () => {
       mockPlaylistsStore.refreshProgress = {
         1: {
@@ -745,6 +773,51 @@ describe('M3URefreshNotification', () => {
           })
         );
       });
+    });
+    it('should clear the warning color when a later VOD refresh succeeds', async () => {
+      mockPlaylistsStore.refreshProgress = {
+        1: {
+          account: 1,
+          action: 'vod_refresh',
+          progress: 100,
+          status: 'warning',
+          message:
+            'kept existing content for categories that failed to load: Kids',
+        },
+      };
+
+      const { rerender } = renderWithProviders(<M3URefreshNotification />);
+
+      await waitFor(() => {
+        expect(showNotification).toHaveBeenCalledWith(
+          expect.objectContaining({ color: 'yellow' })
+        );
+      });
+
+      vi.clearAllMocks();
+
+      mockPlaylistsStore.refreshProgress = {
+        1: {
+          account: 1,
+          action: 'vod_refresh',
+          progress: 100,
+          status: 'success',
+          message: 'Stalker VOD refresh completed in 12.00 seconds',
+        },
+      };
+
+      rerender(
+        <BrowserRouter>
+          <M3URefreshNotification />
+        </BrowserRouter>
+      );
+
+      await waitFor(() => {
+        expect(updateNotification).toHaveBeenCalledTimes(1);
+      });
+      const [, payload] = updateNotification.mock.calls[0];
+      expect(payload).toHaveProperty('color', undefined);
+      expect(payload.message).toBe('VOD content refresh complete!');
     });
   });
 

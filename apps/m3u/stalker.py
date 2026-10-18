@@ -880,7 +880,9 @@ class StalkerClient:
         )
         return items
 
-    def prepare_authenticated_session(self, portal_url):
+    def prepare_authenticated_session(self, portal_url, force=False):
+        if force:
+            self._prepared_portal_url = None
         if (
             self._prepared_portal_url == portal_url
             and self.token
