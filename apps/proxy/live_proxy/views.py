@@ -104,8 +104,12 @@ def _obtain_stream_with_retries(
     user,
     allowed_m3u_profiles,
     override_stream_profile_id=None,
+    allow_stream_fallback=True,
 ):
     """Call generate_stream_url, retrying when the failure is connection limits.
+
+    allow_stream_fallback=False keeps generate_stream_url on the first stream it
+    picks (no move to the next stream when a URL cannot be resolved).
 
     Always tries at least once. stream_retry_timeout is the wall-clock budget for
     additional waits/retries after that first try (0 = try once, do not wait).
@@ -146,6 +150,7 @@ def _obtain_stream_with_retries(
             user,
             allowed_m3u_profiles,
             override_stream_profile_id=override_stream_profile_id,
+            **({} if allow_stream_fallback else {"allow_stream_fallback": False}),
         )
 
         if stream_url is not None:
@@ -204,6 +209,7 @@ def _obtain_stream_with_retries(
             user,
             allowed_m3u_profiles,
             override_stream_profile_id=override_stream_profile_id,
+            **({} if allow_stream_fallback else {"allow_stream_fallback": False}),
         )
         if stream_url is not None:
             logger.info(
@@ -388,7 +394,10 @@ def _handle_redirect_stream(channel, channel_id, client_id, user, allowed_m3u_pr
         attempt,
         wait_start_time,
     ) = _obtain_stream_with_retries(
-        channel_id, client_id, user, allowed_m3u_profiles
+        channel_id, client_id, user, allowed_m3u_profiles,
+        # The client follows the URL itself: never hand it another stream
+        # than the one this route would have picked before.
+        allow_stream_fallback=False,
     )
 
     if stream_url is None:

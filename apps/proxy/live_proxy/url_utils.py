@@ -2,6 +2,8 @@
 Utilities for handling stream URLs and transformations.
 """
 
+import time
+
 import regex
 from typing import Optional, Tuple, List
 from uuid import UUID
@@ -309,6 +311,11 @@ def pick_channel_preview_target(channel, allowed_m3u_profiles=None):
     return None, None
 
 
+# How long a channel start may keep trying further streams after a URL
+# resolution failure. The startup ownership lease is 30 s.
+STREAM_FALLBACK_BUDGET_SECONDS = 15.0
+
+
 def _resolve_channel_assignment(
     channel,
     channel_id,
@@ -406,6 +413,7 @@ def generate_stream_url(
     user=None,
     allowed_m3u_profiles=None,
     override_stream_profile_id=None,
+    allow_stream_fallback=True,
 ) -> Tuple[
     Optional[str], Optional[str], Optional[dict], bool, Optional[int], bool,
     Optional[str], Optional[int]
@@ -419,6 +427,9 @@ def generate_stream_url(
     override_stream_profile_id: resolve Dispatcharr stream profile as Proxy
     (transcode=False) instead of a saved Redirect profile. Used by skip_redirect
     previews so StreamManager can promote HLS/RTSP/UDP to ffmpeg normally.
+
+    allow_stream_fallback: when a channel stream's URL cannot be resolved, try
+    the channel's next stream (proxied starts only, within a time budget).
 
     Returns:
         Tuple: (stream_url, user_agent, input_headers, transcode_flag, profile_id,
@@ -518,10 +529,11 @@ def generate_stream_url(
         # refuses the login) must not fail the whole channel: try the next one.
         # Redirect profiles hand the URL to the client, so they keep the
         # previous single-stream behavior.
-        try_next_stream = (
+        try_next_stream = allow_stream_fallback and (
             override_stream_profile_id is not None
             or not channel.get_stream_profile().is_redirect()
         )
+        fallback_started = time.monotonic()
         failed_stream_ids = []
         last_error = None
         while True:
@@ -565,6 +577,13 @@ def generate_stream_url(
             if not (try_next_stream and slot_reserved and released):
                 # A reused assignment belongs to a running channel, and a slot
                 # that could not be released must not be left behind.
+                return result
+            if time.monotonic() - fallback_started >= STREAM_FALLBACK_BUDGET_SECONDS:
+                # Stay well inside the startup ownership lease.
+                logger.warning(
+                    f"Stream fallback budget spent for channel {channel_id}; "
+                    f"not trying another stream"
+                )
                 return result
 
             last_error = result[6]

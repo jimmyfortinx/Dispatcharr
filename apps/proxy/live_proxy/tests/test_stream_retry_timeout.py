@@ -46,3 +46,34 @@ class ObtainStreamWithRetriesTimeoutTests(SimpleTestCase):
         mock_generate.assert_called_once()
         self.assertIsNone(stream_url)
         self.assertEqual(attempts, 1)
+
+
+class RedirectRouteKeepsOneStreamTests(SimpleTestCase):
+    @patch("apps.proxy.live_proxy.views.ConfigHelper.stream_retry_timeout", return_value=0)
+    @patch("apps.proxy.live_proxy.views.generate_stream_url")
+    def test_fallback_flag_is_passed_only_when_turned_off(self, mock_generate, _mock_timeout):
+        from apps.proxy.live_proxy.views import _obtain_stream_with_retries
+
+        mock_generate.return_value = (None, None, {}, False, None, False, "403", None)
+
+        _obtain_stream_with_retries("ch", "client", None, None)
+        self.assertNotIn("allow_stream_fallback", mock_generate.call_args.kwargs)
+
+        _obtain_stream_with_retries("ch", "client", None, None, allow_stream_fallback=False)
+        self.assertFalse(mock_generate.call_args.kwargs["allow_stream_fallback"])
+
+    @patch("apps.proxy.live_proxy.views._obtain_stream_with_retries")
+    def test_redirect_handler_turns_the_fallback_off(self, mock_obtain):
+        from types import SimpleNamespace
+        import time
+
+        from apps.proxy.live_proxy.views import _handle_redirect_stream
+
+        mock_obtain.return_value = (
+            None, None, {}, False, None, False, "403", None, 1, time.time(),
+        )
+        channel = SimpleNamespace(release_stream=lambda: True)
+
+        _handle_redirect_stream(channel, "ch", "client", None, None)
+
+        self.assertFalse(mock_obtain.call_args.kwargs["allow_stream_fallback"])

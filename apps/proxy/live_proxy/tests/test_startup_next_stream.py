@@ -181,3 +181,40 @@ class StartupTriesNextStreamTests(TestCase):
         self.assertIsNone(url)
         self.assertIn("403", error)
         get_stream.assert_called_once()
+
+    def test_fallback_can_be_turned_off(self):
+        # The explicit redirect route hands the URL to the client: keep one stream.
+        self._resolve({"HGTV tiger"})
+        get_stream = self.enterContext(patch.object(
+            Channel, "get_stream",
+            side_effect=lambda user, profiles, exclude_stream_ids=None: self._assign_in_order(
+                exclude_stream_ids
+            ),
+        ))
+
+        url, *_middle, error, _stream_id = generate_stream_url(
+            str(self.channel.uuid), allow_stream_fallback=False
+        )
+
+        self.assertIsNone(url)
+        self.assertIn("403", error)
+        get_stream.assert_called_once()
+
+    def test_no_further_stream_once_the_time_budget_is_spent(self):
+        self._resolve({"HGTV tiger"})
+        get_stream = self.enterContext(patch.object(
+            Channel, "get_stream",
+            side_effect=lambda user, profiles, exclude_stream_ids=None: self._assign_in_order(
+                exclude_stream_ids
+            ),
+        ))
+        # Start, then the first resolution ends after the 15 s budget.
+        self.enterContext(patch(
+            "apps.proxy.live_proxy.url_utils.time.monotonic", side_effect=[0.0, 20.0]
+        ))
+
+        url, *_middle, error, _stream_id = generate_stream_url(str(self.channel.uuid))
+
+        self.assertIsNone(url)
+        self.assertIn("403", error)
+        get_stream.assert_called_once()

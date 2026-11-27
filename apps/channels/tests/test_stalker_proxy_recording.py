@@ -776,6 +776,8 @@ class StalkerPhase9DvrTests(TestCase):
         self.assertEqual(response["Location"], "http://resolved.example.com/live/world-news")
         mock_generate_stream_url.assert_called_once_with(
             channel_id, None, None, override_stream_profile_id=None,
+            # The client follows the URL: no move to another stream.
+            allow_stream_fallback=False,
         )
         mock_validate_stream_url.assert_called_once_with(
             "http://resolved.example.com/live/world-news",
