@@ -50,7 +50,8 @@ class StartupTriesNextStreamTests(TestCase):
         for stream, profile in zip(self.streams, self.profiles):
             if stream.id not in (exclude_stream_ids or []):
                 return stream.id, profile.id, None, slot_reserved
-        return None, None, "All active M3U profiles have reached maximum connection limits", False
+        # What the real get_stream() answers when every stream is excluded.
+        return None, None, "No active profiles found for any assigned stream", False
 
     def _resolve(self, broken_stream_names):
         def resolve(stream, **_kwargs):
@@ -131,3 +132,52 @@ class StartupTriesNextStreamTests(TestCase):
         self.assertIn("403", error)
         get_stream.assert_called_once_with(None, None)
         self.release.assert_not_called()
+
+    def test_a_slot_that_could_not_be_released_stops_the_fallback(self):
+        self._resolve({"HGTV tiger"})
+        self.release.return_value = False
+        get_stream = self.enterContext(patch.object(
+            Channel, "get_stream",
+            side_effect=lambda user, profiles, exclude_stream_ids=None: self._assign_in_order(
+                exclude_stream_ids
+            ),
+        ))
+
+        url, *_middle, error, _stream_id = generate_stream_url(str(self.channel.uuid))
+
+        self.assertIsNone(url)
+        self.assertIn("403", error)
+        get_stream.assert_called_once()
+
+    def test_full_backup_keeps_the_capacity_error_so_the_view_retries(self):
+        self._resolve({"HGTV tiger"})
+
+        def assign(user, profiles, exclude_stream_ids=None):
+            if exclude_stream_ids:
+                return None, None, "All active M3U profiles have reached maximum connection limits", False
+            return self._assign_in_order()
+
+        self.enterContext(patch.object(Channel, "get_stream", side_effect=assign))
+
+        url, *_middle, error, _stream_id = generate_stream_url(str(self.channel.uuid))
+
+        self.assertIsNone(url)
+        self.assertIn("maximum connection limits", error)
+
+    def test_redirect_profile_keeps_the_single_stream_behavior(self):
+        redirect_profile = StreamProfile.objects.create(name="Redirect", command="redirect")
+        self.enterContext(patch.object(Channel, "get_stream_profile", return_value=redirect_profile))
+        self.enterContext(patch.object(StreamProfile, "is_redirect", return_value=True))
+        self._resolve({"HGTV tiger"})
+        get_stream = self.enterContext(patch.object(
+            Channel, "get_stream",
+            side_effect=lambda user, profiles, exclude_stream_ids=None: self._assign_in_order(
+                exclude_stream_ids
+            ),
+        ))
+
+        url, *_middle, error, _stream_id = generate_stream_url(str(self.channel.uuid))
+
+        self.assertIsNone(url)
+        self.assertIn("403", error)
+        get_stream.assert_called_once()

@@ -968,8 +968,9 @@ class Channel(models.Model):
         """
         Finds an available stream for the requested channel and returns the selected stream and profile.
 
-        exclude_stream_ids: streams to skip, for example ones whose playback URL
-        could not be resolved during this start attempt.
+        exclude_stream_ids: streams to skip when assigning a new stream, for
+        example ones whose playback URL could not be resolved during this start
+        attempt. A live assignment of a running channel is still reused.
 
         Returns:
             Tuple[Optional[int], Optional[int], Optional[str], bool]:
@@ -1015,12 +1016,7 @@ class Channel(models.Model):
                 )
                 stream_id = None
 
-            if stream_id is not None and stream_id in excluded:
-                logger.debug(
-                    f"Channel {self.uuid}: not reusing excluded stream assignment "
-                    f"stream={stream_id}"
-                )
-            elif stream_id is not None:
+            if stream_id is not None:
                 if self._stream_assignment_is_reusable(redis_client, stream_id):
                     profile_id_bytes = redis_client.get(f"stream_profile:{stream_id}")
                     if profile_id_bytes:

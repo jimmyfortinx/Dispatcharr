@@ -320,8 +320,9 @@ def _resolve_channel_assignment(
 ):
     """Resolve the playback URL of the stream that get_stream() assigned.
 
-    Returns the generate_stream_url tuple. On failure the URL is None, the
-    error is set, and a slot reserved for this assignment is released.
+    Returns (generate_stream_url tuple, released). On failure the URL is None,
+    the error is set, and a slot reserved for this assignment is released;
+    ``released`` is False when that release did not succeed.
     """
     # get_stream() allocated a connection slot - ensure it's released on any error
     try:
@@ -363,14 +364,16 @@ def _resolve_channel_assignment(
                 "Failed to resolve stream URL for selected M3U profile "
                 "(credential transform did not match)"
             )
+            released = True
             if slot_reserved:
-                if not channel.release_stream():
+                released = bool(channel.release_stream())
+                if not released:
                     logger.warning(
                         "Failed to release stream for channel %s after "
                         "URL resolution failure",
                         channel_id,
                     )
-            return None, None, None, False, None, False, error_reason, None
+            return (None, None, None, False, None, False, error_reason, None), released
 
         # Check if transcoding is needed. An override resolves the profile as
         # Proxy (transcode=False), regardless of the channel's saved profile --
@@ -387,12 +390,15 @@ def _resolve_channel_assignment(
 
             stream_profile_id = stream_profile.id
 
-        return stream_url, stream_user_agent, stream_context.get('input_headers'), transcode, stream_profile_id, slot_reserved, None, stream.id
+        return (stream_url, stream_user_agent, stream_context.get('input_headers'), transcode, stream_profile_id, slot_reserved, None, stream.id), True
     except Exception as e:
         logger.error(f"Error generating stream URL for channel {channel_id}: {e}")
-        if slot_reserved and not channel.release_stream():
-            logger.warning(f"Failed to release stream for channel {channel_id} after URL generation error")
-        return None, None, None, False, None, False, str(e), None
+        released = True
+        if slot_reserved:
+            released = bool(channel.release_stream())
+            if not released:
+                logger.warning(f"Failed to release stream for channel {channel_id} after URL generation error")
+        return (None, None, None, False, None, False, str(e), None), released
 
 
 def generate_stream_url(
@@ -510,6 +516,12 @@ def generate_stream_url(
 
         # A stream whose URL cannot be resolved (for example a portal that
         # refuses the login) must not fail the whole channel: try the next one.
+        # Redirect profiles hand the URL to the client, so they keep the
+        # previous single-stream behavior.
+        try_next_stream = (
+            override_stream_profile_id is not None
+            or not channel.get_stream_profile().is_redirect()
+        )
         failed_stream_ids = []
         last_error = None
         while True:
@@ -526,16 +538,20 @@ def generate_stream_url(
                 )
 
             if not stream_id or not profile_id:
-                if last_error:
+                if last_error and not (
+                    error_reason and "maximum connection limits" in error_reason
+                ):
                     logger.error(
                         f"No working stream for channel {channel_id}: every stream tried "
                         f"failed ({failed_stream_ids}); last error: {last_error}"
                     )
                     return None, None, None, False, None, False, last_error, None
+                # Also when the remaining streams are only full: the view keeps
+                # retrying capacity errors until a slot frees up.
                 logger.error(f"No stream available for channel {channel_id}: {error_reason}")
                 return None, None, None, False, None, False, error_reason, None
 
-            result = _resolve_channel_assignment(
+            result, released = _resolve_channel_assignment(
                 channel,
                 channel_id,
                 stream_id,
@@ -544,9 +560,11 @@ def generate_stream_url(
                 allowed_m3u_profiles,
                 override_stream_profile_id,
             )
-            if result[0] is not None or not slot_reserved:
-                # Success, or a reused assignment that belongs to a running
-                # channel: keep the previous behavior.
+            if result[0] is not None:
+                return result
+            if not (try_next_stream and slot_reserved and released):
+                # A reused assignment belongs to a running channel, and a slot
+                # that could not be released must not be left behind.
                 return result
 
             last_error = result[6]

@@ -556,7 +556,10 @@ class ChannelGetStreamExcludeTests(ChannelGetStreamAssignmentTests):
 
     @patch("apps.channels.models.RedisClient.get_client")
     @patch("apps.channels.models.reserve_profile_slot", return_value=(True, 1, None))
-    def test_excluded_stream_assignment_is_not_reused(self, _mock_reserve, mock_get_client):
+    def test_live_assignment_of_a_running_channel_is_still_reused(
+        self, mock_reserve, mock_get_client
+    ):
+        # Another worker may have started the channel on that stream meanwhile.
         mock_get_client.return_value = self.redis
         self._seed_assignment()
         self.redis.hset(
@@ -564,12 +567,14 @@ class ChannelGetStreamExcludeTests(ChannelGetStreamAssignmentTests):
             {ChannelMetadataField.STATE: ChannelState.ACTIVE},
         )
 
-        stream_id, _profile_id, _error, slot_reserved = self.channel.get_stream(
+        stream_id, profile_id, _error, slot_reserved = self.channel.get_stream(
             exclude_stream_ids=[self.stream.id]
         )
 
-        self.assertEqual(stream_id, self.second_stream.id)
-        self.assertTrue(slot_reserved)
+        self.assertEqual(stream_id, self.stream.id)
+        self.assertEqual(profile_id, self.profile.id)
+        self.assertFalse(slot_reserved)
+        mock_reserve.assert_not_called()
 
     @patch("apps.channels.models.RedisClient.get_client")
     @patch("apps.channels.models.reserve_profile_slot", return_value=(True, 1, None))
