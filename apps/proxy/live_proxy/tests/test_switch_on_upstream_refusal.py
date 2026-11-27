@@ -21,8 +21,9 @@ CHANNEL_ID = 'refusal-channel'
 
 
 class _FakeReader:
-    def __init__(self, status_code):
+    def __init__(self, status_code, url=None):
         self.last_status_code = status_code
+        self.url = url
 
     def stop(self):
         pass
@@ -57,7 +58,7 @@ class SwitchOnUpstreamRefusalTests(TestCase):
 
         def establish():
             self.manager.http_reader = _FakeReader(
-                self.status_by_stream.get(self.manager.current_stream_id)
+                self.status_by_stream.get(self.manager.current_stream_id), self.manager.url
             )
             self.manager.connected = True
             return True
@@ -88,6 +89,12 @@ class SwitchOnUpstreamRefusalTests(TestCase):
         self.switch = self.enterContext(
             patch.object(self.manager, '_try_next_stream_with_cooldown', side_effect=switch)
         )
+        # The early switch calls _try_next_stream directly (no cooldown wait);
+        # route it to the same mock so both paths are recorded in one list.
+        self.direct_switch = self.enterContext(patch.object(
+            self.manager, '_try_next_stream',
+            side_effect=lambda reason=None, previous_stream_info=None: self.switch(reason=reason),
+        ))
 
     def _alternates(self, streams):
         return self.enterContext(patch(
@@ -135,7 +142,8 @@ class SwitchOnUpstreamRefusalTests(TestCase):
         self.assertEqual(self.establish.call_count, 5)
         self.switch.assert_called_once_with(reason='max_retries_exceeded')
 
-    def test_refusal_on_the_last_attempt_with_a_failed_switch_ends_normally(self):
+    def test_refusal_on_the_last_attempt_takes_the_normal_path(self):
+        # No retries left: the usual failover (and its connection_failed event).
         self.manager.max_retries = 1
         self._alternates([{'stream_id': 2}])
         self.switch.side_effect = lambda reason=None: False
@@ -143,7 +151,43 @@ class SwitchOnUpstreamRefusalTests(TestCase):
         self.manager.run()  # must return, not spin
 
         self.establish.assert_called_once_with()
-        self.switch.assert_called_once_with(reason='upstream_refused')
+        self.switch.assert_called_once_with(reason='max_retries_exceeded')
+        self.direct_switch.assert_not_called()
+
+    def test_early_switch_only_goes_to_an_untried_stream(self):
+        # Every alternative was tried: wrapping has its own cooldown and limit.
+        self._alternates([{'stream_id': 2}])
+        self.manager.tried_stream_ids = {1, 2}
+        self.manager.http_reader = _FakeReader(405, self.manager.url)
+
+        self.assertFalse(self.manager._switch_now_after_refusal())
+
+    def test_kept_status_of_another_url_is_ignored(self):
+        # A 405 kept for stream A must not apply after a switch to stream B.
+        self._alternates([{'stream_id': 2}])
+        self.manager.http_reader = _FakeReader(405, 'http://old.example.com/a.ts')
+        self.manager._close_socket()
+
+        self.assertFalse(self.manager._switch_now_after_refusal())
+
+    def test_rollback_skipped_when_a_manual_switch_landed_meanwhile(self):
+        self._alternates([{'stream_id': 2}])
+        tried_at_switch = []
+
+        def switch(reason=None):
+            tried_at_switch.append(set(self.manager.tried_stream_ids))
+            if reason == 'upstream_refused':
+                # A manual switch to stream 3 lands during the early attempt.
+                self.manager.current_stream_id = 3
+                self.manager.tried_stream_ids = {3, 2}
+            return False
+
+        self.switch.side_effect = switch
+
+        self.manager.run()
+
+        # The manual switch's tried set was kept, not rolled back.
+        self.assertIn(3, tried_at_switch[1])
 
     def test_status_from_an_earlier_connection_is_not_reused(self):
         # e.g. an HTTP 405 kept before a switch to an ffmpeg stream

@@ -204,6 +204,7 @@ class StreamManager:
         # HTTP status the upstream gave on the last connection. Kept here
         # because the reader is cleared when the connection is closed.
         self._last_upstream_status = None
+        self._last_upstream_status_url = None
         # Stream for which a refusal-triggered switch already failed: retry it
         # normally instead of trying the early switch again.
         self._refusal_switch_failed_stream_id = None
@@ -245,7 +246,9 @@ class StreamManager:
         or, once the connection was closed, from the copy kept at close."""
         http_reader = getattr(self, "http_reader", None)
         status_code = getattr(http_reader, "last_status_code", None) if http_reader else None
-        if status_code is None:
+        if status_code is None and getattr(self, "_last_upstream_status_url", None) == self.url:
+            # Only the answer for the current URL: a switch since then
+            # (manual or automatic) makes the kept status outdated.
             status_code = getattr(self, "_last_upstream_status", None)
         if consume:
             self._last_upstream_status = None
@@ -294,7 +297,12 @@ class StreamManager:
         if self.current_stream_id != stream_id or self.url_switching:
             # The stream changed during the lookup: this refusal is outdated.
             return False
-        if not alternates:
+        untried = [
+            s for s in alternates if s.get('stream_id') not in self.tried_stream_ids
+        ]
+        if not untried:
+            # Wrapping around the streams has its own cooldown and rotation
+            # limit: leave that to the normal failover after the retries.
             return False
         logger.warning(
             f"Upstream answered HTTP {status_code} for channel {self.channel_id}; "
@@ -1003,7 +1011,7 @@ class StreamManager:
 
                         self.connected = False
                         failures = self._record_connection_failure()
-                        if self._switch_now_after_refusal():
+                        if failures < self.max_retries and self._switch_now_after_refusal():
                             url_failed = True
                             refusal_switch = True
                             continue
@@ -1089,9 +1097,13 @@ class StreamManager:
                     self._switch_skipped_idle = False
                     failed_stream_id = self.current_stream_id
                     tried_before_switch = set(self.tried_stream_ids)
-                    switch_result = self._try_next_stream_with_cooldown(
-                        reason='upstream_refused' if refusal_switch else 'max_retries_exceeded'
-                    )
+                    if refusal_switch:
+                        # An untried stream exists: no wrap, so no cooldown wait.
+                        switch_result = self._try_next_stream(reason='upstream_refused')
+                    else:
+                        switch_result = self._try_next_stream_with_cooldown(
+                            reason='max_retries_exceeded'
+                        )
                     if switch_result:
                         # Successfully switched to a new stream, continue with the new URL
                         stream_switch_attempts += 1
@@ -1118,8 +1130,10 @@ class StreamManager:
                         )
                         self._refusal_switch_failed_stream_id = failed_stream_id
                         # Streams that failed only during this early attempt
-                        # stay eligible for the normal failover later.
-                        self.tried_stream_ids = tried_before_switch
+                        # stay eligible for the normal failover later (unless
+                        # a manual switch changed the stream meanwhile).
+                        if self.current_stream_id == failed_stream_id:
+                            self.tried_stream_ids = tried_before_switch
                         gevent.sleep(self._reconnect_backoff_seconds(self.retry_count))
                     else:
                         # No more streams to try
@@ -2816,6 +2830,7 @@ class StreamManager:
                 status_code = getattr(self.http_reader, "last_status_code", None)
                 if status_code is not None:
                     self._last_upstream_status = status_code
+                    self._last_upstream_status_url = getattr(self.http_reader, "url", None) or self.url
                 self.http_reader.stop()
                 self.http_reader = None
             except Exception as e:
