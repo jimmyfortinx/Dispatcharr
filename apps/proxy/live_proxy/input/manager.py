@@ -30,6 +30,9 @@ logger = get_logger()
 # rejection (e.g. concurrent-connection limit already reached for the MAC),
 # as opposed to a transient network failure. Extend as more codes are seen.
 PORTAL_REJECTION_STATUS_CODES = {456}
+# Upstream answers that refuse this stream URL itself (not a transient network
+# or server error). Retrying the same stream rarely helps; another one may.
+UPSTREAM_REFUSAL_STATUS_CODES = {401, 403, 404, 405, 410}
 
 
 def _present(**fields):
@@ -243,6 +246,35 @@ class StreamManager:
                 status_code=status_code,
                 url=(self.url or "")[:200],
             )
+
+    def _switch_now_after_refusal(self):
+        """
+        True when the upstream refused the stream URL and another stream exists.
+
+        Retrying a refused URL re-creates it and waits each time (~3 s per try
+        with Stalker), which delays failover by ~15 s while the player gives up.
+        Without another stream, keep the usual retries: a fresh URL may work.
+        """
+        http_reader = getattr(self, "http_reader", None)
+        status_code = getattr(http_reader, "last_status_code", None) if http_reader else None
+        if http_reader is not None and status_code is not None:
+            # Read once: a later attempt that fails before a new reader exists
+            # must not act on this answer again.
+            http_reader.last_status_code = None
+        if status_code not in UPSTREAM_REFUSAL_STATUS_CODES:
+            return False
+        try:
+            alternates = get_alternate_streams(self.channel_id, self.current_stream_id)
+        except Exception as e:
+            logger.debug(f"Could not list alternate streams for channel {self.channel_id}: {e}")
+            return False
+        if not alternates:
+            return False
+        logger.warning(
+            f"Upstream answered HTTP {status_code} for channel {self.channel_id}; "
+            f"switching to the next stream without retrying this one"
+        )
+        return True
 
     def _reconnect_backoff_seconds(self, failures):
         """Compute the delay before the next connection retry.
@@ -937,6 +969,9 @@ class StreamManager:
                             self._close_socket()
 
                         self.connected = False
+                        if self._switch_now_after_refusal():
+                            url_failed = True
+                            continue
                         failures = self._record_connection_failure()
 
                         if failures >= self.max_retries:
