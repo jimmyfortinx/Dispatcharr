@@ -481,6 +481,8 @@ class StreamManager:
             self.tried_stream_ids.clear()
         self._failover_rotation_passes = 0
         self._rotation_cooldown_until = None
+        # A new failure episode may try the early refusal switch again.
+        self._refusal_switch_failed_stream_id = None
 
     def _note_stable_before_buffering(self):
         """Reset failover rotation if this connection was stable before buffering.
@@ -919,6 +921,10 @@ class StreamManager:
                         f"for URL: {self.url} for channel {self.channel_id}"
                     )
 
+                    # A status kept from an earlier connection must not be
+                    # read as this attempt's answer (e.g. by an ffmpeg attempt).
+                    self._last_upstream_status = None
+
                     # Handle connection based on whether we transcode or not
                     connection_result = False
                     try:
@@ -996,11 +1002,11 @@ class StreamManager:
                             self._close_socket()
 
                         self.connected = False
+                        failures = self._record_connection_failure()
                         if self._switch_now_after_refusal():
                             url_failed = True
                             refusal_switch = True
                             continue
-                        failures = self._record_connection_failure()
 
                         if failures >= self.max_retries:
                             url_failed = True
@@ -1082,6 +1088,7 @@ class StreamManager:
                     # Try to switch to next stream (wait out wrap cooldown in this thread)
                     self._switch_skipped_idle = False
                     failed_stream_id = self.current_stream_id
+                    tried_before_switch = set(self.tried_stream_ids)
                     switch_result = self._try_next_stream_with_cooldown(
                         reason='upstream_refused' if refusal_switch else 'max_retries_exceeded'
                     )
@@ -1102,15 +1109,18 @@ class StreamManager:
                         # next pass of the loop.
                         self._clear_connection_failure_history()
                         self.needs_stream_switch = True
-                    elif refusal_switch:
+                    elif refusal_switch and self.retry_count < self.max_retries:
                         # The early switch found no usable stream: retry the
-                        # refused URL with the usual budget instead of failing.
+                        # refused URL with the usual budget and backoff.
                         logger.warning(
                             f"No usable stream to switch to after the upstream refusal; "
                             f"retrying the current stream for channel: {self.channel_id}"
                         )
                         self._refusal_switch_failed_stream_id = failed_stream_id
-                        self._record_connection_failure()
+                        # Streams that failed only during this early attempt
+                        # stay eligible for the normal failover later.
+                        self.tried_stream_ids = tried_before_switch
+                        gevent.sleep(self._reconnect_backoff_seconds(self.retry_count))
                     else:
                         # No more streams to try
                         logger.error(f"Failed to find alternative streams after {stream_switch_attempts} attempts for channel: {self.channel_id}")

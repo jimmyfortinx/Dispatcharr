@@ -133,6 +133,48 @@ class SwitchOnUpstreamRefusalTests(TestCase):
         self.manager.run()
 
         self.assertEqual(self.establish.call_count, 5)
+        self.switch.assert_called_once_with(reason='max_retries_exceeded')
+
+    def test_refusal_on_the_last_attempt_with_a_failed_switch_ends_normally(self):
+        self.manager.max_retries = 1
+        self._alternates([{'stream_id': 2}])
+        self.switch.side_effect = lambda reason=None: False
+
+        self.manager.run()  # must return, not spin
+
+        self.establish.assert_called_once_with()
+        self.switch.assert_called_once_with(reason='upstream_refused')
+
+    def test_status_from_an_earlier_connection_is_not_reused(self):
+        # e.g. an HTTP 405 kept before a switch to an ffmpeg stream
+        self._alternates([{'stream_id': 2}])
+        self.status_by_stream[1] = None  # EOF without any HTTP status
+        self.manager._last_upstream_status = 405
+        self.switch.side_effect = lambda reason=None: False
+
+        self.manager.run()
+
+        self.switch.assert_called_once_with(reason='max_retries_exceeded')
+
+    def test_backup_tried_during_a_failed_early_switch_stays_eligible(self):
+        self._alternates([{'stream_id': 2}])
+        tried_at_switch = []
+
+        def switch(reason=None):
+            tried_at_switch.append(set(self.manager.tried_stream_ids))
+            self.manager.tried_stream_ids.add(2)  # the backup failed to resolve
+            return False
+
+        self.switch.side_effect = switch
+
+        self.manager.run()
+
+        self.assertNotIn(2, tried_at_switch[1])
+
+    def test_stable_playback_ends_the_failure_episode(self):
+        self.manager._refusal_switch_failed_stream_id = 1
+        self.manager._note_stable_connection()
+        self.assertIsNone(self.manager._refusal_switch_failed_stream_id)
 
     def test_portal_busy_status_keeps_its_longer_backoff(self):
         # 456: the portal still sees an older session; waiting is the fix.
