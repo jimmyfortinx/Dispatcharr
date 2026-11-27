@@ -76,6 +76,18 @@ class StalkerRecoverableError(StalkerError):
     pass
 
 
+class StalkerHandshakeError(StalkerError):
+    """The portal refused the handshake, the first request of every session.
+
+    ``status_code`` holds the HTTP status when the portal answered with one.
+    Portals behind a firewall often refuse the client IP at this step.
+    """
+
+    def __init__(self, message, status_code=None):
+        super().__init__(message)
+        self.status_code = status_code
+
+
 @dataclass
 class StalkerConnectionResult:
     normalized_portal_url: str
@@ -538,7 +550,8 @@ class StalkerClient:
             )
             response.raise_for_status()
         except requests.RequestException as exc:
-            raise StalkerError(f"Request failed: {exc}") from exc
+            status_code = getattr(getattr(exc, "response", None), "status_code", None)
+            raise StalkerHandshakeError(f"Request failed: {exc}", status_code=status_code) from exc
 
         try:
             payload = response.json()

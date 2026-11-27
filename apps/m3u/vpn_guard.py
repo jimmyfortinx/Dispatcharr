@@ -4,7 +4,9 @@ Dispatcharr can share a gluetun VPN with its sidecars, so every provider sees
 the same exit IP. VPN exit IPs get blocked by providers because of other VPN
 users. This guard probes each active provider through the VPN. When one of
 them rejects the exit IP and nothing is playing, it asks gluetun for a new
-server and probes again. It runs as ``python manage.py vpn_guard``.
+server and probes again. A provider rejects the IP with a block status (HTTP
+456 by default), or with a refused Stalker portal handshake (HTTP 403 by
+default). It runs as ``python manage.py vpn_guard``.
 """
 
 import json
@@ -47,6 +49,10 @@ class GuardConfig:
     rotation_timeout_seconds: int = 90
     bad_ip_ttl_seconds: int = 24 * 3600
     block_statuses: frozenset = field(default_factory=lambda: frozenset({456}))
+    # Only for the Stalker handshake, the first portal request of a session:
+    # there a 403 means the portal refuses the client IP. A 403 on a stream or
+    # a later portal request can mean an expired token, so it is not a block.
+    handshake_block_statuses: frozenset = field(default_factory=lambda: frozenset({403}))
 
     @classmethod
     def from_env(cls, env=None):
@@ -57,12 +63,10 @@ class GuardConfig:
             raw = (env.get(name) or "").strip()
             return int(raw) if raw else default
 
-        statuses_raw = (env.get("VPN_GUARD_BLOCK_STATUSES") or "").strip()
-        block_statuses = (
-            frozenset(int(s) for s in statuses_raw.split(",") if s.strip())
-            if statuses_raw
-            else defaults.block_statuses
-        )
+        def as_statuses(name, default):
+            raw = (env.get(name) or "").strip()
+            return frozenset(int(s) for s in raw.split(",") if s.strip()) if raw else default
+
         return cls(
             gluetun_url=(env.get("VPN_GUARD_GLUETUN_URL") or defaults.gluetun_url).rstrip("/"),
             gluetun_api_key=_api_key_from_env(env),
@@ -76,7 +80,10 @@ class GuardConfig:
                 "VPN_GUARD_ROTATION_TIMEOUT_SECONDS", defaults.rotation_timeout_seconds
             ),
             bad_ip_ttl_seconds=as_int("VPN_GUARD_BAD_IP_TTL_SECONDS", defaults.bad_ip_ttl_seconds),
-            block_statuses=block_statuses,
+            block_statuses=as_statuses("VPN_GUARD_BLOCK_STATUSES", defaults.block_statuses),
+            handshake_block_statuses=as_statuses(
+                "VPN_GUARD_HANDSHAKE_BLOCK_STATUSES", defaults.handshake_block_statuses
+            ),
         )
 
 
@@ -184,16 +191,34 @@ class ProbeResult:
     detail: str = ""
 
 
-def _blocked_status_in_chain(exc, block_statuses):
-    """Return a block status carried by an exception or the errors it wraps."""
+def _exception_chain(exc):
+    """An exception, then the errors it wraps."""
     seen = set()
     while exc is not None and id(exc) not in seen:
         seen.add(id(exc))
-        response = getattr(exc, "response", None)
-        status = getattr(response, "status_code", None)
+        yield exc
+        exc = exc.__cause__ or exc.__context__
+
+
+def _blocked_status_in_chain(exc, block_statuses):
+    """Return a block status carried by an exception or the errors it wraps."""
+    for error in _exception_chain(exc):
+        status = getattr(getattr(error, "response", None), "status_code", None)
         if status in block_statuses:
             return status
-        exc = exc.__cause__ or exc.__context__
+    return None
+
+
+def _refused_handshake_status_in_chain(exc, handshake_block_statuses):
+    """Return the status of a Stalker handshake the portal refused, if any."""
+    from apps.m3u.stalker import StalkerHandshakeError
+
+    for error in _exception_chain(exc):
+        if (
+            isinstance(error, StalkerHandshakeError)
+            and error.status_code in handshake_block_statuses
+        ):
+            return error.status_code
     return None
 
 
@@ -314,7 +339,7 @@ def _probe_streams(account):
     return [by_id[i] for i in picked if i in by_id]
 
 
-def probe_account(account, block_statuses):
+def probe_account(account, block_statuses, handshake_block_statuses=frozenset()):
     """Probe a few streams of one account. One readable stream is enough."""
     profile = _playback_profile(account)
     if profile is None:
@@ -330,8 +355,12 @@ def probe_account(account, block_statuses):
             url, headers = _resolve_probe_request(stream, profile)
         except Exception as exc:  # provider-specific resolution errors
             status = _blocked_status_in_chain(exc, block_statuses)
+            handshake_status = _refused_handshake_status_in_chain(exc, handshake_block_statuses)
             if status is not None:
                 details.append(f"stream {stream.id}: portal HTTP {status}")
+                blocked = True
+            elif handshake_status is not None:
+                details.append(f"stream {stream.id}: portal handshake HTTP {handshake_status}")
                 blocked = True
             else:
                 details.append(f"stream {stream.id}: resolve failed: {exc}")
@@ -382,7 +411,10 @@ class VpnGuard:
         self.redis = None
 
     def _probe_all(self):
-        return [probe_account(a, self.config.block_statuses) for a in active_accounts()]
+        return [
+            probe_account(a, self.config.block_statuses, self.config.handshake_block_statuses)
+            for a in active_accounts()
+        ]
 
     def _busy(self):
         return self._connection_count(self.redis)

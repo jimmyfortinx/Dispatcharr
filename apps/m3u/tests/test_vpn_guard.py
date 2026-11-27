@@ -9,7 +9,7 @@ from django.test import SimpleTestCase, TestCase
 
 from apps.channels.models import Channel, ChannelStream, Stream
 from apps.m3u.models import M3UAccount
-from apps.m3u.stalker import StalkerError
+from apps.m3u.stalker import StalkerClient, StalkerError, StalkerHandshakeError
 from apps.m3u.vpn_guard import (
     BLOCKED,
     ERROR,
@@ -72,6 +72,7 @@ class GuardConfigTests(SimpleTestCase):
         config = GuardConfig.from_env({})
         self.assertEqual(config.gluetun_url, "http://127.0.0.1:8000")
         self.assertEqual(config.block_statuses, frozenset({456}))
+        self.assertEqual(config.handshake_block_statuses, frozenset({403}))
         self.assertEqual(config.gluetun_api_key, "")
 
     def test_reads_api_key_from_gluetun_role_json(self):
@@ -97,11 +98,13 @@ class GuardConfigTests(SimpleTestCase):
         config = GuardConfig.from_env(
             {
                 "VPN_GUARD_BLOCK_STATUSES": "456, 403",
+                "VPN_GUARD_HANDSHAKE_BLOCK_STATUSES": "403,451",
                 "VPN_GUARD_MAX_ROTATIONS": "3",
                 "VPN_GUARD_GLUETUN_URL": "http://gluetun:8000/",
             }
         )
         self.assertEqual(config.block_statuses, frozenset({456, 403}))
+        self.assertEqual(config.handshake_block_statuses, frozenset({403, 451}))
         self.assertEqual(config.max_rotations, 3)
         self.assertEqual(config.gluetun_url, "http://gluetun:8000")
 
@@ -552,6 +555,64 @@ class ProbeAccountTests(TestCase):
         self.assertEqual(result.outcome, BLOCKED)
         self.assertIn("portal HTTP 456", result.detail)
 
+    def _resolution_error(self, status, error_cls=StalkerError):
+        """A Stalker error raised from an HTTP error, as the client raises it."""
+        try:
+            try:
+                raise requests.HTTPError(response=MagicMock(status_code=status))
+            except requests.HTTPError as exc:
+                if error_cls is StalkerHandshakeError:
+                    raise StalkerHandshakeError(f"Request failed: {status}", status_code=status) from exc
+                raise error_cls(f"Request failed: {status}") from exc
+        except StalkerError as exc:
+            return exc
+
+    def test_refused_stalker_handshake_counts_as_blocked(self):
+        Stream.objects.create(name="s", url="http://x/1", m3u_account=self.account)
+        # Playback retries once after session recovery: the second refusal
+        # wraps the first one.
+        first = self._resolution_error(403, StalkerHandshakeError)
+        try:
+            try:
+                raise first
+            except StalkerHandshakeError:
+                raise self._resolution_error(403, StalkerHandshakeError)
+        except StalkerHandshakeError as exc:
+            retried = exc
+
+        with patch("apps.m3u.vpn_guard._resolve_probe_request", side_effect=retried):
+            result = probe_account(self.account, {456}, {403})
+
+        self.assertEqual(result.outcome, BLOCKED)
+        self.assertIn("portal handshake HTTP 403", result.detail)
+
+    def test_403_after_the_handshake_is_not_a_block(self):
+        Stream.objects.create(name="s", url="http://x/1", m3u_account=self.account)
+        error = self._resolution_error(403)
+
+        with patch("apps.m3u.vpn_guard._resolve_probe_request", side_effect=error):
+            result = probe_account(self.account, {456}, {403})
+
+        self.assertEqual(result.outcome, ERROR)
+
+    def test_handshake_refused_with_another_status_is_not_a_block(self):
+        Stream.objects.create(name="s", url="http://x/1", m3u_account=self.account)
+        error = self._resolution_error(500, StalkerHandshakeError)
+
+        with patch("apps.m3u.vpn_guard._resolve_probe_request", side_effect=error):
+            result = probe_account(self.account, {456}, {403})
+
+        self.assertEqual(result.outcome, ERROR)
+
+    def test_handshake_refusal_is_ignored_without_handshake_statuses(self):
+        Stream.objects.create(name="s", url="http://x/1", m3u_account=self.account)
+        error = self._resolution_error(403, StalkerHandshakeError)
+
+        with patch("apps.m3u.vpn_guard._resolve_probe_request", side_effect=error):
+            result = probe_account(self.account, {456})
+
+        self.assertEqual(result.outcome, ERROR)
+
     def test_stream_in_several_channels_is_sampled_once(self):
         stream = Stream.objects.create(name="s", url="http://x/1", m3u_account=self.account)
         other = Stream.objects.create(name="t", url="http://x/2", m3u_account=self.account)
@@ -564,6 +625,39 @@ class ProbeAccountTests(TestCase):
         picked = _probe_streams(self.account)
 
         self.assertEqual(sorted(s.id for s in picked), sorted([stream.id, other.id]))
+
+
+class StalkerHandshakeErrorTests(SimpleTestCase):
+    PORTAL = "http://portal.example.com/stalker_portal/portal.php"
+
+    def _client(self, response=None, error=None):
+        client = StalkerClient(server_url=self.PORTAL, mac="00:1A:79:00:00:40")
+        client.session = MagicMock()
+        if error is not None:
+            client.session.request.side_effect = error
+        else:
+            client.session.request.return_value = response
+        return client
+
+    def test_http_refusal_keeps_the_status(self):
+        response = requests.Response()
+        response.status_code = 403
+        response.url = self.PORTAL
+        client = self._client(response=response)
+
+        with self.assertRaises(StalkerHandshakeError) as caught:
+            client.handshake(self.PORTAL)
+
+        self.assertEqual(caught.exception.status_code, 403)
+        self.assertIn("403", str(caught.exception))
+
+    def test_network_failure_has_no_status(self):
+        client = self._client(error=requests.ConnectionError("refused"))
+
+        with self.assertRaises(StalkerHandshakeError) as caught:
+            client.handshake(self.PORTAL)
+
+        self.assertIsNone(caught.exception.status_code)
 
 
 class StalkerProbeRequestTests(TestCase):
