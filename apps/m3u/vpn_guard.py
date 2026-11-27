@@ -191,34 +191,34 @@ class ProbeResult:
     detail: str = ""
 
 
-def _exception_chain(exc):
-    """An exception, then the errors it wraps."""
+def _blocked_status_in_chain(exc, block_statuses):
+    """Return a block status carried by an exception or the errors it wraps."""
     seen = set()
     while exc is not None and id(exc) not in seen:
         seen.add(id(exc))
-        yield exc
-        exc = exc.__cause__ or exc.__context__
-
-
-def _blocked_status_in_chain(exc, block_statuses):
-    """Return a block status carried by an exception or the errors it wraps."""
-    for error in _exception_chain(exc):
-        status = getattr(getattr(error, "response", None), "status_code", None)
+        response = getattr(exc, "response", None)
+        status = getattr(response, "status_code", None)
         if status in block_statuses:
             return status
+        exc = exc.__cause__ or exc.__context__
     return None
 
 
-def _refused_handshake_status_in_chain(exc, handshake_block_statuses):
-    """Return the status of a Stalker handshake the portal refused, if any."""
+def _refused_handshake_status(exc, handshake_block_statuses):
+    """Return the status of the Stalker handshake refusal that ended resolution.
+
+    Only the final error and the errors it explicitly wraps count. Playback
+    retries once after a failure, so a refused handshake can sit in the
+    implicit context of a later error, after a retry whose handshake worked.
+    """
     from apps.m3u.stalker import StalkerHandshakeError
 
-    for error in _exception_chain(exc):
-        if (
-            isinstance(error, StalkerHandshakeError)
-            and error.status_code in handshake_block_statuses
-        ):
-            return error.status_code
+    seen = set()
+    while exc is not None and id(exc) not in seen:
+        seen.add(id(exc))
+        if isinstance(exc, StalkerHandshakeError) and exc.status_code in handshake_block_statuses:
+            return exc.status_code
+        exc = exc.__cause__
     return None
 
 
@@ -355,7 +355,7 @@ def probe_account(account, block_statuses, handshake_block_statuses=frozenset())
             url, headers = _resolve_probe_request(stream, profile)
         except Exception as exc:  # provider-specific resolution errors
             status = _blocked_status_in_chain(exc, block_statuses)
-            handshake_status = _refused_handshake_status_in_chain(exc, handshake_block_statuses)
+            handshake_status = _refused_handshake_status(exc, handshake_block_statuses)
             if status is not None:
                 details.append(f"stream {stream.id}: portal HTTP {status}")
                 blocked = True

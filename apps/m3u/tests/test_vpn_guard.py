@@ -1,3 +1,4 @@
+import json
 import sys
 from contextlib import nullcontext
 import time
@@ -569,18 +570,9 @@ class ProbeAccountTests(TestCase):
 
     def test_refused_stalker_handshake_counts_as_blocked(self):
         Stream.objects.create(name="s", url="http://x/1", m3u_account=self.account)
-        # Playback retries once after session recovery: the second refusal
-        # wraps the first one.
-        first = self._resolution_error(403, StalkerHandshakeError)
-        try:
-            try:
-                raise first
-            except StalkerHandshakeError:
-                raise self._resolution_error(403, StalkerHandshakeError)
-        except StalkerHandshakeError as exc:
-            retried = exc
+        error = self._resolution_error(403, StalkerHandshakeError)
 
-        with patch("apps.m3u.vpn_guard._resolve_probe_request", side_effect=retried):
+        with patch("apps.m3u.vpn_guard._resolve_probe_request", side_effect=error):
             result = probe_account(self.account, {456}, {403})
 
         self.assertEqual(result.outcome, BLOCKED)
@@ -658,6 +650,99 @@ class StalkerHandshakeErrorTests(SimpleTestCase):
             client.handshake(self.PORTAL)
 
         self.assertIsNone(caught.exception.status_code)
+
+
+def _http_response(status, payload=None, url="http://portal.example.com/portal.php"):
+    response = requests.Response()
+    response.status_code = status
+    response.url = url
+    if payload is not None:
+        response._content = json.dumps(payload).encode()
+        response.headers["Content-Type"] = "application/json"
+    return response
+
+
+class StalkerGuardProbeTests(TestCase):
+    """The guard's default probe, through the real Stalker playback resolution.
+
+    Only the portal and media HTTP answers are faked. Authentication and the
+    watchdog are skipped: they do not take part in the handshake decision.
+    """
+
+    PORTAL = "http://portal.example.com/stalker_portal/portal.php"
+
+    def setUp(self):
+        self.account = M3UAccount.objects.create(
+            name="Stalker",
+            account_type=M3UAccount.Types.STALKER,
+            server_url=self.PORTAL,
+            custom_properties={"mac": "00:1A:79:00:00:40"},
+        )
+        Stream.objects.create(
+            name="s",
+            url=self.PORTAL,
+            m3u_account=self.account,
+            custom_properties={"portal_url": self.PORTAL, "cmd": "ffmpeg http://localhost/ch/1"},
+        )
+        self.handshakes = []
+        self.create_link_status = 200
+        self.media_status = 200
+
+    def _portal_request(self, method, url, params=None, **kwargs):
+        if (params or {}).get("action") == "handshake":
+            status = self.handshakes.pop(0)
+            return _http_response(status, {"js": {"token": "fresh"}} if status == 200 else None)
+        if "action=create_link" in url:
+            if self.create_link_status != 200:
+                return _http_response(self.create_link_status)
+            return _http_response(200, {"js": {"cmd": "ffmpeg http://media.example.com/live.php?stream=1"}})
+        raise AssertionError(f"unexpected portal request {url} {params}")
+
+    def _media_get(self, url, **kwargs):
+        response = MagicMock(status_code=self.media_status, headers={"Content-Type": "video/mp2t"}, url=url)
+        response.raw.read1.side_effect = [b"\x47" * 188, b""]
+        return response
+
+    def _probe(self):
+        guard = VpnGuard(GuardConfig.from_env({}), MagicMock(), redis_factory=MagicMock())
+        with patch.object(StalkerClient, "_authenticate_portal"), patch.object(
+            StalkerClient, "watchdog_update"
+        ), patch("apps.m3u.stalker.requests.Session.request", autospec=True) as request, patch(
+            "apps.m3u.vpn_guard.requests.get", side_effect=self._media_get
+        ):
+            request.side_effect = lambda _session, *args, **kwargs: self._portal_request(*args, **kwargs)
+            results = guard._probe_all()
+        return next(r for r in results if r.account_name == self.account.name)
+
+    def test_playable_stream_is_ok(self):
+        self.handshakes = [200]
+
+        self.assertEqual(self._probe().outcome, OK)
+
+    def test_handshake_refused_on_every_attempt_is_blocked(self):
+        self.handshakes = [403, 403]
+
+        result = self._probe()
+
+        self.assertEqual(result.outcome, BLOCKED)
+        self.assertIn("portal handshake HTTP 403", result.detail)
+
+    def test_create_link_403_after_a_recovered_handshake_is_not_a_block(self):
+        self.handshakes = [403, 200]
+        self.create_link_status = 403
+
+        result = self._probe()
+
+        self.assertEqual(result.outcome, ERROR)
+        self.assertEqual(self.handshakes, [])
+
+    def test_media_403_is_not_a_block(self):
+        self.handshakes = [200]
+        self.media_status = 403
+
+        result = self._probe()
+
+        self.assertEqual((result.outcome, result.detail.split(": ", 1)[1]), (ERROR, "HTTP 403"))
 
 
 class StalkerProbeRequestTests(TestCase):
