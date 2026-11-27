@@ -182,7 +182,16 @@ def _obtain_stream_with_retries(
             should_retry = False
             break
 
-        if attempt == 1 or (start_state is not None and start_state.failed_stream_ids):
+        if start_state is not None and start_state.failed_stream_ids:
+            # After a failed stream, only wait when the streams left are full
+            # (a flag, not the error text, which can hold provider words).
+            if not start_state.capacity_wait:
+                logger.warning(
+                    f"[{client_id}] Can't retry - no stream left to try: {error_reason}"
+                )
+                should_retry = False
+                break
+        elif attempt == 1:
             if error_reason and "maximum connection limits" not in error_reason:
                 logger.warning(
                     f"[{client_id}] Can't retry - error not related to "

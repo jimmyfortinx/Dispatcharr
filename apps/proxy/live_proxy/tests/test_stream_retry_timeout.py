@@ -95,6 +95,7 @@ class StartStateAcrossRetriesTests(SimpleTestCase):
                 start_state.stop = True
                 return (None, None, {}, False, None, False, "403", None)
             start_state.failed_stream_ids.append(1)
+            start_state.capacity_wait = True
             return (
                 None, None, {}, False, None, False,
                 "403; other streams: All active M3U profiles have reached maximum connection limits",

@@ -415,3 +415,90 @@ class StartupNextStreamRedisTests(TestCase):
         self.assertEqual(
             int(self.redis.get(f"stream_profile:{self.streams[1].id}")), self.profiles[1].id
         )
+
+
+class StartupFallbackGuardsTests(StartupTriesNextStreamTests):
+    """Guards added after review: budget on retries, release errors, flags, messages."""
+
+    def _patch_get_stream(self, assign=None):
+        return self.enterContext(patch.object(
+            Channel, "get_stream",
+            side_effect=assign or (
+                lambda user, profiles, exclude_stream_ids=None, avoid_streams_in_use=False:
+                self._assign_in_order(exclude_stream_ids)
+            ),
+        ))
+
+    def test_view_retry_after_the_budget_does_not_select_another_stream(self):
+        self._resolve({"HGTV tiger"})
+        get_stream = self._patch_get_stream()
+        state = StreamStartState(failed_stream_ids=[self.streams[0].id])
+        state.last_resolution_error = "Could not get the stream URL from the provider (HTTP 403)"
+        state.started -= 60  # the start began a minute ago
+
+        url, *_middle, error, _stream_id = generate_stream_url(
+            str(self.channel.uuid), start_state=state
+        )
+
+        self.assertIsNone(url)
+        self.assertTrue(state.stop)
+        self.assertIn("403", error)
+        get_stream.assert_not_called()
+
+    def test_release_that_raises_stops_the_start(self):
+        self._resolve({"HGTV tiger"})
+        self.release.side_effect = RuntimeError("redis down")
+        get_stream = self._patch_get_stream()
+        state = StreamStartState()
+
+        url, *_rest = generate_stream_url(str(self.channel.uuid), start_state=state)
+
+        self.assertIsNone(url)
+        self.assertTrue(state.stop)
+        get_stream.assert_called_once()
+
+    def test_provider_text_about_connection_limits_does_not_mean_full(self):
+        def resolve(stream, **_kwargs):
+            raise StalkerError("Portal says: maximum connection limits reached for this MAC")
+
+        self.enterContext(patch(
+            "apps.proxy.live_proxy.url_utils._resolve_live_stream_context", side_effect=resolve,
+        ))
+        self._patch_get_stream()
+        state = StreamStartState()
+
+        *_rest, error, _stream_id = generate_stream_url(str(self.channel.uuid), start_state=state)
+
+        self.assertFalse(state.capacity_wait)
+        self.assertNotIn("maximum connection limits", error)
+
+    def test_full_backup_sets_the_capacity_flag(self):
+        self._resolve({"HGTV tiger"})
+
+        def assign(user, profiles, exclude_stream_ids=None, avoid_streams_in_use=False):
+            if exclude_stream_ids:
+                return None, None, "All active M3U profiles have reached maximum connection limits", False
+            return self._assign_in_order()
+
+        self._patch_get_stream(assign)
+        state = StreamStartState()
+
+        generate_stream_url(str(self.channel.uuid), start_state=state)
+
+        self.assertTrue(state.capacity_wait)
+
+    def test_token_echoed_by_the_provider_never_reaches_the_client(self):
+        def resolve(stream, **_kwargs):
+            raise StalkerError(
+                'Portal returned an unexpected response: {"token": "SECRET-TOKEN", "error": 1}'
+            )
+
+        self.enterContext(patch(
+            "apps.proxy.live_proxy.url_utils._resolve_live_stream_context", side_effect=resolve,
+        ))
+        self._patch_get_stream()
+
+        *_rest, error, _stream_id = generate_stream_url(str(self.channel.uuid))
+
+        self.assertNotIn("SECRET-TOKEN", error)
+        self.assertEqual(error, "Could not get the stream URL from the provider")
