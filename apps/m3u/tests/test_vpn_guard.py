@@ -685,14 +685,17 @@ class StalkerGuardProbeTests(TestCase):
             custom_properties={"portal_url": self.PORTAL, "cmd": "ffmpeg http://localhost/ch/1"},
         )
         self.handshakes = []
+        self.portal_actions = []
         self.create_link_status = 200
         self.media_status = 200
 
     def _portal_request(self, method, url, params=None, **kwargs):
         if (params or {}).get("action") == "handshake":
+            self.portal_actions.append("handshake")
             status = self.handshakes.pop(0)
             return _http_response(status, {"js": {"token": "fresh"}} if status == 200 else None)
         if "action=create_link" in url:
+            self.portal_actions.append("create_link")
             if self.create_link_status != 200:
                 return _http_response(self.create_link_status)
             return _http_response(200, {"js": {"cmd": "ffmpeg http://media.example.com/live.php?stream=1"}})
@@ -726,6 +729,8 @@ class StalkerGuardProbeTests(TestCase):
 
         self.assertEqual(result.outcome, BLOCKED)
         self.assertIn("portal handshake HTTP 403", result.detail)
+        # Both refusals were answered: playback retried the handshake.
+        self.assertEqual(self.portal_actions, ["handshake", "handshake"])
 
     def test_create_link_403_after_a_recovered_handshake_is_not_a_block(self):
         self.handshakes = [403, 200]
@@ -734,7 +739,8 @@ class StalkerGuardProbeTests(TestCase):
         result = self._probe()
 
         self.assertEqual(result.outcome, ERROR)
-        self.assertEqual(self.handshakes, [])
+        self.assertEqual(self.portal_actions, ["handshake", "handshake", "create_link"])
+        self.assertIn("resolve failed: Request failed: 403", result.detail)
 
     def test_media_403_is_not_a_block(self):
         self.handshakes = [200]
