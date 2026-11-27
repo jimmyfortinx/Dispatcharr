@@ -201,6 +201,12 @@ class StreamManager:
 
         # Add HTTP reader thread property
         self.http_reader = None
+        # HTTP status the upstream gave on the last connection. Kept here
+        # because the reader is cleared when the connection is closed.
+        self._last_upstream_status = None
+        # Stream for which a refusal-triggered switch already failed: retry it
+        # normally instead of trying the early switch again.
+        self._refusal_switch_failed_stream_id = None
 
         # Reused across retries within this channel's connection lifetime so a
         # Stalker portal session isn't re-authenticated from scratch on every
@@ -234,12 +240,24 @@ class StreamManager:
         }
         self.last_transport_failure_at = time.time()
 
+    def _upstream_status(self, consume=False):
+        """HTTP status of the last upstream connection, from the live reader
+        or, once the connection was closed, from the copy kept at close."""
+        http_reader = getattr(self, "http_reader", None)
+        status_code = getattr(http_reader, "last_status_code", None) if http_reader else None
+        if status_code is None:
+            status_code = getattr(self, "_last_upstream_status", None)
+        if consume:
+            self._last_upstream_status = None
+            if http_reader is not None:
+                http_reader.last_status_code = None
+        return status_code
+
     def _note_http_reader_rejection(self):
         """Record a portal-side rejection status (e.g. Stalker HTTP 456) from
         the last HTTP reader attempt, so the retry loop can back off longer
         than it would for a generic transport failure."""
-        http_reader = getattr(self, "http_reader", None)
-        status_code = getattr(http_reader, "last_status_code", None) if http_reader else None
+        status_code = self._upstream_status()
         if status_code in PORTAL_REJECTION_STATUS_CODES:
             self._record_transport_failure(
                 "stalker_portal_rejected",
@@ -255,18 +273,26 @@ class StreamManager:
         with Stalker), which delays failover by ~15 s while the player gives up.
         Without another stream, keep the usual retries: a fresh URL may work.
         """
-        http_reader = getattr(self, "http_reader", None)
-        status_code = getattr(http_reader, "last_status_code", None) if http_reader else None
-        if http_reader is not None and status_code is not None:
-            # Read once: a later attempt that fails before a new reader exists
-            # must not act on this answer again.
-            http_reader.last_status_code = None
+        # Read once: a later attempt must not act on this answer again.
+        status_code = self._upstream_status(consume=True)
         if status_code not in UPSTREAM_REFUSAL_STATUS_CODES:
             return False
+        if (
+            self.current_stream_id is not None
+            and self.current_stream_id == getattr(self, "_refusal_switch_failed_stream_id", None)
+        ):
+            return False
+        if self.url_switching or getattr(self, "needs_stream_switch", False):
+            # A switch is already under way (manual or health monitor).
+            return False
+        stream_id = self.current_stream_id
         try:
-            alternates = get_alternate_streams(self.channel_id, self.current_stream_id)
+            alternates = get_alternate_streams(self.channel_id, stream_id)
         except Exception as e:
             logger.debug(f"Could not list alternate streams for channel {self.channel_id}: {e}")
+            return False
+        if self.current_stream_id != stream_id or self.url_switching:
+            # The stream changed during the lookup: this refusal is outdated.
             return False
         if not alternates:
             return False
@@ -863,6 +889,7 @@ class StreamManager:
                 else:
                     self._apply_transport_mode_override()
                 url_failed = False
+                refusal_switch = False
                 if self.url_switching:
                     logger.debug(f"Skipping connection attempt during URL switch for channel {self.channel_id}")
                     gevent.sleep(0.1)
@@ -971,6 +998,7 @@ class StreamManager:
                         self.connected = False
                         if self._switch_now_after_refusal():
                             url_failed = True
+                            refusal_switch = True
                             continue
                         failures = self._record_connection_failure()
 
@@ -1046,11 +1074,17 @@ class StreamManager:
                 if url_failed and self.running:
                     if self._stop_if_idle():
                         return
-                    logger.info(f"URL {self.url} failed after {self.retry_count} attempts, trying next stream for channel: {self.channel_id}")
+                    if refusal_switch:
+                        logger.info(f"URL {self.url} was refused by the upstream, trying next stream for channel: {self.channel_id}")
+                    else:
+                        logger.info(f"URL {self.url} failed after {self.retry_count} attempts, trying next stream for channel: {self.channel_id}")
 
                     # Try to switch to next stream (wait out wrap cooldown in this thread)
                     self._switch_skipped_idle = False
-                    switch_result = self._try_next_stream_with_cooldown(reason='max_retries_exceeded')
+                    failed_stream_id = self.current_stream_id
+                    switch_result = self._try_next_stream_with_cooldown(
+                        reason='upstream_refused' if refusal_switch else 'max_retries_exceeded'
+                    )
                     if switch_result:
                         # Successfully switched to a new stream, continue with the new URL
                         stream_switch_attempts += 1
@@ -1068,6 +1102,15 @@ class StreamManager:
                         # next pass of the loop.
                         self._clear_connection_failure_history()
                         self.needs_stream_switch = True
+                    elif refusal_switch:
+                        # The early switch found no usable stream: retry the
+                        # refused URL with the usual budget instead of failing.
+                        logger.warning(
+                            f"No usable stream to switch to after the upstream refusal; "
+                            f"retrying the current stream for channel: {self.channel_id}"
+                        )
+                        self._refusal_switch_failed_stream_id = failed_stream_id
+                        self._record_connection_failure()
                     else:
                         # No more streams to try
                         logger.error(f"Failed to find alternative streams after {stream_switch_attempts} attempts for channel: {self.channel_id}")
@@ -2018,6 +2061,7 @@ class StreamManager:
             from .http_streamer import HTTPStreamReader
 
             # Create and start the HTTP stream reader
+            self._last_upstream_status = None
             self.http_reader = HTTPStreamReader(
                 url=self.url,
                 user_agent=self.user_agent,
@@ -2759,6 +2803,9 @@ class StreamManager:
         if hasattr(self, 'http_reader') and self.http_reader:
             try:
                 logger.debug(f"Stopping HTTP reader thread for channel {self.channel_id}")
+                status_code = getattr(self.http_reader, "last_status_code", None)
+                if status_code is not None:
+                    self._last_upstream_status = status_code
                 self.http_reader.stop()
                 self.http_reader = None
             except Exception as e:

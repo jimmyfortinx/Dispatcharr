@@ -4,10 +4,13 @@ Seen in production: a Stalker stream answered HTTP 405 five times in a row.
 Each retry re-created the URL and waited, so the channel switched to its
 backup stream only after ~16 s; the player gave up twice meanwhile. When
 another stream exists, a refusal now switches on the first answer.
+
+The tests go through the real connection teardown (_close_socket), which
+clears the HTTP reader before the retry loop looks at the status.
 """
 
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
 from django.test import TestCase
 
@@ -15,6 +18,14 @@ from apps.proxy.live_proxy.input.manager import StreamManager
 from apps.proxy.live_proxy.server import ProxyServer
 
 CHANNEL_ID = 'refusal-channel'
+
+
+class _FakeReader:
+    def __init__(self, status_code):
+        self.last_status_code = status_code
+
+    def stop(self):
+        pass
 
 
 class SwitchOnUpstreamRefusalTests(TestCase):
@@ -32,34 +43,46 @@ class SwitchOnUpstreamRefusalTests(TestCase):
             stream_buffers={CHANNEL_ID: buffer},
         )
         self.enterContext(patch.object(ProxyServer, 'get_instance', return_value=server))
-        for name in (
-            '_monitor_health', '_close_socket', '_close_all_connections',
-            '_refresh_runtime_stream_url', '_process_stream_data',
-        ):
+        for name in ('_monitor_health', '_close_all_connections', '_refresh_runtime_stream_url'):
             self.enterContext(patch.object(self.manager, name))
         self.enterContext(patch.object(self.manager, '_ensure_owner_or_stop', return_value=True))
         self.enterContext(patch.object(self.manager, '_stop_if_idle', return_value=False))
         self.enterContext(patch('apps.proxy.live_proxy.input.manager.close_old_connections'))
         self.enterContext(patch('apps.proxy.live_proxy.input.manager.connection'))
         self.enterContext(patch('apps.proxy.live_proxy.input.manager.log_system_event'))
-        self.enterContext(patch('apps.proxy.live_proxy.input.manager.gevent.sleep'))
+        self.sleep = self.enterContext(patch('apps.proxy.live_proxy.input.manager.gevent.sleep'))
 
-        self.status = 405
+        # Status the upstream answers, per stream id.
+        self.status_by_stream = {1: 405, 2: None}
 
         def establish():
-            # The HTTP reader thread records the upstream status, then ends.
-            self.manager.http_reader = SimpleNamespace(last_status_code=self.status)
+            self.manager.http_reader = _FakeReader(
+                self.status_by_stream.get(self.manager.current_stream_id)
+            )
+            self.manager.connected = True
             return True
 
         self.establish = self.enterContext(
             patch.object(self.manager, '_establish_http_connection', side_effect=establish)
         )
 
+        def read_until_eof():
+            if self.manager.current_stream_id == 2:
+                # The backup plays until the channel stops.
+                self.manager.stop_requested = True
+                self.manager.running = False
+                return
+            # EOF after the refusal: fetch_chunk() tears the connection down,
+            # which clears the reader before the retry loop runs.
+            self.manager._close_socket()
+
+        self.enterContext(
+            patch.object(self.manager, '_process_stream_data', side_effect=read_until_eof)
+        )
+
         def switch(reason=None):
-            # The backup plays until the channel stops.
-            self.status = None
-            self.manager.stop_requested = True
-            self.manager.running = False
+            self.manager.current_stream_id = 2
+            self.manager.url = 'http://backup.example.com/live.ts'
             return True
 
         self.switch = self.enterContext(
@@ -76,8 +99,9 @@ class SwitchOnUpstreamRefusalTests(TestCase):
 
         self.manager.run()
 
-        self.establish.assert_called_once_with()
-        self.switch.assert_called_once_with(reason='max_retries_exceeded')
+        # One refused attempt, then the backup's connection.
+        self.assertEqual(self.establish.call_count, 2)
+        self.switch.assert_called_once_with(reason='upstream_refused')
 
     def test_refusal_without_a_backup_keeps_retrying_the_same_stream(self):
         self._alternates([])
@@ -86,29 +110,64 @@ class SwitchOnUpstreamRefusalTests(TestCase):
         self.manager.run()
 
         self.assertEqual(self.establish.call_count, 5)
+        self.switch.assert_called_once_with(reason='max_retries_exceeded')
 
-    def test_other_failures_keep_the_usual_retries(self):
+    def test_failed_early_switch_resumes_the_usual_retries(self):
+        # A stream is listed, but switching to it fails (e.g. same URL).
         self._alternates([{'stream_id': 2}])
-        self.status = 502  # server error: may be transient
-
         self.switch.side_effect = lambda reason=None: False
+
+        self.manager.run()
+
+        self.assertEqual(self.establish.call_count, 5)
+        self.assertEqual(
+            self.switch.call_args_list,
+            [call(reason='upstream_refused'), call(reason='max_retries_exceeded')],
+        )
+
+    def test_server_errors_keep_the_usual_retries(self):
+        self._alternates([{'stream_id': 2}])
+        self.status_by_stream[1] = 502  # may be transient
+        self.switch.side_effect = lambda reason=None: False
+
         self.manager.run()
 
         self.assertEqual(self.establish.call_count, 5)
 
-    def test_portal_busy_status_keeps_its_backoff_and_retries(self):
+    def test_portal_busy_status_keeps_its_longer_backoff(self):
         # 456: the portal still sees an older session; waiting is the fix.
         self._alternates([{'stream_id': 2}])
-        self.status = 456
+        self.status_by_stream[1] = 456
         self.switch.side_effect = lambda reason=None: False
 
         self.manager.run()
 
         self.assertEqual(self.establish.call_count, 5)
+        self.assertEqual([c.args[0] for c in self.sleep.call_args_list[:4]], [2, 4, 6, 8])
 
     def test_a_refusal_is_acted_on_only_once(self):
         self._alternates([{'stream_id': 2}])
-        self.manager.http_reader = SimpleNamespace(last_status_code=405)
+        self.manager.http_reader = _FakeReader(405)
+        self.manager._close_socket()
 
         self.assertTrue(self.manager._switch_now_after_refusal())
+        self.assertFalse(self.manager._switch_now_after_refusal())
+
+    def test_no_early_switch_while_another_switch_is_under_way(self):
+        self._alternates([{'stream_id': 2}])
+        self.manager.http_reader = _FakeReader(405)
+        self.manager.needs_stream_switch = True
+
+        self.assertFalse(self.manager._switch_now_after_refusal())
+
+    def test_refusal_outdated_by_a_stream_change_during_the_lookup(self):
+        def lookup(channel_id, stream_id):
+            self.manager.current_stream_id = 3  # manual switch landed meanwhile
+            return [{'stream_id': 2}]
+
+        self.enterContext(patch(
+            'apps.proxy.live_proxy.input.manager.get_alternate_streams', side_effect=lookup,
+        ))
+        self.manager.http_reader = _FakeReader(405)
+
         self.assertFalse(self.manager._switch_now_after_refusal())
