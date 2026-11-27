@@ -1,5 +1,5 @@
 import json
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, patch
 
 from django.test import TestCase
 from rest_framework.test import APIRequestFactory, force_authenticate
@@ -13,7 +13,7 @@ from apps.proxy.live_proxy.server import ProxyServer
 from apps.proxy.live_proxy.services.channel_service import ChannelService
 from apps.proxy.live_proxy.input.buffer import StreamBuffer
 from apps.proxy.live_proxy.input.manager import StreamManager
-from apps.proxy.live_proxy.url_utils import get_stream_info_for_switch
+from apps.proxy.live_proxy.url_utils import StreamStartState, get_stream_info_for_switch
 from apps.proxy.live_proxy.views import change_stream
 from core.models import PROXY_PROFILE_NAME, StreamProfile, UserAgent
 
@@ -713,8 +713,12 @@ class StalkerPhase9DvrTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         mock_generate_stream_url.assert_called_once_with(
-            channel_id, None, None, override_stream_profile_id=None,
+            channel_id, None, None, override_stream_profile_id=None, start_state=ANY,
         )
+        # One start state shared by the retries, renewing the startup lease.
+        start_state = mock_generate_stream_url.call_args.kwargs["start_state"]
+        self.assertIsInstance(start_state, StreamStartState)
+        self.assertTrue(callable(start_state.keep_alive))
         mock_initialize_channel.assert_called_once_with(
             channel_id,
             "http://resolved.example.com/live/world-news",

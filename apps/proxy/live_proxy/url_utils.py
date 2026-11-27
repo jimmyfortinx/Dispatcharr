@@ -3,9 +3,10 @@ Utilities for handling stream URLs and transformations.
 """
 
 import time
+from dataclasses import dataclass, field
 
 import regex
-from typing import Optional, Tuple, List
+from typing import Callable, Optional, Tuple, List
 from uuid import UUID
 from django.db import close_old_connections
 from django.shortcuts import get_object_or_404
@@ -315,6 +316,31 @@ def pick_channel_preview_target(channel, allowed_m3u_profiles=None):
 # resolution failure. The startup ownership lease is 30 s.
 STREAM_FALLBACK_BUDGET_SECONDS = 15.0
 
+_URL_IN_TEXT = regex.compile(r"\b[a-z][a-z0-9+.-]*://\S+", regex.IGNORECASE)
+
+
+def _redact_urls(text):
+    """Remove URLs from an error message: they can carry tokens or credentials."""
+    return _URL_IN_TEXT.sub("[url]", str(text))
+
+
+@dataclass
+class StreamStartState:
+    """State shared by every generate_stream_url() attempt of one channel start.
+
+    The view creates one per start and passes it to each retry, so a stream
+    whose URL failed is not tried again, and a failed slot release ends the
+    start instead of reserving more slots.
+    """
+
+    failed_stream_ids: List[int] = field(default_factory=list)
+    last_resolution_error: Optional[str] = None
+    # Set when a failed stream's slot could not be released: reserve nothing more.
+    stop: bool = False
+    started: float = field(default_factory=lambda: time.monotonic())
+    # Renews the startup ownership lease; returns False when it was lost.
+    keep_alive: Optional[Callable[[], bool]] = None
+
 
 def _resolve_channel_assignment(
     channel,
@@ -399,13 +425,14 @@ def _resolve_channel_assignment(
 
         return (stream_url, stream_user_agent, stream_context.get('input_headers'), transcode, stream_profile_id, slot_reserved, None, stream.id), True
     except Exception as e:
-        logger.error(f"Error generating stream URL for channel {channel_id}: {e}")
+        error_text = _redact_urls(e)
+        logger.error(f"Error generating stream URL for channel {channel_id}: {error_text}")
         released = True
         if slot_reserved:
             released = bool(channel.release_stream())
             if not released:
                 logger.warning(f"Failed to release stream for channel {channel_id} after URL generation error")
-        return (None, None, None, False, None, False, str(e), None), released
+        return (None, None, None, False, None, False, error_text, None), released
 
 
 def generate_stream_url(
@@ -414,6 +441,7 @@ def generate_stream_url(
     allowed_m3u_profiles=None,
     override_stream_profile_id=None,
     allow_stream_fallback=True,
+    start_state: Optional[StreamStartState] = None,
 ) -> Tuple[
     Optional[str], Optional[str], Optional[dict], bool, Optional[int], bool,
     Optional[str], Optional[int]
@@ -430,6 +458,8 @@ def generate_stream_url(
 
     allow_stream_fallback: when a channel stream's URL cannot be resolved, try
     the channel's next stream (proxied starts only, within a time budget).
+
+    start_state: shared across the retries of one start (see StreamStartState).
 
     Returns:
         Tuple: (stream_url, user_agent, input_headers, transcode_flag, profile_id,
@@ -533,15 +563,16 @@ def generate_stream_url(
             override_stream_profile_id is not None
             or not channel.get_stream_profile().is_redirect()
         )
-        fallback_started = time.monotonic()
-        failed_stream_ids = []
-        last_error = None
+        state = start_state if start_state is not None else StreamStartState()
         while True:
-            if failed_stream_ids:
+            if state.failed_stream_ids:
+                # Never take over a stream another channel is using: the
+                # per-stream profile key is shared between channels.
                 stream_id, profile_id, error_reason, slot_reserved = channel.get_stream(
                     user,
                     allowed_m3u_profiles,
-                    exclude_stream_ids=failed_stream_ids,
+                    exclude_stream_ids=list(state.failed_stream_ids),
+                    avoid_streams_in_use=True,
                 )
             else:
                 stream_id, profile_id, error_reason, slot_reserved = channel.get_stream(
@@ -550,16 +581,20 @@ def generate_stream_url(
                 )
 
             if not stream_id or not profile_id:
-                if last_error and not (
-                    error_reason and "maximum connection limits" in error_reason
-                ):
+                if state.last_resolution_error:
+                    if error_reason and "maximum connection limits" in error_reason:
+                        # The remaining streams are full: the view keeps
+                        # retrying capacity errors until a slot frees up.
+                        message = (
+                            f"{state.last_resolution_error}; other streams: {error_reason}"
+                        )
+                    else:
+                        message = state.last_resolution_error
                     logger.error(
-                        f"No working stream for channel {channel_id}: every stream tried "
-                        f"failed ({failed_stream_ids}); last error: {last_error}"
+                        f"No working stream for channel {channel_id}: streams "
+                        f"{state.failed_stream_ids} failed; {message}"
                     )
-                    return None, None, None, False, None, False, last_error, None
-                # Also when the remaining streams are only full: the view keeps
-                # retrying capacity errors until a slot frees up.
+                    return None, None, None, False, None, False, message, None
                 logger.error(f"No stream available for channel {channel_id}: {error_reason}")
                 return None, None, None, False, None, False, error_reason, None
 
@@ -574,23 +609,36 @@ def generate_stream_url(
             )
             if result[0] is not None:
                 return result
-            if not (try_next_stream and slot_reserved and released):
-                # A reused assignment belongs to a running channel, and a slot
-                # that could not be released must not be left behind.
+            if slot_reserved and not released:
+                # The failed slot is still counted: reserve nothing more.
+                state.stop = True
                 return result
-            if time.monotonic() - fallback_started >= STREAM_FALLBACK_BUDGET_SECONDS:
-                # Stay well inside the startup ownership lease.
+            if not (try_next_stream and slot_reserved):
+                # A reused assignment belongs to a running channel.
+                return result
+
+            state.last_resolution_error = result[6]
+            state.failed_stream_ids.append(stream_id)
+
+            if time.monotonic() - state.started >= STREAM_FALLBACK_BUDGET_SECONDS:
                 logger.warning(
                     f"Stream fallback budget spent for channel {channel_id}; "
                     f"not trying another stream"
                 )
+                state.stop = True
+                return result
+            if state.keep_alive is not None and not state.keep_alive():
+                # Another worker may own the start now: leave it alone.
+                logger.warning(
+                    f"Lost startup ownership of channel {channel_id}; "
+                    f"not trying another stream"
+                )
+                state.stop = True
                 return result
 
-            last_error = result[6]
-            failed_stream_ids.append(stream_id)
             logger.warning(
                 f"Could not resolve stream {stream_id} for channel {channel_id} "
-                f"({last_error}); trying the next stream"
+                f"({state.last_resolution_error}); trying the next stream"
             )
     except Exception as e:
         logger.error(f"Error generating stream URL: {e}")

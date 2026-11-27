@@ -964,13 +964,23 @@ class Channel(models.Model):
             log_label=f"Channel {self.uuid}",
         )
 
-    def get_stream(self, requester=None, allowed_m3u_profiles=None, exclude_stream_ids=None):
+    def get_stream(
+        self,
+        requester=None,
+        allowed_m3u_profiles=None,
+        exclude_stream_ids=None,
+        avoid_streams_in_use=False,
+    ):
         """
         Finds an available stream for the requested channel and returns the selected stream and profile.
 
         exclude_stream_ids: streams to skip when assigning a new stream, for
         example ones whose playback URL could not be resolved during this start
         attempt. A live assignment of a running channel is still reused.
+
+        avoid_streams_in_use: skip streams that another channel is using (their
+        ``stream_profile:{id}`` key exists). Assigning one would overwrite that
+        shared key and break the other channel's slot release.
 
         Returns:
             Tuple[Optional[int], Optional[int], Optional[str], bool]:
@@ -1045,6 +1055,12 @@ class Channel(models.Model):
         # Iterate through channel streams and their profiles
         for stream in self.streams.all().order_by("channelstream__order"):
             if stream.id in excluded:
+                continue
+            if avoid_streams_in_use and redis_client.exists(f"stream_profile:{stream.id}"):
+                logger.debug(
+                    f"Channel {self.uuid}: stream {stream.id} is in use by another "
+                    f"channel, skipping it"
+                )
                 continue
             # Retrieve the M3U account associated with the stream.
             m3u_account = stream.m3u_account

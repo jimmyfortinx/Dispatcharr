@@ -30,6 +30,7 @@ from .constants import ChannelState, ChannelMetadataField
 from .services.channel_service import ChannelService
 from core.utils import send_websocket_update
 from .url_utils import (
+    StreamStartState,
     generate_stream_url,
     get_stream_info_for_switch,
     get_stream_object,
@@ -105,11 +106,15 @@ def _obtain_stream_with_retries(
     allowed_m3u_profiles,
     override_stream_profile_id=None,
     allow_stream_fallback=True,
+    keep_alive=None,
 ):
     """Call generate_stream_url, retrying when the failure is connection limits.
 
     allow_stream_fallback=False keeps generate_stream_url on the first stream it
-    picks (no move to the next stream when a URL cannot be resolved).
+    picks (no move to the next stream when a URL cannot be resolved). Otherwise
+    one StreamStartState is shared by every attempt, so streams that failed are
+    not tried again; keep_alive renews the startup ownership lease before a
+    further stream is tried.
 
     Always tries at least once. stream_retry_timeout is the wall-clock budget for
     additional waits/retries after that first try (0 = try once, do not wait).
@@ -133,6 +138,14 @@ def _obtain_stream_with_retries(
     resolved_stream_id = None
     attempt = 0
     should_retry = True
+    start_state = (
+        StreamStartState(keep_alive=keep_alive) if allow_stream_fallback else None
+    )
+    url_kwargs = (
+        {"start_state": start_state}
+        if allow_stream_fallback
+        else {"allow_stream_fallback": False}
+    )
 
     while True:
         attempt += 1
@@ -150,7 +163,7 @@ def _obtain_stream_with_retries(
             user,
             allowed_m3u_profiles,
             override_stream_profile_id=override_stream_profile_id,
-            **({} if allow_stream_fallback else {"allow_stream_fallback": False}),
+            **url_kwargs,
         )
 
         if stream_url is not None:
@@ -160,7 +173,16 @@ def _obtain_stream_with_retries(
             )
             break
 
-        if attempt == 1:
+        if start_state is not None and start_state.stop:
+            # A failed slot could not be released, the stream fallback ran out
+            # of time, or startup ownership was lost: do not reserve again.
+            logger.warning(
+                f"[{client_id}] Stopping stream start for channel {channel_id}: {error_reason}"
+            )
+            should_retry = False
+            break
+
+        if attempt == 1 or (start_state is not None and start_state.failed_stream_ids):
             if error_reason and "maximum connection limits" not in error_reason:
                 logger.warning(
                     f"[{client_id}] Can't retry - error not related to "
@@ -209,7 +231,7 @@ def _obtain_stream_with_retries(
             user,
             allowed_m3u_profiles,
             override_stream_profile_id=override_stream_profile_id,
-            **({} if allow_stream_fallback else {"allow_stream_fallback": False}),
+            **url_kwargs,
         )
         if stream_url is not None:
             logger.info(
@@ -769,6 +791,9 @@ def _stream_ts_impl(
                         user,
                         allowed_m3u_profiles,
                         override_stream_profile_id=override_stream_profile_id,
+                        # Trying further streams takes time: keep the startup
+                        # ownership lease alive meanwhile.
+                        keep_alive=lambda: proxy_server.extend_ownership(channel_id),
                     )
 
                     if stream_url is None:

@@ -588,3 +588,18 @@ class ChannelGetStreamExcludeTests(ChannelGetStreamAssignmentTests):
         self.assertIsNone(stream_id)
         self.assertIsNone(profile_id)
         self.assertFalse(slot_reserved)
+
+    @patch("apps.channels.models.RedisClient.get_client")
+    @patch("apps.channels.models.reserve_profile_slot", return_value=(True, 1, None))
+    def test_stream_in_use_by_another_channel_is_avoided(self, mock_reserve, mock_get_client):
+        mock_get_client.return_value = self.redis
+        # Another channel holds the second stream.
+        self.redis.set(f"stream_profile:{self.second_stream.id}", self.profile.id)
+
+        stream_id, _profile_id, _error, slot_reserved = self.channel.get_stream(
+            exclude_stream_ids=[self.stream.id], avoid_streams_in_use=True
+        )
+
+        self.assertIsNone(stream_id)
+        self.assertFalse(slot_reserved)
+        mock_reserve.assert_not_called()
