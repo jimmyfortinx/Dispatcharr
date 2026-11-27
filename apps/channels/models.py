@@ -964,9 +964,12 @@ class Channel(models.Model):
             log_label=f"Channel {self.uuid}",
         )
 
-    def get_stream(self, requester=None, allowed_m3u_profiles=None):
+    def get_stream(self, requester=None, allowed_m3u_profiles=None, exclude_stream_ids=None):
         """
         Finds an available stream for the requested channel and returns the selected stream and profile.
+
+        exclude_stream_ids: streams to skip, for example ones whose playback URL
+        could not be resolved during this start attempt.
 
         Returns:
             Tuple[Optional[int], Optional[int], Optional[str], bool]:
@@ -974,6 +977,7 @@ class Channel(models.Model):
         """
         redis_client = RedisClient.get_client()
         error_reason = None
+        excluded = set(exclude_stream_ids or ())
 
         # Check if this channel has any streams
         if not self.streams.exists():
@@ -991,6 +995,8 @@ class Channel(models.Model):
                 # channel-wide assignment that another viewer could reuse.
                 streams = list(self.streams.all().order_by("channelstream__order"))
                 for stream in streams:
+                    if stream.id in excluded:
+                        continue
                     for profile in allowed_m3u_profiles.get(stream.m3u_account_id, []):
                         if pool_has_capacity_for_profile(profile, redis_client):
                             return stream.id, profile.id, None, False
@@ -1009,7 +1015,12 @@ class Channel(models.Model):
                 )
                 stream_id = None
 
-            if stream_id is not None:
+            if stream_id is not None and stream_id in excluded:
+                logger.debug(
+                    f"Channel {self.uuid}: not reusing excluded stream assignment "
+                    f"stream={stream_id}"
+                )
+            elif stream_id is not None:
                 if self._stream_assignment_is_reusable(redis_client, stream_id):
                     profile_id_bytes = redis_client.get(f"stream_profile:{stream_id}")
                     if profile_id_bytes:
@@ -1037,6 +1048,8 @@ class Channel(models.Model):
 
         # Iterate through channel streams and their profiles
         for stream in self.streams.all().order_by("channelstream__order"):
+            if stream.id in excluded:
+                continue
             # Retrieve the M3U account associated with the stream.
             m3u_account = stream.m3u_account
             if not m3u_account:

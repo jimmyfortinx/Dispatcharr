@@ -309,6 +309,92 @@ def pick_channel_preview_target(channel, allowed_m3u_profiles=None):
     return None, None
 
 
+def _resolve_channel_assignment(
+    channel,
+    channel_id,
+    stream_id,
+    profile_id,
+    slot_reserved,
+    allowed_m3u_profiles,
+    override_stream_profile_id,
+):
+    """Resolve the playback URL of the stream that get_stream() assigned.
+
+    Returns the generate_stream_url tuple. On failure the URL is None, the
+    error is set, and a slot reserved for this assignment is released.
+    """
+    # get_stream() allocated a connection slot - ensure it's released on any error
+    try:
+        stream = Stream.objects.get(id=stream_id)
+        m3u_profile = next(
+            (
+                profile
+                for profiles in (allowed_m3u_profiles or {}).values()
+                for profile in profiles
+                if profile.id == profile_id
+            ),
+            None,
+        )
+        if m3u_profile is None:
+            m3u_profile = M3UAccountProfile.objects.select_related(
+                "m3u_account__user_agent"
+            ).get(id=profile_id)
+
+        m3u_account = m3u_profile.m3u_account
+
+        # Get the appropriate user agent
+        stream_context = _resolve_live_stream_context(stream, allow_malformed_link=True)
+        stream_user_agent = stream_context.get('user_agent')
+        if stream_user_agent is None:
+            stream_user_agent = m3u_account.get_user_agent_string()
+
+        if m3u_account.account_type == M3UAccount.Types.STALKER:
+            stream_url = transform_url(
+                stream_context['url'],
+                m3u_profile.search_pattern,
+                m3u_profile.replace_pattern,
+            )
+        else:
+            stream_url = _resolve_live_stream_url(
+                stream, m3u_account, m3u_profile
+            )
+        if not stream_url:
+            error_reason = (
+                "Failed to resolve stream URL for selected M3U profile "
+                "(credential transform did not match)"
+            )
+            if slot_reserved:
+                if not channel.release_stream():
+                    logger.warning(
+                        "Failed to release stream for channel %s after "
+                        "URL resolution failure",
+                        channel_id,
+                    )
+            return None, None, None, False, None, False, error_reason, None
+
+        # Check if transcoding is needed. An override resolves the profile as
+        # Proxy (transcode=False), regardless of the channel's saved profile --
+        # StreamManager's own promote-to-ffmpeg logic takes it from there.
+        if override_stream_profile_id is not None:
+            transcode = False
+            stream_profile_id = override_stream_profile_id
+        else:
+            stream_profile = channel.get_stream_profile()
+            if stream_profile.is_proxy() or stream_profile is None:
+                transcode = False
+            else:
+                transcode = True
+
+            stream_profile_id = stream_profile.id
+
+        return stream_url, stream_user_agent, stream_context.get('input_headers'), transcode, stream_profile_id, slot_reserved, None, stream.id
+    except Exception as e:
+        logger.error(f"Error generating stream URL for channel {channel_id}: {e}")
+        if slot_reserved and not channel.release_stream():
+            logger.warning(f"Failed to release stream for channel {channel_id} after URL generation error")
+        return None, None, None, False, None, False, str(e), None
+
+
 def generate_stream_url(
     channel_id: str,
     user=None,
@@ -422,85 +508,53 @@ def generate_stream_url(
         # Handle channel preview (existing logic)
         channel = channel_or_stream
 
-        stream_id, profile_id, error_reason, slot_reserved = channel.get_stream(
-            user,
-            allowed_m3u_profiles,
-        )
-
-        if not stream_id or not profile_id:
-            logger.error(f"No stream available for channel {channel_id}: {error_reason}")
-            return None, None, None, False, None, False, error_reason, None
-
-        # get_stream() allocated a connection slot - ensure it's released on any error
-        try:
-            stream = Stream.objects.get(id=stream_id)
-            m3u_profile = next(
-                (
-                    profile
-                    for profiles in (allowed_m3u_profiles or {}).values()
-                    for profile in profiles
-                    if profile.id == profile_id
-                ),
-                None,
-            )
-            if m3u_profile is None:
-                m3u_profile = M3UAccountProfile.objects.select_related(
-                    "m3u_account__user_agent"
-                ).get(id=profile_id)
-
-            m3u_account = m3u_profile.m3u_account
-
-            # Get the appropriate user agent
-            stream_context = _resolve_live_stream_context(stream, allow_malformed_link=True)
-            stream_user_agent = stream_context.get('user_agent')
-            if stream_user_agent is None:
-                stream_user_agent = m3u_account.get_user_agent_string()
-
-            if m3u_account.account_type == M3UAccount.Types.STALKER:
-                stream_url = transform_url(
-                    stream_context['url'],
-                    m3u_profile.search_pattern,
-                    m3u_profile.replace_pattern,
+        # A stream whose URL cannot be resolved (for example a portal that
+        # refuses the login) must not fail the whole channel: try the next one.
+        failed_stream_ids = []
+        last_error = None
+        while True:
+            if failed_stream_ids:
+                stream_id, profile_id, error_reason, slot_reserved = channel.get_stream(
+                    user,
+                    allowed_m3u_profiles,
+                    exclude_stream_ids=failed_stream_ids,
                 )
             else:
-                stream_url = _resolve_live_stream_url(
-                    stream, m3u_account, m3u_profile
+                stream_id, profile_id, error_reason, slot_reserved = channel.get_stream(
+                    user,
+                    allowed_m3u_profiles,
                 )
-            if not stream_url:
-                error_reason = (
-                    "Failed to resolve stream URL for selected M3U profile "
-                    "(credential transform did not match)"
-                )
-                if slot_reserved:
-                    if not channel.release_stream():
-                        logger.warning(
-                            "Failed to release stream for channel %s after "
-                            "URL resolution failure",
-                            channel_id,
-                        )
+
+            if not stream_id or not profile_id:
+                if last_error:
+                    logger.error(
+                        f"No working stream for channel {channel_id}: every stream tried "
+                        f"failed ({failed_stream_ids}); last error: {last_error}"
+                    )
+                    return None, None, None, False, None, False, last_error, None
+                logger.error(f"No stream available for channel {channel_id}: {error_reason}")
                 return None, None, None, False, None, False, error_reason, None
 
-            # Check if transcoding is needed. An override resolves the profile as
-            # Proxy (transcode=False), regardless of the channel's saved profile --
-            # StreamManager's own promote-to-ffmpeg logic takes it from there.
-            if override_stream_profile_id is not None:
-                transcode = False
-                stream_profile_id = override_stream_profile_id
-            else:
-                stream_profile = channel.get_stream_profile()
-                if stream_profile.is_proxy() or stream_profile is None:
-                    transcode = False
-                else:
-                    transcode = True
+            result = _resolve_channel_assignment(
+                channel,
+                channel_id,
+                stream_id,
+                profile_id,
+                slot_reserved,
+                allowed_m3u_profiles,
+                override_stream_profile_id,
+            )
+            if result[0] is not None or not slot_reserved:
+                # Success, or a reused assignment that belongs to a running
+                # channel: keep the previous behavior.
+                return result
 
-                stream_profile_id = stream_profile.id
-
-            return stream_url, stream_user_agent, stream_context.get('input_headers'), transcode, stream_profile_id, slot_reserved, None, stream.id
-        except Exception as e:
-            logger.error(f"Error generating stream URL for channel {channel_id}: {e}")
-            if slot_reserved and not channel.release_stream():
-                logger.warning(f"Failed to release stream for channel {channel_id} after URL generation error")
-            return None, None, None, False, None, False, str(e), None
+            last_error = result[6]
+            failed_stream_ids.append(stream_id)
+            logger.warning(
+                f"Could not resolve stream {stream_id} for channel {channel_id} "
+                f"({last_error}); trying the next stream"
+            )
     except Exception as e:
         logger.error(f"Error generating stream URL: {e}")
         return None, None, None, False, None, False, str(e), None

@@ -526,3 +526,60 @@ class StreamDefaultPreviewAssignmentTests(TestCase):
             self.redis.hget(self.metadata_key, ChannelMetadataField.STATE),
             ChannelState.STOPPED,
         )
+
+
+class ChannelGetStreamExcludeTests(ChannelGetStreamAssignmentTests):
+    """exclude_stream_ids skips streams that already failed during a start."""
+
+    def setUp(self):
+        super().setUp()
+        self.second_stream = Stream.objects.create(
+            name="Second Stream",
+            url="http://example.com/live/user/pass/2.ts",
+            m3u_account=self.account,
+        )
+        ChannelStream.objects.create(channel=self.channel, stream=self.second_stream, order=1)
+
+    @patch("apps.channels.models.RedisClient.get_client")
+    @patch("apps.channels.models.reserve_profile_slot", return_value=(True, 1, None))
+    def test_excluded_stream_is_skipped(self, _mock_reserve, mock_get_client):
+        mock_get_client.return_value = self.redis
+
+        stream_id, profile_id, error, slot_reserved = self.channel.get_stream(
+            exclude_stream_ids=[self.stream.id]
+        )
+
+        self.assertEqual(stream_id, self.second_stream.id)
+        self.assertEqual(profile_id, self.profile.id)
+        self.assertIsNone(error)
+        self.assertTrue(slot_reserved)
+
+    @patch("apps.channels.models.RedisClient.get_client")
+    @patch("apps.channels.models.reserve_profile_slot", return_value=(True, 1, None))
+    def test_excluded_stream_assignment_is_not_reused(self, _mock_reserve, mock_get_client):
+        mock_get_client.return_value = self.redis
+        self._seed_assignment()
+        self.redis.hset(
+            self.metadata_key,
+            {ChannelMetadataField.STATE: ChannelState.ACTIVE},
+        )
+
+        stream_id, _profile_id, _error, slot_reserved = self.channel.get_stream(
+            exclude_stream_ids=[self.stream.id]
+        )
+
+        self.assertEqual(stream_id, self.second_stream.id)
+        self.assertTrue(slot_reserved)
+
+    @patch("apps.channels.models.RedisClient.get_client")
+    @patch("apps.channels.models.reserve_profile_slot", return_value=(True, 1, None))
+    def test_every_stream_excluded_returns_no_stream(self, _mock_reserve, mock_get_client):
+        mock_get_client.return_value = self.redis
+
+        stream_id, profile_id, _error, slot_reserved = self.channel.get_stream(
+            exclude_stream_ids=[self.stream.id, self.second_stream.id]
+        )
+
+        self.assertIsNone(stream_id)
+        self.assertIsNone(profile_id)
+        self.assertFalse(slot_reserved)
